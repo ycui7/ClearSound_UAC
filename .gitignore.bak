@@ -1,0 +1,36 @@
+﻿/.build_*/
+/.metadata/
+/Example/
+/Library/WE/
+/deprecated/
+*designsrc/
+Altium_Library
+/Release/
+History
+Test Script
+Project Logs
+.svn
+~$*
+*.LOG
+*.PCBDOC.htm
+*.PrjPcb_loc
+*.PCBDOC_loc
+*.sldprt
+*.sldasm
+*.bak_cir
+*.TNO
+*.inx
+*autosave*.TSC
+*.DsnWrk
+*.raw
+*.PrjPcb.Zip
+*.PCBDOC.Zip
+*.schdoc.Zip
+*.AnnotationPreview
+*.schdocPreview
+*.PrjMbdStructure
+*.PrjPcbStructure
+*.SchDocPreview
+*.MbaDoc
+TODELETE*
+/Library/基础库.xlsx
