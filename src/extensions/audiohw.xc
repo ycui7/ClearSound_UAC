@@ -125,28 +125,6 @@ uint8_t i2c_reg_read(uint8_t device_addr, uint8_t reg, i2c_regop_res_t &result)
 /* CS2100 lists typical lock time as 100 * input period */
 #define AUDIO_PLL_LOCK_DELAY        (40000000)
 
-#define CS2100_REGWRITE(reg, val)                   {result = i2c_reg_write(CS2100_I2C_DEVICE_ADDR, reg, val);}
-#define CS2100_REGREAD_ASSERT(reg, data, expected)  {data[0] = i2c_reg_read(CS2100_I2C_DEVICE_ADDR, reg, result); assert(data[0] == expected);}
-#define CS2100_I2C_DEVICE_ADDRESS                   (0x4E)
-#define UNSAFE unsafe
-#include "../../shared/cs2100.h"
-#undef UNSAFE
-
-// PCA9540B (2-channel I2C-bus mux) I2C Slave Address
-#define PCA9540B_I2C_DEVICE_ADDR    (0x70)
-
-// PCM5122 (2-channel audio DAC) I2C Slave Addresses
-#define PCM5122_0_I2C_DEVICE_ADDR   (0x4C)
-#define PCM5122_1_I2C_DEVICE_ADDR   (0x4D)
-#define PCM5122_2_I2C_DEVICE_ADDR   (0x4E)
-#define PCM5122_3_I2C_DEVICE_ADDR   (0x4F)
-
-// PCM1865 (4-channel audio ADC) I2C Slave Addresses
-#define PCM1865_0_I2C_DEVICE_ADDR   (0x4A)
-#define PCM1865_1_I2C_DEVICE_ADDR   (0x4B)
-
-
-
 unsafe client interface i2c_master_if i_i2c_client;
 
 void WriteRegs(int deviceAddr, int numDevices, int regAddr, int regData)
@@ -163,31 +141,12 @@ void WriteRegs(int deviceAddr, int numDevices, int regAddr, int regData)
     }
 }
 
-/* Note, this function assumes contiguous devices addresses */
-void WriteAllDacRegs(int regAddr, int regData)
-{
-    WriteRegs(PCM5122_0_I2C_DEVICE_ADDR, 4, regAddr, regData);
-}
 
-/* Note, this function assumes contiguous devices addresses */
-void WriteAllAdcRegs(int regAddr, int regData)
-{
-    WriteRegs(PCM1865_0_I2C_DEVICE_ADDR, 2, regAddr, regData);
-}
-
-void SetI2CMux(int ch)
-{
-
-    // I2C mux takes the last byte written as the data for the control register.
-    // We can't send only one byte so we send two with the data in the last byte.
-    // We set "address" to 0 below as it's discarded by device.
-
-}
 
 /* Configures the external audio hardware at startup */
 void AudioHwInit()
 {
-    i2c_regop_res_t result;
+    // i2c_regop_res_t result;
 
     // Wait for power supply to come up.
     delay_milliseconds(100);
