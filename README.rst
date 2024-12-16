@@ -1,38 +1,37 @@
-XMOS xCORE-AI USB Audio
+XMOS xcore.ai USB Audio
 =======================
 
+:maintainer: Ross Owen
 :scope: Example
-:description: USB Audio application for xCORE-AI MC Audio
+:description: USB Audio application for xCORE.ai eXplorer board
 :keywords: USB, UAC
-:boards: XCORE-AI MC AUDIO (rev 1.0)
+:boards: XK-EVK-XU316 (rev 2.0)
 
 Overview
 ........
 
-The firmware provides a high-speed USB Audio device designed to be compliant to version 2.0 of the USB Audio Class Specification based on the XMOS AI device.
+The firmware provides a high-speed USB Audio device designed to be compliant to version 2.0 of the USB Audio Class Specification based on the XMOS xCORE.ai device.
+
+Note, this project only functions on revision 2 of the XK-EVK-XU316 board. Early versions of the hardware require modifications to both the hardware and software to operate correctly. 
 
 
 Key Features
 ............
 
-The app_usb_aud_xk_316_mc application is designed to run on the xCORE-AI MC Audio Board in. It uses the XMOS USB Audio framework to implement a USB Audio device with the following key features:
+The app_usb_aud_xk_evk_xu316 application is designed to run on the xCORE.ai eXplorer board. It uses the XMOS USB Audio framework to implement a USB Audio device with the following key features:
 
-- USB Audio Class 1.0/2.0 Compliant
+- USB Audio Class 2.0 Compliant
 
 - Fully Asynchronous operation
 
-- 8 channels analogue input and 8 channels analogue output (Via I2S to 4 x Stereo DACs and 2 x Quad-channel ADCs)
-
-- S/PDIF output (via COAX connector)
+- 2 channels analogue input and 2 channels analogue output (Via I2S to 1 x Stereo CODECs)
 
 - Supports for the following sample frequencies: 44.1, 48, 88.2, 96, 176.4, 192kHz
-
-- MIDI input and output
 
 Known Issues
 ............
 
-- Currently this application uses the internal Application PLL to generate fixed master clock frequencies only. Therefore syncing to any external stream is not possible (i.e. ADAT/SPDIF Rx)
+- None.
 
 See README in sw_usb_audio for general issues.
 

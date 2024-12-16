@@ -1,170 +1,251 @@
 #include <xs1.h>
-#include <assert.h>
 #include <platform.h>
 #include "xassert.h"
-#include "i2c.h"
 #include "xua.h"
+#include "i2c.h"
+#include "tlv320aic3204.h"
 
 extern "C" {
     #include "sw_pll.h"
 }
 
-#if (XUA_PCM_FORMAT == XUA_PCM_FORMAT_TDM) && (XUA_I2S_N_BITS != 32)
-#warning ADC only supports TDM operation at 32 bits
-#endif
+// CODEC I2C lines
+on tile[0]: port p_i2c_scl = XS1_PORT_1N;
+on tile[0]: port p_i2c_sda = XS1_PORT_1O;
 
-#ifndef I2S_LOOPBACK
-#define I2S_LOOPBACK             (0)
-#endif
+// CODEC reset line
+on tile[1]: out port p_codec_reset  = PORT_CODEC_RST_N;
 
-port p_scl = PORT_I2C_SCL;
-port p_sda = PORT_I2C_SDA;
-out port p_ctrl = PORT_CTRL;                /* p_ctrl:
-                                             * [0:3] - Unused
-                                             * [4]   - EN_3v3_N    (1v0 hardware only)
-                                             * [5]   - EN_3v3A
-                                             * [6]   - EXT_PLL_SEL (CS2100:0, SI: 1)
-                                             * [7]   - MCLK_DIR    (Out:0, In: 1)
-                                             */
+// CODEC Reset
+#define CODEC_RELEASE_RESET      (0x8) // Release codec from
 
-on tile[0]: in port p_margin = XS1_PORT_1G;  /* CORE_POWER_MARGIN:   Driven 0:   0.925v
-                                              *                      Pull down:  0.922v
-                                              *                      High-z:     0.9v
-                                              *                      Pull-up:    0.854v
-                                              *                      Driven 1:   0.85v
-                                              */
-
-#if ((XUA_SYNCMODE == XUA_SYNCMODE_SYNC || XUA_SPDIF_RX_EN || XUA_ADAT_RX_EN) && !XUA_USE_SW_PLL)
-/* Recover external clock using sw_pll by default when using digital Rx or sync mode.
-   Use CS2100 if XUA_USE_SW_PLL is set to 0. All other configs used a fixed clock
-   generared by sw_pll */
-#define USE_FRACTIONAL_N         (1)
-#else
-#define USE_FRACTIONAL_N         (0)
-#endif
-
-#if (USE_FRACTIONAL_N)
-#define EXT_PLL_SEL__MCLK_DIR    (0x00)
-#else
-#define EXT_PLL_SEL__MCLK_DIR    (0x80)
-#endif
-
-/* Board setup for XU316 MC Audio (1v1) */
-void board_setup()
+typedef enum
 {
-    /* "Drive high mode" - drive high for 1, non-driving for 0 */
-    set_port_drive_high(p_ctrl);
+    AUDIOHW_CMD_REGWR,
+    AUDIOHW_CMD_REGRD
+} audioHwCmd_t;
 
-    /* Ensure high-z for 0.9v */
-    p_margin :> void;
-
-    /* Drive control port to turn on 3V3 and mclk direction appropriately.
-     * Bits set to low will be high-z, pulled down */
-    p_ctrl <: EXT_PLL_SEL__MCLK_DIR | 0x20;
-
-    /* Wait for power supplies to be up and stable */
-    delay_milliseconds(10);
+static inline void AIC3204_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
+{
+    i2c_regop_res_t result;
+    val = i2c.read_reg(AIC3204_I2C_DEVICE_ADDR, reg, result);
 }
 
-/* Working around not being able to extend an unsafe interface (Bugzilla #18670)*/
-i2c_regop_res_t i2c_reg_write(uint8_t device_addr, uint8_t reg, uint8_t data)
+static inline void AIC3204_REGWRITE(unsigned reg, unsigned val, client interface i2c_master_if i2c)
 {
-    uint8_t a_data[2] = {reg, data};
-    size_t n;
-
-    unsafe
-    {
-        i_i2c_client.write(device_addr, a_data, 2, n, 1);
-    }
-
-    if (n == 0)
-    {
-        return I2C_REGOP_DEVICE_NACK;
-    }
-    if (n < 2)
-    {
-        return I2C_REGOP_INCOMPLETE;
-    }
-
-    return I2C_REGOP_SUCCESS;
+    i2c.write_reg(AIC3204_I2C_DEVICE_ADDR, reg, val);
 }
 
-uint8_t i2c_reg_read(uint8_t device_addr, uint8_t reg, i2c_regop_res_t &result)
+void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
 {
-    uint8_t a_reg[1] = {reg};
-    uint8_t data[1] = {0};
-    size_t n;
-    i2c_res_t res;
-
-    unsafe
+    while(1)
     {
-        res = i_i2c_client.write(device_addr, a_reg, 1, n, 0);
+        unsigned cmd;
+        c :> cmd;
 
-        if (n != 1)
+        if(cmd == AUDIOHW_CMD_REGRD)
         {
-            result = I2C_REGOP_DEVICE_NACK;
-            i_i2c_client.send_stop_bit();
-            return 0;
+            unsigned regAddr, regVal;
+            c :> regAddr;
+            AIC3204_REGREAD(regAddr, regVal, i2c);
+            c <: regVal;
         }
-
-        res = i_i2c_client.read(device_addr, data, 1, 1);
+        else
+        {
+            unsigned regAddr, regValue;
+            c :> regAddr;
+            c :> regValue;
+            AIC3204_REGWRITE(regAddr, regValue, i2c);
+        }
     }
+}
 
-    if (res == I2C_ACK)
+void AudioHwRemote(chanend c)
+{
+    i2c_master_if i2c[1];
+    par
     {
-        result = I2C_REGOP_SUCCESS;
+        i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 10);
+        AudioHwRemote2(c, i2c[0]);
+    }
+}
+
+unsafe chanend uc_audiohw;
+
+static inline void CODEC_REGWRITE(unsigned reg, unsigned val)
+{
+    unsafe
+    {
+        uc_audiohw <: (unsigned) AUDIOHW_CMD_REGWR;
+        uc_audiohw <: reg;
+        uc_audiohw <: val;
+    }
+}
+
+static inline void CODEC_REGREAD(unsigned reg, unsigned &val)
+{
+    unsafe
+    {
+        uc_audiohw <: (unsigned) AUDIOHW_CMD_REGRD;
+        uc_audiohw <: reg;
+        uc_audiohw :> val;
+    }
+}
+
+/* Note this is called from tile[1] but the I2C lines to the CODEC are on tile[0]
+ * use a channel to communicate CODEC reg read/writes to a remote core */
+void AudioHwInit()
+{
+    unsigned regVal = 0;
+
+    /* Take CODEC out of reset */
+    p_codec_reset <: CODEC_RELEASE_RESET;
+
+    delay_milliseconds(100);
+
+    // Check we can talk to the CODEC
+    CODEC_REGREAD(0x0b, regVal);
+
+    assert(regVal == 1 && msg("CODEC reg read problem"));
+
+    // Set register page to 0
+    CODEC_REGWRITE(AIC3204_PAGE_CTRL, 0x00);
+
+    // Initiate SW reset (PLL is powered off as part of reset)
+    CODEC_REGWRITE(AIC3204_SW_RST, 0x01);
+
+    // Program clock settings
+
+    // Default is CODEC_CLKIN is from MCLK pin. Don't need to change this.
+    // Power up NDAC and set to 1
+    CODEC_REGWRITE(AIC3204_NDAC, 0x81);
+
+    // Power up MDAC and set to 4
+    CODEC_REGWRITE(AIC3204_MDAC, 0x84);
+
+    // Power up NADC and set to 1
+    CODEC_REGWRITE(AIC3204_NADC, 0x81);
+
+    // Power up MADC and set to 4
+     CODEC_REGWRITE(AIC3204_MADC, 0x84);
+
+    // Program DOSR = 128
+    CODEC_REGWRITE(AIC3204_DOSR, 0x80);
+
+    // Program AOSR = 128
+    CODEC_REGWRITE(AIC3204_AOSR, 0x80);
+
+    // Set Audio Interface Config: I2S, 24 bits, slave mode, DOUT always driving.
+    //   CODEC_REGWRITE(AIC3204_CODEC_IF, 0x20);
+    CODEC_REGWRITE(AIC3204_CODEC_IF, 0x30);     // 32 bit mode
+    // Program the DAC processing block to be used - PRB_P1
+    CODEC_REGWRITE(AIC3204_DAC_SIG_PROC, 0x01);
+    // Program the ADC processing block to be used - PRB_R1
+    CODEC_REGWRITE(AIC3204_ADC_SIG_PROC, 0x01);
+    // Select Page 1
+    CODEC_REGWRITE(AIC3204_PAGE_CTRL, 0x01);
+    // Enable the internal AVDD_LDO:
+    CODEC_REGWRITE(AIC3204_LDO_CTRL, 0x09);
+    //
+    // Program Analog Blocks
+    // ---------------------
+    //
+    // Disable Internal Crude AVdd in presence of external AVdd supply or before powering up internal AVdd LDO
+    CODEC_REGWRITE(AIC3204_PWR_CFG, 0x08);
+    // Enable Master Analog Power Control
+    CODEC_REGWRITE(AIC3204_LDO_CTRL, 0x01);
+    // Set Common Mode voltages: Full Chip CM to 0.9V and Output Common Mode for Headphone to 1.65V and HP powered from LDOin @ 3.3V.
+    CODEC_REGWRITE(AIC3204_CM_CTRL, 0x33);
+    // Set PowerTune Modes
+    // Set the Left & Right DAC PowerTune mode to PTM_P3/4. Use Class-AB driver.
+    CODEC_REGWRITE(AIC3204_PLAY_CFG1, 0x00);
+    CODEC_REGWRITE(AIC3204_PLAY_CFG2, 0x00);
+    // Set ADC PowerTune mode PTM_R4.
+    CODEC_REGWRITE(AIC3204_ADC_PTM, 0x00);
+    // Set MicPGA startup delay to 3.1ms
+    CODEC_REGWRITE(AIC3204_AN_IN_CHRG, 0x31);
+    // Set the REF charging time to 40ms
+    CODEC_REGWRITE(AIC3204_REF_STARTUP, 0x01);
+    // HP soft stepping settings for optimal pop performance at power up
+    // Rpop used is 6k with N = 6 and soft step = 20usec. This should work with 47uF coupling
+    // capacitor. Can try N=5,6 or 7 time constants as well. Trade-off delay vs �pop� sound.
+    CODEC_REGWRITE(AIC3204_HP_START, 0x25);
+    // Route Left DAC to HPL
+    CODEC_REGWRITE(AIC3204_HPL_ROUTE, 0x08);
+    // Route Right DAC to HPR
+    CODEC_REGWRITE(AIC3204_HPR_ROUTE, 0x08);
+    // We are using Line input with low gain for PGA so can use 40k input R but lets stick to 20k for now.
+    // Route IN2_L to LEFT_P with 20K input impedance
+    CODEC_REGWRITE(AIC3204_LPGA_P_ROUTE, 0x20);
+    // Route IN2_R to LEFT_M with 20K input impedance
+    CODEC_REGWRITE(AIC3204_LPGA_N_ROUTE, 0x20);
+    // Route IN1_R to RIGHT_P with 20K input impedance
+    CODEC_REGWRITE(AIC3204_RPGA_P_ROUTE, 0x80);
+    // Route IN1_L to RIGHT_M with 20K input impedance
+    CODEC_REGWRITE(AIC3204_RPGA_N_ROUTE, 0x20);
+    // Unmute HPL and set gain to 0dB
+    CODEC_REGWRITE(AIC3204_HPL_GAIN, 0x00);
+    // Unmute HPR and set gain to 0dB
+    CODEC_REGWRITE(AIC3204_HPR_GAIN, 0x00);
+    // Unmute Left MICPGA, Set Gain to 0dB.
+    CODEC_REGWRITE(AIC3204_LPGA_VOL, 0x00);
+    // Unmute Right MICPGA, Set Gain to 0dB.
+    CODEC_REGWRITE(AIC3204_RPGA_VOL, 0x00);
+    // Power up HPL and HPR drivers
+    CODEC_REGWRITE(AIC3204_OP_PWR_CTRL, 0x30);
+
+    // Wait for 2.5 sec for soft stepping to take effect
+    delay_milliseconds(2500);
+
+    //
+    // Power Up DAC/ADC
+    // ----------------
+    //
+    // Select Page 0
+    CODEC_REGWRITE(AIC3204_PAGE_CTRL, 0x00);
+    // Power up the Left and Right DAC Channels. Route Left data to Left DAC and Right data to Right DAC.
+    // DAC Vol control soft step 1 step per DAC word clock.
+    CODEC_REGWRITE(AIC3204_DAC_CH_SET1, 0xd4);
+    // Power up Left and Right ADC Channels, ADC vol ctrl soft step 1 step per ADC word clock.
+    CODEC_REGWRITE(AIC3204_ADC_CH_SET, 0xc0);
+    // Unmute Left and Right DAC digital volume control
+    CODEC_REGWRITE(AIC3204_DAC_CH_SET2, 0x00);
+    // Unmute Left and Right ADC Digital Volume Control.
+    CODEC_REGWRITE(AIC3204_ADC_FGA_MUTE, 0x00);
+
+    delay_milliseconds(1);
+
+    assert(DEFAULT_FREQ >= 22050);
+
+    // Set the fractional divider if used
+    if(DEFAULT_FREQ % 22050 == 0)
+    {
+        sw_pll_fixed_clock(MCLK_441);
     }
     else
     {
-        result = I2C_REGOP_DEVICE_NACK;
-    }
-    return data[0];
-}
-
-/* The number of timer ticks to wait for the audio PLL to lock */
-/* CS2100 lists typical lock time as 100 * input period */
-#define AUDIO_PLL_LOCK_DELAY        (40000000)
-
-unsafe client interface i2c_master_if i_i2c_client;
-
-void WriteRegs(int deviceAddr, int numDevices, int regAddr, int regData)
-{
-    i2c_regop_res_t result;
-
-    for(int i = deviceAddr; i < (deviceAddr + numDevices); i++)
-    {
-        unsafe
-        {
-            result = i2c_reg_write(i, regAddr, regData);
-        }
-        assert(result == I2C_REGOP_SUCCESS && msg("I2C write reg failed"));
-    }
-}
-
-
-
-/* Configures the external audio hardware at startup */
-void AudioHwInit()
-{
-    // i2c_regop_res_t result;
-
-    // Wait for power supply to come up.
-    delay_milliseconds(100);
-
-    /* Wait until global is set */
-    unsafe
-    {
-        while(!(unsigned) i_i2c_client);
+        sw_pll_fixed_clock(MCLK_48);
     }
 
-}
-
-/* Configures the external audio hardware for the required sample frequency */
-void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode, unsigned sampRes_DAC, unsigned sampRes_ADC)
-{
-    delay_milliseconds(3);  // Wait for mute to take effect. This takes 104 samples, this is 2.4ms @ 44.1kHz. So lets say 3ms to cover everything.
-    // WriteAllDacRegs(PCM5122_STANDBY_PWDN,   0x00); // Set DAC in run mode (no standby or powerdown)
     delay_milliseconds(1);
-    // WriteAllDacRegs(PCM5122_MUTE,           0x00); // Un-mute both channels
+}
+
+/* Configures the external audio hardware for the required sample frequency.
+ * See gpio.h for I2C helper functions and gpio access
+ */
+void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
+    unsigned sampRes_DAC, unsigned sampRes_ADC)
+{
+    assert(samFreq >= 22050);
+
+    // Set the AppPLL up to output MCLK.
+    if ((samFreq % 22050) == 0)
+    {
+        sw_pll_fixed_clock(MCLK_441);
+    }
+    else if ((samFreq % 24000) == 0)
+    {
+        sw_pll_fixed_clock(MCLK_48);
+    }
 }
 

@@ -1,54 +1,27 @@
 cmake_minimum_required(VERSION 3.21)
 include($ENV{XMOS_CMAKE_PATH}/xcommon.cmake)
-project(app_usb_aud_xk_316_mc)
+project(app_usb_aud_xk_evk_xu316)
 
-set(APP_HW_TARGET xk-audio-316-mc.xn)
+set(APP_HW_TARGET XK-EVK-XU316)
 include(${CMAKE_CURRENT_LIST_DIR}/../deps.cmake)
 set(APP_PCA_ENABLE ON)
-set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -O3
+set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -fcomment-asm
+                                            -Wall
+                                            -O3
                                             -report
                                             -lquadflash
                                             -g
                                             -fxscope
                                             -DUSB_TILE=tile[0]
                                             -DADAT_TX_USE_SHARED_BUFF=1
-                                            -DXUA_QUAD_SPI_FLASH=1)
+                                            -DXUA_QUAD_SPI_FLASH=1
+                                            -DXSCOPE
+                                            -DUAC_FORCE_FEEDBACK=1)
 
 set(APP_COMPILER_FLAGS_1AMi2o2xxxxxx ${SW_USB_AUDIO_FLAGS} -DAUDIO_CLASS=1)
 
-set(APP_COMPILER_FLAGS_2AMi2o2xxxxxx ${SW_USB_AUDIO_FLAGS} -DI2S_CHANS_DAC=2
-                                                           -DI2S_CHANS_ADC=2)
+set(APP_COMPILER_FLAGS_2AMi2o2xxxxxx ${SW_USB_AUDIO_FLAGS})
 
-set(APP_COMPILER_FLAGS_2AMi8o8xxxxxx ${SW_USB_AUDIO_FLAGS})
-
-set(APP_COMPILER_FLAGS_2AMi8o8xxxxxx_mix8 ${SW_USB_AUDIO_FLAGS} -DMAX_MIX_COUNT=8)
-
-set(APP_COMPILER_FLAGS_2AMi8o8xxxxxx_tdm8 ${SW_USB_AUDIO_FLAGS} -DXUA_PCM_FORMAT=XUA_PCM_FORMAT_TDM
-                                                                -DMAX_FREQ=96000)
-
-set(APP_COMPILER_FLAGS_2ASi8o8xxxxxx_tdm8 ${SW_USB_AUDIO_FLAGS} -DCODEC_MASTER=1
-                                                                -DXUA_PCM_FORMAT=XUA_PCM_FORMAT_TDM
-                                                                -DMAX_FREQ=96000)
-
-set(APP_COMPILER_FLAGS_2AMi8o8mxxxxx ${SW_USB_AUDIO_FLAGS} -DMIDI=1)
-
-set(APP_COMPILER_FLAGS_2AMi10o10xssxxx ${SW_USB_AUDIO_FLAGS} -DXUA_SPDIF_TX_EN=1
-                                                             -DXUA_SPDIF_RX_EN=1)
-
-set(APP_COMPILER_FLAGS_2AMi16o16xxxaax ${SW_USB_AUDIO_FLAGS} -DXUA_ADAT_RX_EN=1 -DXUA_ADAT_TX_EN=1)
-
-set(APP_COMPILER_FLAGS_2AMi18o18mssaax ${SW_USB_AUDIO_FLAGS} -DMIDI=1 -DXUA_ADAT_RX_EN=1 -DXUA_ADAT_TX_EN=1 -DXUA_SPDIF_TX_EN=1 -DXUA_SPDIF_RX_EN=1 -DMAX_FREQ=96000)
-
-set(APP_COMPILER_FLAGS_1SMi2o2xxxxxx ${SW_USB_AUDIO_FLAGS} -DAUDIO_CLASS=1
-                                                           -DXUA_SYNCMODE=XUA_SYNCMODE_SYNC)
-
-set(APP_COMPILER_FLAGS_2SMi8o8xxxxxx ${SW_USB_AUDIO_FLAGS} -DXUA_SYNCMODE=XUA_SYNCMODE_SYNC)
-
-set(APP_COMPILER_FLAGS_2SSi8o8xxxxxx ${SW_USB_AUDIO_FLAGS} -DXUA_SYNCMODE=XUA_SYNCMODE_SYNC
-                                                           -DCODEC_MASTER=1)
-
-include(${CMAKE_CURRENT_LIST_DIR}/configs_partial.cmake)
-include(${CMAKE_CURRENT_LIST_DIR}/configs_build.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/configs_test.cmake)
 
 set(APP_INCLUDES src src/core src/extensions)
