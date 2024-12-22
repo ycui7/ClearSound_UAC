@@ -1,8 +1,13 @@
+// Copyright 2021-2024 XMOS LIMITED.
+// This Software is subject to the terms of the XMOS Public Licence: Version 1.
 
 #ifndef _USER_MAIN_H_
 #define _USER_MAIN_H_
 
 #ifdef __XC__
+
+#include <platform.h>
+
 void AudioHwRemote(chanend c);
 
 extern unsafe chanend uc_audiohw;

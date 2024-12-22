@@ -77,12 +77,12 @@
 #endif
 
 /* Master clock defines (in Hz) */
-#define MCLK_441           (1024*44100)   /* 44.1, 88.2 etc */
-#define MCLK_48            (1024*48000)   /* 48, 96 etc */
+#define MCLK_441           (512*44100)   /* 44.1, 88.2 etc */
+#define MCLK_48            (512*48000)   /* 48, 96 etc */
 
 /* Maximum frequency device runs at */
 #ifndef MAX_FREQ
-#define MAX_FREQ           (384000)
+#define MAX_FREQ           (192000)
 #endif
 
 //:

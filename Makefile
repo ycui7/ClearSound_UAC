@@ -3,16 +3,16 @@
 # or a valid argument for the --target option when compiling.
 
 TARGET = ClearSoundDac.xn
-APP_NAME =
+APP_NAME = ClearSoundDac
 
 # The flags passed to xcc when building the application
 # The EXTRA_BUILD_FLAGS variable can be used on the xmake command line to add options
-BUILD_FLAGS    = $(EXTRA_BUILD_FLAGS) -fcomment-asm -Xmapper --map -Xmapper MAPFILE -Wall -O3 -report -lquadflash -g -fxscope -DXSCOPE -DUSB_TILE=tile[0] -DXUA_QUAD_SPI_FLASH=1 -DADAT_TX_USE_SHARED_BUFF=1
+BUILD_FLAGS    = $(EXTRA_BUILD_FLAGS) -fcomment-asm -Xmapper --map -Xmapper MAPFILE -Wall -O3 -report -lquadflash -g -fxscope -DXSCOPE -DBOARD_SUPPORT_BOARD=ClearSoundDac -DUSB_TILE=tile[0] -DXUA_QUAD_SPI_FLASH=1 -DADAT_TX_USE_SHARED_BUFF=1 -DDEBUG_PRINT_ENABLE=1
 
 # The USED_MODULES variable lists other module used by the application. These
 # modules will extend the SOURCE_DIRS, INCLUDE_DIRS and LIB_DIRS variables.
 # Modules are expected to be in the directory above the BASE_DIR directory.
-USED_MODULES = lib_sw_pll lib_xua lib_i2c
+USED_MODULES = lib_sw_pll lib_xua lib_i2c 
 
 # Build config naming scheme:
 
@@ -38,13 +38,6 @@ USED_MODULES = lib_sw_pll lib_xua lib_i2c
 # Audio Class 2, Async, I2S Master, 2xInput, 2xOutput
 XCC_FLAGS_2AMi2o2xxxxxx = $(BUILD_FLAGS)
 INCLUDE_ONLY_IN_2AMi2o2xxxxxx =
-
-
-TEST_SUPPORT_CONFIGS ?= 0
-ifeq ($(TEST_SUPPORT_CONFIGS),1)
-include configs_test.inc
-endif
-
 
 #=============================================================================
 # The following part of the Makefile includes the common build infrastructure

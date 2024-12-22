@@ -1,0 +1,5 @@
+<xSCOPEconfig ioMode="basic" enabled="true">
+  <Probe name="Tile0 Result" type="CONTINUOUS" datatype="UINT" units="mV" enabled="true"/>
+  <Probe name="Tile1 i" type="CONTINUOUS" datatype="UINT" units="mV" enabled="true"/>
+  <Probe name="Tile1 Accumulation" type="CONTINUOUS" datatype="UINT" units="mV" enabled="true"/>
+</xSCOPEconfig>
