@@ -88,9 +88,14 @@
 //:
 /***** Defines relating to USB descriptors etc *****/
 //:usb_defs
-#define VENDOR_ID          (0x20B1) /* XMOS VID */
-#define PID_AUDIO_2        (0x0018)
-#define PID_AUDIO_1        (0x0019)
+#define VENDOR_ID		(0x20B1) /* XMOS VID */
+#define PID_AUDIO_2		(0x0018)
+#define PID_AUDIO_1		(0x0019)
+#define VENDOR_STR		"SpecialtyCircuits LLC"
+#define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
+#define PRODUCT_STR_A1	"ClearSound DAC (UAC1.0)"
+
+
 
 #ifndef DFU_PID
 #if (AUDIO_CLASS == 1)
