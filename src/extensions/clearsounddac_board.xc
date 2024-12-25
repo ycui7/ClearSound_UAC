@@ -63,18 +63,21 @@ void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
             break;
         }
     }
+
 }
 
 void csd_AudioHwRemote(chanend c)
 {
 
     i2c_master_if i2c[1];
+
     [[combine]]
-    par
+	 par
     {
         i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 10);
         AudioHwRemote2(c, i2c[0]);
     }
+
 }
 
 unsafe chanend uc_audiohw;
@@ -112,10 +115,10 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
 
     /* Take CODEC out of reset */
-    p_codec_reset <: CODEC_RELEASE_RESET;
+// for debuggig disable this to get through    p_codec_reset <: CODEC_RELEASE_RESET;
 
     delay_milliseconds(100);
-
+/* 
     // Check we can talk to the CODEC
     CODEC_REGREAD(0x0b, regVal);
 
@@ -225,9 +228,9 @@ void csd_AudioHwInit(const csd_config_t &config)
     CODEC_REGWRITE(ES9219Q_DAC_CH_SET2, 0x00);
     // Unmute Left and Right ADC Digital Volume Control.
     CODEC_REGWRITE(ES9219Q_ADC_FGA_MUTE, 0x00);
+ */
 
     delay_milliseconds(1);
-
 
     // Set the fractional divider if used
     sw_pll_fixed_clock(config.default_mclk);
