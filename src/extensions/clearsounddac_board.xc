@@ -13,8 +13,8 @@ extern "C" {
 
 
 // CODEC I2C lines
-on tile[0]: port p_i2c_scl = XS1_PORT_1N;
-on tile[0]: port p_i2c_sda = XS1_PORT_1O;
+on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
+on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
 
 // CODEC reset line
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
