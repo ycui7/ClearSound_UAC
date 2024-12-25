@@ -3,7 +3,7 @@
 #include "xua.h"
 #include "clearsounddac_board.h"
 
-#define DEBUG_UNIT unit
+//#define DEBUG_UNIT unit
 #include <debug_print.h>
 
 
