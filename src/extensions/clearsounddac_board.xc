@@ -75,7 +75,7 @@ void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
                     c :> regAddr;
                     c :> regValue;
                     debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
-                    ES9219Q_REGWRITE(regAddr, regValue, i2c);
+                    p_codec_reset <: regValue;
                 } 
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -161,17 +161,17 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
 
     /* Take CODEC out of reset */
-    GPIO_WR(0x0b, regVal);
-
-// for debuggig disable this to get through    p_codec_reset <: CODEC_RELEASE_RESET;
+    //  ==> on evk p_codec_reset <: CODEC_RELEASE_RESET;
+    GPIO_WR(0x0b, CODEC_RELEASE_RESET);
 
     delay_milliseconds(100);
-/* 
+ 
     // Check we can talk to the CODEC
-    CODEC_REGREAD(0x0b, regVal);
+    CODEC_REGREAD(0x40, regVal);
+    debug_printf("ChipIdRegValue:\t%d\n", regVal );
 
-    assert(regVal == 1 && msg("CODEC reg read problem"));
-
+    assert(regVal == 1 && msg("DAC Chip ID Register Read Problem"));
+/*
     // Set register page to 0
     CODEC_REGWRITE(ES9219Q_PAGE_CTRL, 0x00);
 

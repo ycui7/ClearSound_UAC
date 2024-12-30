@@ -1,6 +1,7 @@
 #ifndef ES9219Q_H_
 #define ES9219Q_H_
 
+#define ES9219Q_SYNCHRONOUS_I2C_DEVICE_ADDR      (0x94)     //for setting up PLL before system clock is available. 
 #define ES9219Q_I2C_DEVICE_ADDR      (0x90)
 
 #define ES9219Q_DEVICE_CONTROL       (0x02)
@@ -55,4 +56,4 @@
 #define ES9219Q_AN_IN_CHRG    0x47 // Register 71 - Analog Input Quick Charging Config
 #define ES9219Q_REF_STARTUP   0x7B // Register 123 - Reference Power Up Config
 
-#endif /* TLV320ES9219Q_H_ */
+#endif /* ES9219Q_H_ */
