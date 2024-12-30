@@ -11,6 +11,7 @@ extern "C" {
     #include "sw_pll.h"
 }
 
+#include <debug_print.h>
 
 // CODEC I2C lines
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
@@ -55,6 +56,27 @@ void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
                     c :> regValue;
                     ES9219Q_REGWRITE(regAddr, regValue, i2c);
                 }
+                else if (cmd ==AUDIOHW_CMD_GPIORD)
+                {
+                    debug_printf("AudioHwRemote_GPIO_Read_Entering\n");
+                    return;
+                    //  add gpio read
+                    unsigned regAddr, regVal;
+                    c :> regAddr;
+                    ES9219Q_REGREAD(regAddr, regVal, i2c);
+                    c <: regVal;
+                    debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
+                }
+                else if (cmd ==AUDIOHW_CMD_GPIOWR)
+                {
+                    debug_printf("AudioHwRemote_GPIO_Write_Entering\n");
+                    // add gpio write
+                    unsigned regAddr, regValue;
+                    c :> regAddr;
+                    c :> regValue;
+                    debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
+                    ES9219Q_REGWRITE(regAddr, regValue, i2c);
+                } 
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
                     i2c.shutdown();
@@ -102,6 +124,30 @@ static inline void CODEC_REGREAD(unsigned reg, unsigned &val)
     }
 }
 
+static inline void GPIO_WR(unsigned reg, unsigned val)
+{
+    debug_printf("AudioHwRemote_GPIO_Write_Requesting\n");
+    unsafe
+    {
+        uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIOWR;
+        uc_audiohw <: reg;
+        uc_audiohw <: val;
+        debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIOWR, reg, val );
+    }
+}
+
+static inline void GPIO_RD(unsigned reg, unsigned &val)
+{
+    debug_printf("AudioHwRemote_GPIO_Read_Requesting\n");
+    unsafe
+    {
+        uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIORD;
+        uc_audiohw <: reg;
+        uc_audiohw :> val;
+        debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIORD, reg, val );
+    }
+}
+
 void csd_AudioHwChanInit(chanend c)
 {
     unsafe{uc_audiohw = c;}
@@ -115,6 +161,8 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
 
     /* Take CODEC out of reset */
+    GPIO_WR(0x0b, regVal);
+
 // for debuggig disable this to get through    p_codec_reset <: CODEC_RELEASE_RESET;
 
     delay_milliseconds(100);

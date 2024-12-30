@@ -30,7 +30,9 @@ typedef enum
 {
     AUDIOHW_CMD_REGWR,
     AUDIOHW_CMD_REGRD,
-    AUDIOHW_CMD_EXIT
+    AUDIOHW_CMD_EXIT,
+    AUDIOHW_CMD_GPIORD,
+    AUDIOHW_CMD_GPIOWR
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 
