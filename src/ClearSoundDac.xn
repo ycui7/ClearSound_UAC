@@ -21,14 +21,8 @@
             <Port Location="XS1_PORT_1C" Name="PORT_SQI_SCLK"/>
             <Port Location="XS1_PORT_4B" Name="PORT_SQI_SIO"/>
             
-            <Port Location="XS1_PORT_4C" Name="PORT_LEDS"/>		<!-- TBD -->
-            <Port Location="XS1_PORT_4D" Name="PORT_BUTTONS"/>	<!-- TBD -->
-			<Port Location="XS1_PORT_1M"  Name="PORT_Button1"/>	<!-- TBD -->
-            <Port Location="XS1_PORT_1N"  Name="PORT_Button2"/>	<!-- TBD -->
-			<Port Location="XS1_PORT_4A" Name="PORT_CODEC_RST_N"/>	<!-- TBD -->
-
-			
-			<Port Location="XS1_PORT_1O"  Name="PORT_I2C_SCL"/>
+			      <Port Location="XS1_PORT_8D" Name="PORT_CODEC_RST_N"/>	<!-- TBD -->
+  	      	<Port Location="XS1_PORT_1O"  Name="PORT_I2C_SCL"/>
             <Port Location="XS1_PORT_1P"  Name="PORT_I2C_SDA"/>
             
           </Tile>

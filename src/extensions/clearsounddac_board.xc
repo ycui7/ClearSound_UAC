@@ -21,18 +21,20 @@ on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
 
 // CODEC Reset bit mask
-#define CODEC_RELEASE_RESET      (0x8) // Release codec from reset
+#define CODEC_RELEASE_RESET      (0x30) // Release codec from reset
 
 
 static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
 {
     i2c_regop_res_t result;
     val = i2c.read_reg(ES9219Q_I2C_DEVICE_ADDR, reg, result);
+    debug_printf("I2C_Read:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_I2C_DEVICE_ADDR, reg, val );
 }
 
 static inline void ES9219Q_REGWRITE(unsigned reg, unsigned val, client interface i2c_master_if i2c)
 {
     i2c.write_reg(ES9219Q_I2C_DEVICE_ADDR, reg, val);
+    debug_printf("I2C_Write:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_I2C_DEVICE_ADDR, reg, val );
 }
 
 [[combinable]]
@@ -65,7 +67,7 @@ void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
                     c :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c <: regVal;
-                    debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
+                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
                 }
                 else if (cmd ==AUDIOHW_CMD_GPIOWR)
                 {
@@ -74,7 +76,7 @@ void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
                     unsigned regAddr, regValue;
                     c :> regAddr;
                     c :> regValue;
-                    debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
+                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
                     p_codec_reset <: regValue;
                 } 
                 else if (cmd == AUDIOHW_CMD_EXIT)
@@ -111,6 +113,8 @@ static inline void CODEC_REGWRITE(unsigned reg, unsigned val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_REGWR;
         uc_audiohw <: reg;
         uc_audiohw <: val;
+        debug_printf("I2C_WRITE:\tAddr:%d\tValue:%d\n", reg, val );
+
     }
 }
 
@@ -132,7 +136,7 @@ static inline void GPIO_WR(unsigned reg, unsigned val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIOWR;
         uc_audiohw <: reg;
         uc_audiohw <: val;
-        debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIOWR, reg, val );
+        debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, reg, val );
     }
 }
 
@@ -144,7 +148,7 @@ static inline void GPIO_RD(unsigned reg, unsigned &val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIORD;
         uc_audiohw <: reg;
         uc_audiohw :> val;
-        debug_printf("Cmd:\t%d\tPin:%d\tValue:%d\n", AUDIOHW_CMD_GPIORD, reg, val );
+        debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, reg, val );
     }
 }
 
@@ -159,6 +163,8 @@ void csd_AudioHwChanInit(chanend c)
 void csd_AudioHwInit(const csd_config_t &config)
 {
     unsigned regVal = 0;
+    debug_printf("=====================================================\n");
+
 
     /* Take CODEC out of reset */
     //  ==> on evk p_codec_reset <: CODEC_RELEASE_RESET;
@@ -168,9 +174,14 @@ void csd_AudioHwInit(const csd_config_t &config)
  
     // Check we can talk to the CODEC
     CODEC_REGREAD(0x40, regVal);
-    debug_printf("ChipIdRegValue:\t%d\n", regVal );
+    debug_printf("ChipIdRegValue:\t0x%x\n", regVal );
 
-    assert(regVal == 1 && msg("DAC Chip ID Register Read Problem"));
+    for (unsigned i = 0 ; i < 255 ; i++){
+        CODEC_REGREAD(i, regVal);
+        //debug_printf("Add:\t0x%x\tValue:\t0x%x\n", i, regVal );
+    }
+
+//  assert(regVal == 1 && msg("DAC Chip ID Register Read Problem"));
 /*
     // Set register page to 0
     CODEC_REGWRITE(ES9219Q_PAGE_CTRL, 0x00);
@@ -282,6 +293,8 @@ void csd_AudioHwInit(const csd_config_t &config)
 
     // Set the fractional divider if used
     sw_pll_fixed_clock(config.default_mclk);
+    debug_printf("sw_pll_fixed_clock_Done\n");
+
 
     delay_milliseconds(1);
 }
@@ -295,5 +308,7 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     assert(samFreq >= 22050);
 
     sw_pll_fixed_clock(mClk);
+    debug_printf("sw_pll_fixed_clock_Done\n");
+
 }
 

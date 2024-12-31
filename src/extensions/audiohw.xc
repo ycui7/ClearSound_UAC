@@ -41,6 +41,6 @@ void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     unsigned sampRes_DAC, unsigned sampRes_ADC)
 {
 	debug_printf("AudioHWConfig:F:%d\tMCK:%d\tDAC:%d,ADC:%d\r\n",samFreq, mClk, sampRes_DAC, sampRes_ADC );
-	//csd_AudioHwConfig(samFreq, mClk, dsdMode, sampRes_DAC, sampRes_ADC);
+	csd_AudioHwConfig(samFreq, mClk, dsdMode, sampRes_DAC, sampRes_ADC);
 }
 
