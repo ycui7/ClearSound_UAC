@@ -183,9 +183,6 @@ void csd_AudioHwInit(const csd_config_t &config)
 
 //  assert(regVal == 1 && msg("DAC Chip ID Register Read Problem"));
 /*
-    // Set register page to 0
-    CODEC_REGWRITE(ES9219Q_PAGE_CTRL, 0x00);
-
     // Initiate SW reset (PLL is powered off as part of reset)
     CODEC_REGWRITE(ES9219Q_SW_RST, 0x01);
 
@@ -276,8 +273,6 @@ void csd_AudioHwInit(const csd_config_t &config)
     // Power Up DAC/ADC
     // ----------------
     //
-    // Select Page 0
-    CODEC_REGWRITE(ES9219Q_PAGE_CTRL, 0x00);
     // Power up the Left and Right DAC Channels. Route Left data to Left DAC and Right data to Right DAC.
     // DAC Vol control soft step 1 step per DAC word clock.
     CODEC_REGWRITE(ES9219Q_DAC_CH_SET1, 0xd4);
