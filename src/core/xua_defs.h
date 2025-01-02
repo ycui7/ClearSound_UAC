@@ -98,11 +98,11 @@
 
 
 #ifndef DFU_PID
-#if (AUDIO_CLASS == 1)
-#define DFU_PID             (0xD000 + PID_AUDIO_1)
-#else
-#define DFU_PID             (0xD000 + PID_AUDIO_2)
-#endif
+    #if (AUDIO_CLASS == 1)
+        #define DFU_PID             (0xD000 + PID_AUDIO_1)
+    #else
+        #define DFU_PID             (0xD000 + PID_AUDIO_2)
+    #endif
 #endif
 
 //:
