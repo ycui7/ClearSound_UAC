@@ -191,6 +191,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
     debug_printf("=====================================================\n");
 
+
     // start up sequence per ESS application note
     DAC_PLL_REGWRITE    (201 ,   0x19); //Set DAC Clock input to MCLK
     DAC_PLL_REGWRITE    (193 ,   0xC0); //Turn On PLL Charge Pump and VCo
@@ -201,17 +202,18 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_PLL_REGWRITE    (198 ,   0x02); //Set Clock_OUT_Div = 2, and PFE_DELAY to 1.5ns
     DAC_PLL_REGWRITE    (199 ,   0xC2); 
     DAC_PLL_REGWRITE    (200 ,   0x0C); //Turn On PLL regulators as final step
+    delay_milliseconds(100);
     
     /* Take CODEC out of reset */
     //  ==> on evk p_codec_reset <: CODEC_RELEASE_RESET;
     GPIO_WR(0x0b, CODEC_RELEASE_RESET);
-
     delay_milliseconds(100);
- 
+    
     // Check we can talk to the CODDAC(0x40, regVal);
+    DAC_REGREAD(0x40, regVal);
     debug_printf("ChipIdRegValue:\t0x%x\n", regVal );
 
-    for (unsigned i = 0 ; i < 255 ; i++ ){
+    for (unsigned i = 0 ; i < 64 ; i++ ){
         DAC_REGREAD(i, regVal);
     }
 
