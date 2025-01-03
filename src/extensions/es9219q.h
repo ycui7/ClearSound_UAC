@@ -1,8 +1,8 @@
 #ifndef ES9219Q_H_
 #define ES9219Q_H_
 
-#define ES9219Q_SYNC_I2C_DEVICE_ADDR        (0x94)     //for setting up PLL before system clock is available. 
-#define ES9219Q_I2C_DEVICE_ADDR             (0x90)
+#define ES9219Q_SYNC_I2C_DEVICE_ADDR        (0x94>>1)     //for setting up PLL before system clock is available. 
+#define ES9219Q_I2C_DEVICE_ADDR             (0x90>>1)
 
 
 //	Mnemonic constants 
@@ -15,7 +15,7 @@
 #define ES9219Q_PLL_BYPASS			(0)		// ! default value undocumented
 #define ES9219Q_PLL_LOW_BW			(0)		// ! default value undocumented
 #define ES9219Q_PLL_CLK_IN_DIV		(2)		//for 24.xxxMHZ MCLK
-#define ES9219Q_PLL_CLK_FB_DIV		(4194304)	//2^22 undocumented in datasheet, acquired from ES9020 datasheet 
+#define ES9219Q_PLL_CLK_FB_DIV		(65536)	//2^22 undocumented in datasheet, acquired from ES9020 datasheet 
 #define ES9219Q_PLL_PFD_DELAY_SEL	(0)		//8.5ns default
 #define ES9219Q_PLL_CP_BIAS_SEL		(0b011)	//4uA default
 #define ES9219Q_PLL_CLK_OUT_DIV		(4)		//divide by 4
