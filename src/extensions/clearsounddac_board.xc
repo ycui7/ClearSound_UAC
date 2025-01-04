@@ -112,7 +112,7 @@ void csd_AudioHwRemote(chanend c)
     [[combine]]
 	 par
     {
-        i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 200);
+        i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
         AudioHwRemote2(c, i2c[0]);
     }
 
@@ -191,28 +191,41 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
     debug_printf("=====================================================\n");
     
-    /* Take CODEC out of reset */
-    //  ==> on evk p_codec_reset <: CODEC_RELEASE_RESET;
-    GPIO_WR(0x0b, CODEC_RELEASE_RESET);
-    delay_milliseconds(100);
+    delay_milliseconds(1);
 
+    // Set the fractional divider if used
+    sw_pll_fixed_clock(config.default_mclk);
+    debug_printf("sw_pll_fixed_clock_Done\n");
+    delay_milliseconds(1);
+
+    /* Take CODEC out of reset */
+
+    GPIO_WR(0x0b, CODEC_RELEASE_RESET);
+    delay_milliseconds(1);
+    
+/*    DAC_PLL_REGWRITE    (192 ,   0x01); //software reset 
+
+    DAC_PLL_REGWRITE    (201 ,   0x01); //Set DAC Clock input to MCLK
+
+    delay_milliseconds(10);*/
+    
     // start up sequence per ESS application note
     DAC_PLL_REGWRITE    (201 ,   0x19); //Set DAC Clock input to MCLK
     DAC_PLL_REGWRITE    (193 ,   0xC0); //Turn On PLL Charge Pump and VCo
     DAC_PLL_REGWRITE    (194 ,   0x00); //Set Clock_IN_DIV = 8 and FB_DIV = 131072
     DAC_PLL_REGWRITE    (195 ,   0x00); 
     DAC_PLL_REGWRITE    (196 ,   0x82); 
-    DAC_PLL_REGWRITE    (197 ,   0xC0); 
+    DAC_PLL_REGWRITE    (197 ,   0x00); 
     DAC_PLL_REGWRITE    (198 ,   0x02); //Set Clock_OUT_Div = 2, and PFE_DELAY to 1.5ns
     DAC_PLL_REGWRITE    (199 ,   0xC2); 
     DAC_PLL_REGWRITE    (200 ,   0x0C); //Turn On PLL regulators as final step
-    delay_milliseconds(100);
-    
-    // Check we can talk to the CODDAC(0x40, regVal);
-    DAC_REGREAD(0x40, regVal);
-    debug_printf("ChipIdRegValue:\t0x%x\n", regVal );
+    delay_milliseconds(1);
+        
+    // Check we can talk to the DAC
+/*    DAC_REGREAD(0x40, regVal);
+    debug_printf("ChipIdRegValue:\t0x%x\n", regVal );*/
 
-    for (unsigned i = 0 ; i < 64 ; i++ ){
+    for (unsigned i = 0 ; i < 16 ; i++ ){
         DAC_REGREAD(i, regVal);
     }
 
@@ -319,14 +332,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE(ES9219Q_ADC_FGA_MUTE, 0x00);
  */
 
-    delay_milliseconds(1);
 
-    // Set the fractional divider if used
-    sw_pll_fixed_clock(config.default_mclk);
-    debug_printf("sw_pll_fixed_clock_Done\n");
-
-
-    delay_milliseconds(1);
 }
 
 /* Configures the external audio hardware for the required sample frequency.
