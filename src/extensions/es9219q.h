@@ -64,8 +64,11 @@
 #define ES9219Q_THD_COMP_C3_HI					(0x19)
 #define ES9219Q_GENERAL_CONFIG					(0x1B)
 #define ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR		(0x1D)
-#define ES9219Q_CHARGE_PUMP_CLOCK_DIV			(0x1E)
-#define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG		(0x1F)
+#define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO		(0x1E)
+#define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI		(0x1F)
+#define ES9219Q_CP_CLK_SEL							(0b00 << 6)
+#define ES9219Q_CP_CLK_EN							(0b11 << 4)
+#define ES9219Q_CP_CLK_DIV							(64)
 #define ES9219Q_AMP_CONFIG						(0x20)
 #define ES9219Q_FIR_RAM_ADDR					(0x28)
 #define ES9219Q_FIR_RAM_DATA_BYTE0				(0x29)
@@ -75,6 +78,7 @@
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_1			(0x2D)
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_2			(0x2E)
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_3			(0x2F)
+#define ES9219Q_ANALOG_CTRL_SIGNALS				(0x30)
 #define ES9219Q_THD_COMP_C2_CH2_LO				(0x35)
 #define ES9219Q_THD_COMP_C2_CH2_HI				(0x36)
 #define ES9219Q_THD_COMP_C3_CH2_LO				(0x37)
@@ -87,10 +91,19 @@
 #define ES9219Q_READ_FIR_RAM_DATA_BYTE2			(0x4B)
 #define ES9219Q_READ_LOCK_STATUS				(0x4D)
 #define ES9219Q_CROSSTALK_COMP_CONFIG			(0x80)
+#define ES9219Q_BYPASS_CT							(1 << 7)	//1: disable, 0: Enable
+#define ES9219Q_ENABLE_PLL_LOCK						(1 << 6)	//1: Lock Status indicate both APLL and DPLL
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO		(0x82)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI		(0x83)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO		(0x84)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI		(0x85)
 #define ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG	(0x86)
+#define ES9219Q_CH1_ANALOG_SWAP						(1 << 3)	//0: normal, 1: inverted
+#define ES9219Q_CH2_ANALOG_SWAP						(1 << 2)	//0: normal, 1: inverted
+#define ES9219Q_ANALOG_CTRL_OVERRIDE_N_ATR		(0x87)
+#define ES9219Q_DISALBE_ATR_CH2						(0 << 6)	//0: THD Comp Enabled		
+#define ES9219Q_DISALBE_ATR_CH1						(0 << 5)	//0: THD Comp Enabled	
+#define ES9219Q_PDB_ATR_R							(1 << 1)	//1: Enabled 	
+#define ES9219Q_PDB_ATR_L							(1 << 0)	//1: Enabled 
 
 #endif /* ES9219Q_H_ */
