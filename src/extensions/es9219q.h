@@ -73,7 +73,7 @@
 
 #define ES9219Q_AMP_CONFIG						(0x20)
 #define ES9219Q_AMP_PDB_SS							(0 << 7)	//0: control by amp_mode
-#define ES9219Q_AMP_MODE_GPIO						(2 << 3)	//0: core on, 1: LowFi, 2: HiFi 1V, 3: HiFi 2V
+#define ES9219Q_AMP_MODE_GPIO						(0 << 3)	//0: core on, 1: LowFi, 2: HiFi 1V, 3: HiFi 2V
 
 #define ES9219Q_FIR_RAM_ADDR					(0x28)
 #define ES9219Q_FIR_RAM_DATA_BYTE0				(0x29)
@@ -91,7 +91,7 @@
 #define ES9219Q_CP_CLKIO_SEL						(0 << 2)	//0: internal oscillator for charge pump, 1: digitally generated clock
 
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_2			(0x2E)
-#define ES9219Q_DIG_OVER_EN							(0 << 7) 	//0: use register 0x2D, 1: use digital core
+#define ES9219Q_DIG_OVER_EN							(1 << 7) 	//0: use register 0x2D, 1: use digital core
 #define ES9219Q_SEL1V								(0 << 2) 	//0: use internal digital regulator, 1: disable internal regulator
 #define ES9219Q_SHTOUTB								(1 << 1) 	//0: shunt on amplifier output
 #define ES9219Q_SHTINB								(1 << 1) 	//0: shunt on amplifier input
@@ -121,7 +121,7 @@
 
 #define ES9219Q_CROSSTALK_COMP_CONFIG			(0x80)
 #define ES9219Q_BYPASS_CT							(1 << 7)	//1: disable, 0: Enable
-#define ES9219Q_ENABLE_PLL_LOCK						(1 << 6)	//1: Lock Status indicate both APLL and DPLL
+#define ES9219Q_ENABLE_PLL_LOCK						(0 << 6)	//1: Lock Status indicate both APLL and DPLL
 
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO		(0x82)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI		(0x83)

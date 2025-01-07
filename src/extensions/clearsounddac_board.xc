@@ -234,22 +234,24 @@ void csd_AudioHwInit(const csd_config_t &config)
         DAC_REGREAD(i, regVal);
     }
     
-    DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               2);
-    DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((1<<3) | 0b010) );
+    DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | 2));
+    DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((7 << 4) | (0<<3) | 0b010) );
     DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    ((0b000 << 5) | 0) );
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
-    //DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,   ( (0b11 << 5) | (0 << 4) || 2) )); //DATA_CLK = MCLK/16 for 48Khz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
+    DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,     ((0b01 << 5) | (0 << 4) || 2) ); //DATA_CLK = MCLK/4 for 192KHz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
     //DAC_REGWRITE    (ES9219Q_THD_BYPASS_N_MONO_MODE,      ( (0 << 5) | 0 ) )); // Enable THD Compensation
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_HI,                   UserVolummeR ); //GPIO2 CLK out, GPIO1 lock status
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE0,             (uint8_t)((VolumeMasterTrim >> 0) | 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE1,             (uint8_t)((VolumeMasterTrim >> 1) | 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE2,             (uint8_t)((VolumeMasterTrim >> 2) | 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE3,             (uint8_t)((VolumeMasterTrim >> 3) | 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE0,             (uint8_t)((VolumeMasterTrim >> 0) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE1,             (uint8_t)((VolumeMasterTrim >> 1) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE2,             (uint8_t)((VolumeMasterTrim >> 2) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE3,             (uint8_t)((VolumeMasterTrim >> 3) & 0xFF) ); 
+    
+    DAC_REGWRITE    (12, 0);  //disable dpll
     //DAC_REGWRITE    (ES9219Q_GENERAL_CONFIG,              TBD ); 
     //DAC_REGWRITE    (ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR, TBD ); 
-    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO,      (uint8_t)(ES9219Q_CP_CLK_DIV | 0xFF)); 
-    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI,      (uint8_t)(ES9219Q_CP_CLK_SEL | ES9219Q_CP_CLK_EN | ((ES9219Q_CP_CLK_DIV >> 8) | 0xFF)) ); 
+    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO,   (uint8_t)(ES9219Q_CP_CLK_DIV & 0xFF)); 
+    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI,   (uint8_t)(ES9219Q_CP_CLK_SEL | ES9219Q_CP_CLK_EN | ((ES9219Q_CP_CLK_DIV >> 8) & 0xFF)) ); 
     DAC_REGWRITE    (ES9219Q_THD_COMP_C2_LO,                (uint8_t)((ThdCompC2Ch1> 0) & 0xFF) ); 
     DAC_REGWRITE    (ES9219Q_THD_COMP_C2_HI,                (uint8_t)((ThdCompC2Ch1> 1) & 0xFF) ); 
     DAC_REGWRITE    (ES9219Q_THD_COMP_C3_LO,                (uint8_t)((ThdCompC3Ch1 >> 0) & 0xFF) ); 
@@ -270,8 +272,10 @@ void csd_AudioHwInit(const csd_config_t &config)
     delay_milliseconds(1);
     DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
     DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (0 << 3) | (1 <<2 )) ); //HP ON, HP low Iq, seprate THD comp coeef
+    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
     DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE_GPIO) ); 
+    delay_milliseconds(10);
+    DAC_REGWRITE(1,0b10000000);
 
     for (unsigned i = 0 ; i < 61 ; i++ ){
         DAC_REGREAD(i, regVal);
@@ -284,6 +288,16 @@ void csd_AudioHwInit(const csd_config_t &config)
 void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     unsigned sampRes_DAC, unsigned sampRes_ADC)
 {
+    {
+        unsigned regVal = 0;
+        
+        DAC_REGREAD(65, regVal);
+        DAC_REGREAD(72, regVal);
+        DAC_REGREAD(77, regVal);
+        DAC_REGREAD(0x40, regVal);
+        debug_printf("CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
+    }
+    
     assert(samFreq >= 22050);
 
     sw_pll_fixed_clock(mClk);
