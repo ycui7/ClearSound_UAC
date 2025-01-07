@@ -65,19 +65,47 @@
 #define ES9219Q_GENERAL_CONFIG					(0x1B)
 #define ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR		(0x1D)
 #define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO		(0x1E)
+
 #define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI		(0x1F)
 #define ES9219Q_CP_CLK_SEL							(0b00 << 6)
 #define ES9219Q_CP_CLK_EN							(0b11 << 4)
 #define ES9219Q_CP_CLK_DIV							(64)
+
 #define ES9219Q_AMP_CONFIG						(0x20)
+#define ES9219Q_AMP_PDB_SS							(0 << 7)	//0: control by amp_mode
+#define ES9219Q_AMP_MODE_GPIO						(2 << 3)	//0: core on, 1: LowFi, 2: HiFi 1V, 3: HiFi 2V
+
 #define ES9219Q_FIR_RAM_ADDR					(0x28)
 #define ES9219Q_FIR_RAM_DATA_BYTE0				(0x29)
 #define ES9219Q_FIR_RAM_DATA_BYTE1				(0x2A)
 #define ES9219Q_FIR_RAM_DATA_BYTE2				(0x2B)
 #define ES9219Q_FIR_CONFIG						(0x2C)
+
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_1			(0x2D)
+#define ES9219Q_ENAUX								(0 << 7)	//1: external analog input, DAC off
+#define ES9219Q_AREG_PDB							(1 << 6)	//1: analog regulator ON
+#define ES9219Q_ENPHA								(1 << 5)	//1: preamplifier ON
+#define ES9219Q_CPH_ENS								(1 << 4)	//1: main charge pump is ON. (encp_on must be set to 1b1 for it to work)
+#define ES9219Q_CPH_ENW								(0 << 3)	//1: Enable Main charge pump in weak mode. 
+#define ES9219Q_CPH_APDB							(1 << 2)	//1: analog VREF on. 
+#define ES9219Q_CP_CLKIO_SEL						(0 << 2)	//0: internal oscillator for charge pump, 1: digitally generated clock
+
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_2			(0x2E)
+#define ES9219Q_DIG_OVER_EN							(0 << 7) 	//0: use register 0x2D, 1: use digital core
+#define ES9219Q_SEL1V								(0 << 2) 	//0: use internal digital regulator, 1: disable internal regulator
+#define ES9219Q_SHTOUTB								(1 << 1) 	//0: shunt on amplifier output
+#define ES9219Q_SHTINB								(1 << 1) 	//0: shunt on amplifier input
+
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_3			(0x2F)
+#define ES9219Q_ENFCB								(0 << 7)	//0: fast AREF charging
+#define ES9219Q_ENCP_OE								(1 << 6)	//0: GPIO2 controls charge pump, 1: digital core
+#define ES9219Q_ENAUX_OE							(1 << 5)	//0: GPIO2 controls charge pump, 1: digital core
+#define ES9219Q_CPL_ENS								(1 << 4)	//1: main charge pump is ON. (encp_on must be set to 1b1 for it to work)
+#define ES9219Q_CPL_ENW								(0 << 3)	//1: Enable Main charge pump in weak mode. 
+#define ES9219Q_SEL3V3_PS							(0 << 2)	//0: use 1.8V for output stage, 1: use 3.3V for output stage
+#define ES9219Q_ENSM_PS								(0 << 1)	//0: allow smooth transisition from 1.8V to 3.3V 1: normal operation
+#define ES9219Q_SEL3V3_CPH							(0 << 0)	//0: use 1.8V for charge pump, 1: use 3.3V for charge pump
+
 #define ES9219Q_ANALOG_CTRL_SIGNALS				(0x30)
 #define ES9219Q_THD_COMP_C2_CH2_LO				(0x35)
 #define ES9219Q_THD_COMP_C2_CH2_HI				(0x36)
@@ -90,16 +118,20 @@
 #define ES9219Q_READ_FIR_RAM_DATA_BYTE1			(0x4A)
 #define ES9219Q_READ_FIR_RAM_DATA_BYTE2			(0x4B)
 #define ES9219Q_READ_LOCK_STATUS				(0x4D)
+
 #define ES9219Q_CROSSTALK_COMP_CONFIG			(0x80)
 #define ES9219Q_BYPASS_CT							(1 << 7)	//1: disable, 0: Enable
 #define ES9219Q_ENABLE_PLL_LOCK						(1 << 6)	//1: Lock Status indicate both APLL and DPLL
+
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO		(0x82)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI		(0x83)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO		(0x84)
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI		(0x85)
+
 #define ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG	(0x86)
 #define ES9219Q_CH1_ANALOG_SWAP						(1 << 3)	//0: normal, 1: inverted
 #define ES9219Q_CH2_ANALOG_SWAP						(1 << 2)	//0: normal, 1: inverted
+
 #define ES9219Q_ANALOG_CTRL_OVERRIDE_N_ATR		(0x87)
 #define ES9219Q_DISALBE_ATR_CH2						(0 << 6)	//0: THD Comp Enabled		
 #define ES9219Q_DISALBE_ATR_CH1						(0 << 5)	//0: THD Comp Enabled	
