@@ -64,16 +64,18 @@
 #define ES9219Q_THD_COMP_C3_HI					(0x19)
 #define ES9219Q_GENERAL_CONFIG					(0x1B)
 #define ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR		(0x1D)
+
 #define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO		(0x1E)
+#define ES9219Q_CP_CLK_DIV							(31)		//31 set CP clock to 768kHz when MCLK at 49MHz
 
 #define ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI		(0x1F)
 #define ES9219Q_CP_CLK_SEL							(0b00 << 6)
 #define ES9219Q_CP_CLK_EN							(0b11 << 4)
-#define ES9219Q_CP_CLK_DIV							(64)
 
 #define ES9219Q_AMP_CONFIG						(0x20)
 #define ES9219Q_AMP_PDB_SS							(0 << 7)	//0: control by amp_mode
 #define ES9219Q_AMP_MODE_GPIO						(0 << 3)	//0: core on, 1: LowFi, 2: HiFi 1V, 3: HiFi 2V
+#define ES9219Q_AMP_MODE							(0b10 << 0)	//0: core on, 1: LowFi, 2: HiFi 1V, 3: HiFi 2V
 
 #define ES9219Q_FIR_RAM_ADDR					(0x28)
 #define ES9219Q_FIR_RAM_DATA_BYTE0				(0x29)

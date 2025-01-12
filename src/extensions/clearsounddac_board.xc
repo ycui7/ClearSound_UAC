@@ -141,7 +141,7 @@ static inline void DAC_REGWRITE(unsigned reg, unsigned val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_REGWR;
         uc_audiohw <: reg;
         uc_audiohw <: val;
-        debug_printf("I2C_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
+        //debug_printf("I2C_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
     }
 }
 
@@ -152,7 +152,7 @@ static inline void DAC_REGREAD(unsigned reg, unsigned &val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_REGRD;
         uc_audiohw <: reg;
         uc_audiohw :> val;
-        debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
+        //debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
 
     }
 }
@@ -192,7 +192,8 @@ void csd_AudioHwChanInit(chanend c)
 void csd_AudioHwInit(const csd_config_t &config)
 {
     unsigned regVal = 0;
-    uint8_t UserVolummeL = 40, UserVolummeR = 40;  //0.5dB steps
+    uint8_t AnalogVolume = 0; 
+    uint8_t UserVolummeL = 0, UserVolummeR = 0;  //0.5dB steps
     int16_t ThdCompC2Ch1 = 0, ThdCompC3Ch1 = 0; 
     int16_t ThdCompC2Ch2 = 0, ThdCompC3Ch2 = 0; 
     int16_t CrosstalkCompCh1 = 0, CrosstalkCompCh2 = 0; //0x0001 is -126dB 
@@ -230,55 +231,66 @@ void csd_AudioHwInit(const csd_config_t &config)
     assert(regVal != 0 && msg("DAC Chip ID Register Read Problem"));
     debug_printf("CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
 
-    for (unsigned i = 0 ; i < 61 ; i++ ){
-        DAC_REGREAD(i, regVal);
+    for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+        DAC_REGREAD(reg, regVal);
+        debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+
     }
     
-    DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | 2));
-    DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((7 << 4) | (0<<3) | 0b010) );
-    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    ((0b000 << 5) | 0) );
+    // General Comment:
+    // XMOS's I2C lib is very low overhead on physical layer that there is no need to batch send I2C commands. 
+
+    DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE) ); 
+    DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | (AnalogVolume & 0x1F)));
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
-    DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,     ((0b01 << 5) | (0 << 4) || 2) ); //DATA_CLK = MCLK/4 for 192KHz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
-    //DAC_REGWRITE    (ES9219Q_THD_BYPASS_N_MONO_MODE,      ( (0 << 5) | 0 ) )); // Enable THD Compensation
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_HI,                   UserVolummeR ); //GPIO2 CLK out, GPIO1 lock status
+    //DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((7 << 4) | (0<<3) | 0b010) );
+    //DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,     ((0b01 << 5) | (0 << 4) || 2) ); //DATA_CLK = MCLK/4 for 192KHz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
+    //DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    ((0b000 << 5) | 0) );
     //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE0,             (uint8_t)((VolumeMasterTrim >> 0) & 0xFF) ); 
     //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE1,             (uint8_t)((VolumeMasterTrim >> 1) & 0xFF) ); 
     //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE2,             (uint8_t)((VolumeMasterTrim >> 2) & 0xFF) ); 
     //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE3,             (uint8_t)((VolumeMasterTrim >> 3) & 0xFF) ); 
     
-    DAC_REGWRITE    (12, 0);  //disable dpll
+    //DAC_REGWRITE    (12, 0);  //disable dpll
+    
     //DAC_REGWRITE    (ES9219Q_GENERAL_CONFIG,              TBD ); 
     //DAC_REGWRITE    (ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR, TBD ); 
-    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO,   (uint8_t)(ES9219Q_CP_CLK_DIV & 0xFF)); 
-    //DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI,   (uint8_t)(ES9219Q_CP_CLK_SEL | ES9219Q_CP_CLK_EN | ((ES9219Q_CP_CLK_DIV >> 8) & 0xFF)) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C2_LO,                (uint8_t)((ThdCompC2Ch1> 0) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C2_HI,                (uint8_t)((ThdCompC2Ch1> 1) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C3_LO,                (uint8_t)((ThdCompC3Ch1 >> 0) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C3_HI,                (uint8_t)((ThdCompC3Ch1 >> 1) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_LO,            (uint8_t)((ThdCompC2Ch2 >> 0) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_HI,            (uint8_t)((ThdCompC2Ch2 >> 1) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_LO,            (uint8_t)((ThdCompC3Ch2 >> 0) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_HI,            (uint8_t)((ThdCompC3Ch2 >> 1) & 0xFF) ); 
-    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_CONFIG,         (uint8_t)(ES9219Q_BYPASS_CT | ES9219Q_ENABLE_PLL_LOCK ) ); 
-    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO,   (uint8_t)((CrosstalkCompCh1 >> 0) & 0xFF ) ); 
-    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI,   (uint8_t)((CrosstalkCompCh1 >> 1) & 0xFF ) ); 
-    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO,   (uint8_t)((CrosstalkCompCh2 >> 0) & 0xFF ) ); 
-    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI,   (uint8_t)((CrosstalkCompCh2 >> 1) & 0xFF ) ); 
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG,  (uint8_t)(ES9219Q_DISALBE_ATR_CH2 | ES9219Q_DISALBE_ATR_CH1 | ES9219Q_PDB_ATR_R | ES9219Q_PDB_ATR_L) );     
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB) );     
-    delay_milliseconds(1);
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB | ES9219Q_ENAUX | ES9219Q_AREG_PDB | ES9219Q_ENPHA | ES9219Q_CPH_ENS | ES9219Q_CPH_ENW | ES9219Q_CP_CLKIO_SEL) );     
-    delay_milliseconds(1);
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
-    DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
-    DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE_GPIO) ); 
+    DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_LO,   (uint8_t)(ES9219Q_CP_CLK_DIV & 0xFF)); 
+    DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI,   (uint8_t)(ES9219Q_CP_CLK_SEL | ES9219Q_CP_CLK_EN | ((ES9219Q_CP_CLK_DIV >> 8) & 0xFF)) ); 
+    
+    //DAC_REGWRITE    (ES9219Q_THD_BYPASS_N_MONO_MODE,      ( (0 << 5) | 0 ) )); // Enable THD Compensation
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_LO,                (uint8_t)((ThdCompC2Ch1> 0) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_HI,                (uint8_t)((ThdCompC2Ch1> 1) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_LO,                (uint8_t)((ThdCompC3Ch1 >> 0) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_HI,                (uint8_t)((ThdCompC3Ch1 >> 1) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_LO,            (uint8_t)((ThdCompC2Ch2 >> 0) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_HI,            (uint8_t)((ThdCompC2Ch2 >> 1) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_LO,            (uint8_t)((ThdCompC3Ch2 >> 0) & 0xFF) ); 
+    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_HI,            (uint8_t)((ThdCompC3Ch2 >> 1) & 0xFF) ); 
+    
+    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_CONFIG,         (uint8_t)(ES9219Q_BYPASS_CT | ES9219Q_ENABLE_PLL_LOCK ) ); 
+    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO,   (uint8_t)((CrosstalkCompCh1 >> 0) & 0xFF ) ); 
+    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI,   (uint8_t)((CrosstalkCompCh1 >> 1) & 0xFF ) ); 
+    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO,   (uint8_t)((CrosstalkCompCh2 >> 0) & 0xFF ) ); 
+    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI,   (uint8_t)((CrosstalkCompCh2 >> 1) & 0xFF ) ); 
+    
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG,  (uint8_t)(ES9219Q_DISALBE_ATR_CH2 | ES9219Q_DISALBE_ATR_CH1 | ES9219Q_PDB_ATR_R | ES9219Q_PDB_ATR_L) );     
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB) );     
+    //delay_milliseconds(1);
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB | ES9219Q_ENAUX | ES9219Q_AREG_PDB | ES9219Q_ENPHA | ES9219Q_CPH_ENS | ES9219Q_CPH_ENW | ES9219Q_CP_CLKIO_SEL) );     
+    //delay_milliseconds(1);
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
+    //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
     delay_milliseconds(10);
-    DAC_REGWRITE(1,0b10000000);
+    //DAC_REGWRITE(1,0b10000000);
 
-    for (unsigned i = 0 ; i < 61 ; i++ ){
-        DAC_REGREAD(i, regVal);
+    for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+        DAC_REGREAD(reg, regVal);
+        debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+
     }
 }
 
@@ -288,20 +300,45 @@ void csd_AudioHwInit(const csd_config_t &config)
 void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     unsigned sampRes_DAC, unsigned sampRes_ADC)
 {
-    {
-        unsigned regVal = 0;
-        
-        DAC_REGREAD(65, regVal);
-        DAC_REGREAD(72, regVal);
-        DAC_REGREAD(77, regVal);
-        DAC_REGREAD(0x40, regVal);
-        debug_printf("CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
-    }
     
     assert(samFreq >= 22050);
-
+    debug_printf("=================Clock Change===============\n");   
     sw_pll_fixed_clock(mClk);
     debug_printf("sw_pll_fixed_clock_Done\n");
+    delay_milliseconds(10);
+    {
+        unsigned regVal = 0;
+        debug_printf("===================Current State===============\n");   
+
+        DAC_REGREAD(ES9219Q_GPIO_READBACK, regVal);
+        debug_printf("\033[42m\tCLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d\t\033[0m\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
+        
+        DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);        
+        debug_printf("\033[42m\tOC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d\t\033[0m\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
+        
+        DAC_REGREAD(ES9219Q_READ_LOCK_STATUS, regVal);
+        debug_printf("\033[42m\tMQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d\t\033[0m\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
+        
+        DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
+        debug_printf("\033[42m\tCHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d\t\033[0m\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
+    
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG,  (uint8_t)(ES9219Q_DISALBE_ATR_CH2 | ES9219Q_DISALBE_ATR_CH1 | ES9219Q_PDB_ATR_R | ES9219Q_PDB_ATR_L) );     
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB) );     
+        //delay_milliseconds(1);
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB | ES9219Q_ENAUX | ES9219Q_AREG_PDB | ES9219Q_ENPHA | ES9219Q_CPH_ENS | ES9219Q_CPH_ENW | ES9219Q_CP_CLKIO_SEL) );     
+        //delay_milliseconds(1);
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
+        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
+        //DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE_GPIO) ); 
+        //delay_milliseconds(10);
+        //DAC_REGWRITE(1,0b10000000);
+
+        for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+            DAC_REGREAD(reg, regVal);
+            debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+        }   
+    }
 
 }
 
