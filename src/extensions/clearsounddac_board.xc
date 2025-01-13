@@ -268,7 +268,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_LO,            (uint8_t)((ThdCompC3Ch2 >> 0) & 0xFF) ); 
     //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_HI,            (uint8_t)((ThdCompC3Ch2 >> 1) & 0xFF) ); 
     
-    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_CONFIG,         (uint8_t)(ES9219Q_BYPASS_CT | ES9219Q_ENABLE_PLL_LOCK ) ); 
+    DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_CONFIG,         (uint8_t)(ES9219Q_BYPASS_CT | ES9219Q_ENABLE_PLL_LOCK ) ); 
     //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO,   (uint8_t)((CrosstalkCompCh1 >> 0) & 0xFF ) ); 
     //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI,   (uint8_t)((CrosstalkCompCh1 >> 1) & 0xFF ) ); 
     //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO,   (uint8_t)((CrosstalkCompCh2 >> 0) & 0xFF ) ); 
@@ -281,6 +281,22 @@ void csd_AudioHwInit(const csd_config_t &config)
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
     delay_milliseconds(10);
+
+    // uint32_t fir1[128] = {};
+    // for (unsigned i = 0 ; i < 128 ; i++ ){
+    //     // DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE0,   (uint8_t)((fir1[i] >> 0) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir1[i] >> 1) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir1[i] >> 2) & 0xFF ) ); 
+    // }   
+
+    // uint32_t fir2[128] = {};
+    // for (unsigned i = 0 ; i < 16 ; i++ ){
+    //     // DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE0,   (uint8_t)((fir2[i] >> 0) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir2[i] >> 1) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir2[i] >> 2) & 0xFF ) ); 
+    // }   
 
     for (unsigned reg = 0 ; reg < 61 ; reg++ ){
         DAC_REGREAD(reg, regVal);

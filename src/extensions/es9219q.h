@@ -133,7 +133,7 @@
 #define ES9219Q_READ_LOCK_STATUS				(0x4D)
 
 #define ES9219Q_CROSSTALK_COMP_CONFIG			(0x80)
-#define ES9219Q_BYPASS_CT							(1 << 7)	//1: disable, 0: Enable
+#define ES9219Q_BYPASS_CT							(0 << 7)	//1: disable, 0: Enable
 #define ES9219Q_ENABLE_PLL_LOCK						(0 << 6)	//1: Lock Status indicate both APLL and DPLL
 
 #define ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO		(0x82)
