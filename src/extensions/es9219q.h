@@ -50,11 +50,17 @@
 #define ES9219Q_DOP_ENABLE							(1 << 3)
 #define ES9219Q_VOLUME_RATE							(0b010 << 0)
 
+#define ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE      (0x07)
+#define ES9219Q_FILTER_SHAPE            	    	(0 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
+#define ES9219Q_BYPASS_OSF              	    	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
+#define ES9219Q_MUTE                     	    	(0 << 0)    //0: unmute, 1: mute
 
-#define ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE		(0x07)
 #define ES9219Q_GPIO12_CONFIG					(0x08)
 #define ES9219Q_MASTER_MODE_N_SYNC_CONFIG		(0x0A)
 #define ES9219Q_THD_BYPASS_N_MONO_MODE			(0x0D)
+#define ES9219Q_BYPASS_THD              	    	(0 << 6)    //0: THD Comp Enable, 1: THD Comp Disabled
+#define ES9219Q_MONO_MODE                	    	(0 << 4)    //0: stereo, 1: mono
+
 #define ES9219Q_SOFT_START_CONFIG				(0x0E)
 #define ES9219Q_VOL_CTRL_LO						(0x0F)
 #define ES9219Q_VOL_CTRL_HI						(0x10)
