@@ -284,19 +284,25 @@ void csd_AudioHwInit(const csd_config_t &config)
 
     // uint32_t fir1[128] = {};
     // for (unsigned i = 0 ; i < 128 ; i++ ){
-    //     // DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
     //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE0,   (uint8_t)((fir1[i] >> 0) & 0xFF ) ); 
-    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir1[i] >> 1) & 0xFF ) ); 
-    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir1[i] >> 2) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir1[i] >> 8) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir1[i] >> 16) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_CONFIG,           (uint8_t)( 0x02 ) ); 
     // }   
+    // DAC_REGWRITE    (ES9219Q_FIR_CONFIG,           (uint8_t)(SetEvenBits ? 0x04 : 0x00) ); 
 
-    // uint32_t fir2[128] = {};
+
+    // uint32_t fir2[16] = {};
     // for (unsigned i = 0 ; i < 16 ; i++ ){
-    //     // DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_ADDR,         (uint8_t)( TBD ) ); 
     //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE0,   (uint8_t)((fir2[i] >> 0) & 0xFF ) ); 
-    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir2[i] >> 1) & 0xFF ) ); 
-    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir2[i] >> 2) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE1,   (uint8_t)((fir2[i] >> 8) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_RAM_DATA_BYTE2,   (uint8_t)((fir2[i] >> 16) & 0xFF ) ); 
+    //     DAC_REGWRITE    (ES9219Q_FIR_CONFIG,           (uint8_t)( 0x02 ) ); 
     // }   
+    // DAC_REGWRITE    (ES9219Q_FIR_CONFIG,           (uint8_t)(SetEvenBits ? 0x04 : 0x00) ); 
+
 
     for (unsigned reg = 0 ; reg < 61 ; reg++ ){
         DAC_REGREAD(reg, regVal);
