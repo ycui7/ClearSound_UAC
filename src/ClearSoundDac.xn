@@ -25,6 +25,9 @@
   	      	<Port Location="XS1_PORT_1O"  Name="PORT_I2C_SCL"/>
             <Port Location="XS1_PORT_1P"  Name="PORT_I2C_SDA"/>
             
+            <Port Location="XS1_PORT_1M"  Name="PORT_BUTTON_UP"/>
+            <Port Location="XS1_PORT_1N"  Name="PORT_BUTTON_DOWN"/>
+            
           </Tile>
           <Tile Number="1" Reference="tile[1]">
             <!-- Audio ports -->
