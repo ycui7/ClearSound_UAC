@@ -45,6 +45,20 @@ typedef enum
  */
 void csd_AudioHwRemote(chanend c);
 
+typedef enum
+{
+    AUDIOHW_CMD_VOL_UP,
+    AUDIOHW_CMD_VOL_DOWN,
+    AUDIOHW_CMD_MUTE,
+    AUDIOHW_CMD_VS_ON,
+    AUDIOHW_CMD_VS_OFF,
+    AUDIOHW_CMD2_EXIT
+} audioHwCmd2_t;
+
+/** receive commands on tile1 to change volume from tile0 commands 
+ */
+void csd_AudioHwRemote2(chanend c);
+
 /** Initialises the client side channel for remote communications with I2C. Must be called on tile[1] *before* csd_AudioHwInit(). 
  *
  *  \param   c    Client side of channel connecting I2C master server and HW config functions.

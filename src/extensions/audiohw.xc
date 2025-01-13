@@ -11,7 +11,6 @@
 #endif
 
 static const csd_config_t config = {
-
     // mclk
     (DEFAULT_FREQ % 22050 == 0) ? MCLK_441 : MCLK_48,
 };
@@ -19,26 +18,20 @@ static const csd_config_t config = {
 
 void AudioHwRemote(chanend c)
 {
-	debug_printf("AudioHwRemote_Starting\n");
 	csd_AudioHwRemote(c);
-	debug_printf("AudioHwRemote_Done\n");
-
 }
 
 /* Note this is called from tile[1] but the I2C lines to the CODEC are on tile[0]
  * use a channel to communicate CODEC reg read/writes to a remote core */
 void AudioHwInit()
 {
-   	debug_printf("AudioHwInit_Starting\n");
 	csd_AudioHwInit(config);
-   	debug_printf("AudioHwInit_Done\n");
 }
 
 /* Configures the external audio hardware for the required sample frequency.
  * See gpio.h for I2C helper functions and gpio access
  */
-void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
-    unsigned sampRes_DAC, unsigned sampRes_ADC)
+void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode, unsigned sampRes_DAC, unsigned sampRes_ADC)
 {
 	csd_AudioHwConfig(samFreq, mClk, dsdMode, sampRes_DAC, sampRes_ADC);
 	debug_printf("AudioHWConfig:F:%d\tMCK:%d\tDAC:%d,ADC:%d\r\n",samFreq, mClk, sampRes_DAC, sampRes_ADC );

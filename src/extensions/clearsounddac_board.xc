@@ -15,11 +15,16 @@ extern "C" {
 
 #define ES9219_USE_PLL_WITH_MCLK
 
-// CODEC I2C lines
+// DAC I2C lines
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
 on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
 
-// CODEC reset line
+
+// Button lines
+on tile[0]: port p_butt_up = PORT_BUTTON_UP;
+on tile[0]: port p_butt_down = PORT_BUTTON_DOWN;
+
+// DAC AMP reset line
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
 
 // CODEC Reset bit mask
@@ -46,7 +51,42 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 }
 
 [[combinable]]
-void AudioHwRemote2(chanend c, client interface i2c_master_if i2c)
+void button_press_deglitch(port p_button)
+{
+    int current_button_val = 0;
+    int is_stable = 1;
+    timer tmr;
+    const unsigned debounce_delay_ms = 50;
+    unsigned debounce_timeout;
+
+    while (1) {
+        select {
+            // If the button is "stable", react when the I/O pin changes value
+            case is_stable => p_button when pinsneq(current_button_val) :> current_button_val:
+                if (current_button_val == 1) {
+                printf("Button up\n");
+                } else {
+                printf("Button down\n");
+                }
+                is_stable = 0;
+                int current_time;
+                tmr :> current_time;
+                // Calculate time to event after debounce period
+                // note that XS1_TIMER_HZ is defined in timer.h
+                debounce_timeout = current_time + (debounce_delay_ms * XS1_TIMER_HZ);
+                break;
+            // If the button is not stable (i.e. bouncing around) then select
+            // when we the timer reaches the timeout to renter a stable period
+            case !is_stable => tmr when timerafter(debounce_timeout) :> void:
+                is_stable = 1;	
+                break;
+        }
+    }
+}
+
+
+[[combinable]]
+void AudioHwRemote1(chanend c, client interface i2c_master_if i2c)
 {
     while(1)
     {
@@ -115,7 +155,9 @@ void csd_AudioHwRemote(chanend c)
 	 par
     {
         i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
-        AudioHwRemote2(c, i2c[0]);
+        AudioHwRemote1(c, i2c[0]);
+        button_press_deglitch(p_butt_up);
+        button_press_deglitch(p_butt_down);
     }
 
 }
