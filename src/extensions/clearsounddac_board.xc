@@ -245,7 +245,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_HI,                   UserVolummeR ); //GPIO2 CLK out, GPIO1 lock status
-    //DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((7 << 4) | (0<<3) | 0b010) );
+    DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           ((7 << 4) | (1<<3) | 0b010) );
     //DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,     ((0b01 << 5) | (0 << 4) || 2) ); //DATA_CLK = MCLK/4 for 192KHz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
     //DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    ((0b000 << 5) | 0) );
     //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE0,             (uint8_t)((VolumeMasterTrim >> 0) & 0xFF) ); 
