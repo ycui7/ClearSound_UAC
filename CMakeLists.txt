@@ -9,12 +9,10 @@ set(APP_PCA_ENABLE ON)
 set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -fcomment-asm
                                             -Wall
                                             -O3
-											#-O1
-                                            -report
+											-report
                                             -lquadflash
                                             -g
                                             -fxscope
-                                            #-DBOARD_SUPPORT_BOARD=ClearSoundDac
                                             -DUSB_TILE=tile[0]
                                             -DADAT_TX_USE_SHARED_BUFF=1
                                             -DXUA_QUAD_SPI_FLASH=1
