@@ -66,6 +66,15 @@
 #define XUA_ADAT_RX_EN     (0)
 #endif
 
+/* Number of DSD chans to DAC */
+#ifndef DSD_CHANS_DAC
+#define DSD_CHANS_DAC      (2)
+#endif
+
+#ifndef NATIVE_DSD
+#define NATIVE_DSD         (1)
+#endif
+
 /* Number of I2S chans to DAC */
 #ifndef I2S_CHANS_DAC
 #define I2S_CHANS_DAC      (2)
