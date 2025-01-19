@@ -100,13 +100,20 @@
 #define VENDOR_ID		(0x20B1) /* XMOS VID */
 #define PID_AUDIO_2		(0x0018)
 #define PID_AUDIO_1		(0x0019)
-#define VENDOR_STR		"SXMOS"
+#define VENDOR_STR		"XMOS"
 #define PRODUCT_STR_A2	"CSD XMOS (UAC2.0)"
 #define PRODUCT_STR_A1	"CSD XMOS (UAC1.0)"
+#define PRODUCT_STR     "CSD XMOS"
+#define SERIAL_STR      "UHA3-000-001"
 // #define VENDOR_STR		"SpecialtyCircuits LLC"
 // #define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
 // #define PRODUCT_STR_A1	"ClearSound DAC (UAC1.0)"
 
+#define OUTPUT_VOLUME_CONTROL       (1)
+#define INPUT_VOLUME_CONTROL        (1)
+
+#define VOLUME_RES                  (0x40) // The resolution of the volume control in db as a 8.8 fixed point number
+                                            // Default: 0x100 (1db)
 
 #ifndef DFU_PID
     #if (AUDIO_CLASS == 1)

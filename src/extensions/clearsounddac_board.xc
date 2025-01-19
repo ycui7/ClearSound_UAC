@@ -63,14 +63,18 @@ void button_press_deglitch(port p_button)
         select {
             // If the button is "stable", react when the I/O pin changes value
             case is_stable => p_button when pinsneq(current_button_val) :> current_button_val:
-                if (current_button_val == 1) {
-                printf("Button up\n");
-                } else {
-                printf("Button down\n");
+                unsafe {
+                    if (current_button_val == 1) {
+                        debug_printf("Button %d up\n", (unsigned int)p_button);
+                    } else {
+                        debug_printf("Button %d down\n", (unsigned int)p_button);
+                    }
                 }
                 is_stable = 0;
                 int current_time;
                 tmr :> current_time;
+                debug_printf("Current time: %d \n", (unsigned int)current_time);
+
                 // Calculate time to event after debounce period
                 // note that XS1_TIMER_HZ is defined in timer.h
                 debounce_timeout = current_time + (debounce_delay_ms * XS1_TIMER_HZ);
@@ -86,7 +90,7 @@ void button_press_deglitch(port p_button)
 
 
 [[combinable]]
-void AudioHwRemote1(chanend c, client interface i2c_master_if i2c)
+void AudioHwRemoteTile0(chanend c, client interface i2c_master_if i2c)
 {
     while(1)
     {
@@ -116,7 +120,7 @@ void AudioHwRemote1(chanend c, client interface i2c_master_if i2c)
                 }
                 else if (cmd ==AUDIOHW_CMD_GPIORD)
                 {
-                    debug_printf("AudioHwRemote_GPIO_Read_Entering\n");
+                    //debug_printf("AudioHwRemote_GPIO_Read_Entering\n");
                     return;
                     //  add gpio read
                     unsigned regAddr, regVal;
@@ -127,7 +131,7 @@ void AudioHwRemote1(chanend c, client interface i2c_master_if i2c)
                 }
                 else if (cmd ==AUDIOHW_CMD_GPIOWR)
                 {
-                    debug_printf("AudioHwRemote_GPIO_Write_Entering\n");
+                    //debug_printf("AudioHwRemote_GPIO_Write_Entering\n");
                     // add gpio write
                     unsigned regAddr, regValue;
                     c :> regAddr;
@@ -155,7 +159,7 @@ void csd_AudioHwRemote(chanend c)
 	 par
     {
         i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
-        AudioHwRemote1(c, i2c[0]);
+        AudioHwRemoteTile0(c, i2c[0]);
         button_press_deglitch(p_butt_up);
         button_press_deglitch(p_butt_down);
     }
@@ -171,8 +175,7 @@ static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
         uc_audiohw <: (unsigned) AUDIOHW_CMD_PLLREGWR;
         uc_audiohw <: reg;
         uc_audiohw <: val;
-        debug_printf("PLL_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\n", reg, reg, val );
-
+        //debug_printf("PLL_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\n", reg, reg, val );
     }
 }
 
@@ -201,7 +204,7 @@ static inline void DAC_REGREAD(unsigned reg, unsigned &val)
 
 static inline void GPIO_WR(unsigned reg, unsigned val)
 {
-    debug_printf("AudioHwRemote_GPIO_Write_Requesting\n");
+    //debug_printf("AudioHwRemote_GPIO_Write_Requesting\n");
     unsafe
     {
         uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIOWR;
@@ -213,7 +216,7 @@ static inline void GPIO_WR(unsigned reg, unsigned val)
 
 static inline void GPIO_RD(unsigned reg, unsigned &val)
 {
-    debug_printf("AudioHwRemote_GPIO_Read_Requesting\n");
+    //debug_printf("AudioHwRemote_GPIO_Read_Requesting\n");
     unsafe
     {
         uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIORD;
@@ -273,14 +276,13 @@ void csd_AudioHwInit(const csd_config_t &config)
     assert(regVal != 0 && msg("DAC Chip ID Register Read Problem"));
     debug_printf("CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
 
-    for (unsigned reg = 0 ; reg < 61 ; reg++ ){
-        DAC_REGREAD(reg, regVal);
-        // debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
-
-    }
+    //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+    //    DAC_REGREAD(reg, regVal);
+    //    // debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+    //}
     
     // General Comment:
-    // XMOS's I2C lib is very low overhead on physical layer that there is no need to batch send I2C commands. 
+    // XMOS's I2C lib is very low overhead on physical layer. There is no need to batch send I2C commands. 
 
     DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE) ); 
     DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | (AnalogVolume & 0x1F)));
@@ -346,11 +348,10 @@ void csd_AudioHwInit(const csd_config_t &config)
     // DAC_REGWRITE    (ES9219Q_FIR_CONFIG,           (uint8_t)(SetEvenBits ? 0x04 : 0x00) ); 
 
 
-    for (unsigned reg = 0 ; reg < 61 ; reg++ ){
-        DAC_REGREAD(reg, regVal);
-        // debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
-
-    }
+    //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+    //    DAC_REGREAD(reg, regVal);
+    //     debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+    //}
 }
 
 /* Configures the external audio hardware for the required sample frequency.
@@ -358,12 +359,10 @@ void csd_AudioHwInit(const csd_config_t &config)
  */
 void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     unsigned sampRes_DAC, unsigned sampRes_ADC)
-{
-    
+{    
     assert(samFreq >= 22050);
     debug_printf("=================Clock Change===============\n");   
     sw_pll_fixed_clock(mClk);
-    debug_printf("sw_pll_fixed_clock_Done\n");
     delay_milliseconds(10);
     {
         unsigned regVal = 0;
@@ -380,21 +379,11 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
         
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
         debug_printf("\033[42m\tCHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d\t\033[0m\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
-    
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG,  (uint8_t)(ES9219Q_DISALBE_ATR_CH2 | ES9219Q_DISALBE_ATR_CH1 | ES9219Q_PDB_ATR_R | ES9219Q_PDB_ATR_L) );     
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB) );     
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB | ES9219Q_ENAUX | ES9219Q_AREG_PDB | ES9219Q_ENPHA | ES9219Q_CPH_ENS | ES9219Q_CPH_ENW | ES9219Q_CP_CLKIO_SEL) );     
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
-        //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
-        //DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE_GPIO) ); 
-        //delay_milliseconds(10);
-        //DAC_REGWRITE(1,0b10000000);
 
-        for (unsigned reg = 0 ; reg < 61 ; reg++ ){
-            DAC_REGREAD(reg, regVal);
-            // debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
-        }   
+        //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+        //    DAC_REGREAD(reg, regVal);
+        //    debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+        //}   
     }
 
 }
