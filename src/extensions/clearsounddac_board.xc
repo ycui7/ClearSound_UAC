@@ -155,8 +155,7 @@ void csd_AudioHwRemote(chanend c)
 
     i2c_master_if i2c[1];
 
-    [[combine]]
-	 par
+    [[combine]] par
     {
         i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
         AudioHwRemoteTile0(c, i2c[0]);
