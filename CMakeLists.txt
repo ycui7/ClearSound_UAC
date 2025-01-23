@@ -18,10 +18,12 @@ set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -fcomment-asm
                                             -DXUA_QUAD_SPI_FLASH=1
                                             -DXSCOPE
                                             -DUAC_FORCE_FEEDBACK=1
-											-DDEBUG_PRINT_ENABLE=1)
+											-DDEBUG_PRINT_ENABLE=1
+                                            -DDSD_CHANS_DAC=2
+                                            -DNATIVE_DSD=1)
 											
 											
-set(APP_COMPILER_FLAGS_2AMi2o2xxxxxx ${SW_USB_AUDIO_FLAGS})
+set(APP_COMPILER_FLAGS_2AMi2o2xxxxxd ${SW_USB_AUDIO_FLAGS})
 
 include(${CMAKE_CURRENT_LIST_DIR}/configs_test.cmake)
 
