@@ -50,8 +50,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     //debug_printf("I2C_Write:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val );
 }
 
-[[combinable]]
-void button_press_deglitch(port p_button)
+[[combinable]] void button_press_deglitch(port p_button)
 {
     int current_button_val = 0;
     int is_stable = 1;
@@ -89,8 +88,7 @@ void button_press_deglitch(port p_button)
 }
 
 
-[[combinable]]
-void AudioHwRemoteTile0(chanend c, client interface i2c_master_if i2c)
+[[combinable]] void AudioHwRemoteTile0(chanend c, client interface i2c_master_if i2c)
 {
     while(1)
     {
