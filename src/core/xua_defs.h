@@ -112,7 +112,7 @@
 #define OUTPUT_VOLUME_CONTROL       (1)
 #define INPUT_VOLUME_CONTROL        (1)
 
-#define VOLUME_RES                  (0x0020)  //  Default: 0x40 (0.5db). The resolution of the volume control in db as a 8.8 fixed point number
+#define VOLUME_RES                  (0x0040)  //  Default: 0x40 (0.5db). The resolution of the volume control in db as a 8.8 fixed point number
                                             
 #ifndef MIN_VOLUME
 #define MIN_VOLUME                  (0xD000)    //  Default: 0xD000 (-48db). The minimum volume setting. This is a signed 8.8 fixed point number.
