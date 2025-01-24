@@ -236,10 +236,10 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
     uint8_t AnalogVolume = 0; 
     uint8_t UserVolummeL = 0, UserVolummeR = 0;  //0.5dB steps
-    int16_t ThdCompC2Ch1 = 0, ThdCompC3Ch1 = 0; 
-    int16_t ThdCompC2Ch2 = 0, ThdCompC3Ch2 = 0; 
-    int16_t CrosstalkCompCh1 = 0, CrosstalkCompCh2 = 0; //0x0001 is -126dB 
-    uint32_t VolumeMasterTrim = 0x7FFFFFFF;
+    //int16_t ThdCompC2Ch1 = 0, ThdCompC3Ch1 = 0; 
+    //int16_t ThdCompC2Ch2 = 0, ThdCompC3Ch2 = 0; 
+    //int16_t CrosstalkCompCh1 = 0, CrosstalkCompCh2 = 0; //0x0001 is -126dB 
+    //uint32_t VolumeMasterTrim = 0x7FFFFFFF;
     
     debug_printf("=====================================================\n");
     

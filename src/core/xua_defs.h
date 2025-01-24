@@ -101,9 +101,9 @@
 #define PID_AUDIO_2		(0x0018)
 #define PID_AUDIO_1		(0x0019)
 #define VENDOR_STR		"XMOS"
+//#define PRODUCT_STR     "CSD XMOS"
 #define PRODUCT_STR_A2	"CSD XMOS (UAC2.0)"
 #define PRODUCT_STR_A1	"CSD XMOS (UAC1.0)"
-#define PRODUCT_STR     "CSD XMOS"
 #define SERIAL_STR      "UHA3-000-001"
 // #define VENDOR_STR		"SpecialtyCircuits LLC"
 // #define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
