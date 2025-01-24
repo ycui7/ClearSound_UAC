@@ -15,6 +15,7 @@
 void AudioHwRemote(chanend c);
 
 extern unsafe chanend uc_audiohw;
+extern unsafe chanend uc_audiohw2;
 
 #define USER_MAIN_DECLARATIONS      chan c_audiohw[2];
 
@@ -30,10 +31,12 @@ extern unsafe chanend uc_audiohw;
                         on tile[0]: {\
                                         par\
                                         {\
+                                            unsafe{\
+                                                uc_audiohw2 = (chanend) c_audiohw[1];\
+                                            }\
                                             AudioHwRemote(c_audiohw[0]);\
                                         }\
                                     }
-
                                             //unsafe {    \
                                             //    debug_printf("uc_audiohw2: 0x%x\n", (uint32_t)uc_audiohw2); \
                                             //    debug_printf("uc_audiohw: 0x%x\n", (uint32_t)uc_audiohw);  \
