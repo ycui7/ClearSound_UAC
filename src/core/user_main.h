@@ -15,20 +15,14 @@
 void AudioHwRemote(chanend c);
 
 extern unsafe chanend uc_audiohw;
-extern unsafe chanend uc_audiohw2;
 
-#define USER_MAIN_DECLARATIONS chan c_audiohw;
+#define USER_MAIN_DECLARATIONS      chan c_audiohw;
 
 #define USER_MAIN_CORES on tile[1]: {\
                                         par\
                                         {\
                                             unsafe{\
                                                 uc_audiohw = (chanend) c_audiohw;\
-                                                uc_audiohw2 = (chanend) c_audiohw;\
-                                            unsafe {    \
-                                                debug_printf("uc_audiohw2: 0x%x\n", (uint32_t)uc_audiohw2); \
-                                                debug_printf("uc_audiohw: 0x%x\n", (uint32_t)uc_audiohw);  \
-                                             }  \
                                             }\
                                         }\
                                     }\
@@ -40,6 +34,10 @@ extern unsafe chanend uc_audiohw2;
                                         }\
                                     }
 
+                                            //unsafe {    \
+                                            //    debug_printf("uc_audiohw2: 0x%x\n", (uint32_t)uc_audiohw2); \
+                                            //    debug_printf("uc_audiohw: 0x%x\n", (uint32_t)uc_audiohw);  \
+                                            // }  \
 
 //static void update_dac_volume(/*chanend c_audiohw, */ int channel, int volume){
 //    //split total volume into analog and digital volume. 
