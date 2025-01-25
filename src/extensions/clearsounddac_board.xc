@@ -95,6 +95,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     {
         select{
             case c[int i] :> unsigned cmd:
+                //debug_printf("Cmd:\t0x%x\n", cmd);  
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
                     unsigned regAddr, regValue;
@@ -139,15 +140,18 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     unsigned channel, valueA, valueDL, valueDR;
                     c[i] :> channel;
                     c[i] :> valueA;
-                    //c[i] :> valueDL;
-                    //c[i] :> valueDR;
+                    c[i] :> valueDL;
+                    valueDR = valueDL;
                     unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
+                    regValueA = valueA & 0x1F;
+                    regValueDL = valueDL >> 8;
+                    regValueDR = valueDR >> 8;
                     
                     ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
                     
-                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_VOLUME_UPDATE, regAddrA, regValueA );
+                    debug_printf("Vol_Update:\tAVOL: 0x%x\tDVOL_L:0x%x\tVDOL_R:0x%x\n", regValueA, regValueDL, regValueDR );
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -243,27 +247,36 @@ void csd_AudioHwChanInit(chanend c)
 /*  split total volume into analog and digital volume. 
  *  Analog volume has priority and digital volume trims the remaining gain. 
  */
-unsigned update_dac_volume(int channel, int volume){
+{unsigned, unsigned} ADVolume_Split(int channel, int volume){
     int const A_RES = 512, D_RES = 128, A_RANGE = (-24 *256);
     float AVol = 0, DVol = 0, Vol_dB = volume;
     AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
     printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
-    return 0;
+    return {AVol, DVol};
 }
 
 /* Update the volume of the audio hardware 
  */
 void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
 {
-    update_dac_volume(channel, val);
+    unsigned AVol, DVol;
+    {AVol, DVol} = ADVolume_Split(channel, val);
     unsafe
     {
         c_audiohwremote <: (unsigned) AUDIOHW_CMD_VOLUME_UPDATE;;
         c_audiohwremote <: channel;
-        c_audiohwremote <: update_dac_volume(channel, val);
-        //c_audiohwremote <: update_dac_volume(channel, val);
-        //c_audiohwremote <: update_dac_volume(channel, val);
+        c_audiohwremote <: AVol;
+        c_audiohwremote <: DVol;
+    }
+}
+
+void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
+{
+    unsafe
+    {
+        c_audiohwremote <: (unsigned) AUDIOHW_CMD_BALANCE_UPDATE;;
+        c_audiohwremote <: val;
     }
 }
 
