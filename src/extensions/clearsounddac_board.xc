@@ -138,15 +138,16 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
                 {
                     unsigned channel, valueA, valueDL, valueDR;
-                    c[i] :> channel;
+                    c[i] :> channel;    
                     c[i] :> valueA;
                     c[i] :> valueDL;
                     valueDR = valueDL;
+                    debug_printf("Vol_Update:\tvalueA: %d\tvalueDL:%d\tvalueDR:%d\n", valueA, valueDL, valueDR );
                     unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
-                    regValueA = valueA & 0x1F;
-                    regValueDL = valueDL >> 8;
-                    regValueDR = valueDR >> 8;
-                    
+                    regValueA = ((-valueA) >> 8) & 0x1F;
+                    regValueDL = (-valueDL) >> 8;
+                    regValueDR = (-valueDR) >> 8;
+                        
                     ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
@@ -247,13 +248,13 @@ void csd_AudioHwChanInit(chanend c)
 /*  split total volume into analog and digital volume. 
  *  Analog volume has priority and digital volume trims the remaining gain. 
  */
-{unsigned, unsigned} ADVolume_Split(int channel, int volume){
+{int, int} ADVolume_Split(int channel, int volume){
     int const A_RES = 512, D_RES = 128, A_RANGE = (-24 *256);
     float AVol = 0, DVol = 0, Vol_dB = volume;
     AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
     printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
-    return {AVol, DVol};
+    return {(int)AVol, (int)DVol};
 }
 
 /* Update the volume of the audio hardware 
