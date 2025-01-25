@@ -100,14 +100,18 @@
 #define VENDOR_ID		(0x20B1) /* XMOS VID */
 #define PID_AUDIO_2		(0x0018)
 #define PID_AUDIO_1		(0x0019)
-#define VENDOR_STR		"XMOS"
-//#define PRODUCT_STR     "CSD XMOS"
-#define PRODUCT_STR_A2	"CSD XMOS (UAC2.0)"
-#define PRODUCT_STR_A1	"CSD XMOS (UAC1.0)"
+
+#ifdef SPECIALTYCIRCUITS_RELEASE
+#define VENDOR_STR		"SpecialtyCircuits LLC"
+#define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
+#define PRODUCT_STR_A1	"ClearSound DAC (UAC1.0)"
 #define SERIAL_STR      "UHA3-000-001"
-// #define VENDOR_STR		"SpecialtyCircuits LLC"
-// #define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
-// #define PRODUCT_STR_A1	"ClearSound DAC (UAC1.0)"
+#else
+#define VENDOR_STR		"XMOS"
+#define PRODUCT_STR_A2	"XMOS (UAC2.0)"
+#define PRODUCT_STR_A1	"XMOS (UAC1.0)"
+#define SERIAL_STR      "123456789"
+#endif
 
 #define OUTPUT_VOLUME_CONTROL       (1)
 #define INPUT_VOLUME_CONTROL        (1)
