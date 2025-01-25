@@ -116,9 +116,8 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c[i] <: regVal;
                 }
-                else if (cmd ==AUDIOHW_CMD_GPIORD)
+                else if (cmd == AUDIOHW_CMD_GPIORD)
                 {
-                    //debug_printf("AudioHwRemote_GPIO_Read_Entering\n");
                     return;
                     //  add gpio read
                     unsigned regAddr, regVal;
@@ -127,16 +126,29 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     c[i] <: regVal;
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
                 }
-                else if (cmd ==AUDIOHW_CMD_GPIOWR)
+                else if (cmd == AUDIOHW_CMD_GPIOWR)
                 {
-                    //debug_printf("AudioHwRemote_GPIO_Write_Entering\n");
-                    // add gpio write
                     unsigned regAddr, regValue;
                     c[i] :> regAddr;
                     c[i] :> regValue;
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
                     p_codec_reset <: regValue;
                 } 
+                else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
+                {
+                    unsigned channel, valueA, valueDL, valueDR;
+                    c[i] :> channel;
+                    c[i] :> valueA;
+                    //c[i] :> valueDL;
+                    //c[i] :> valueDR;
+                    unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
+                    
+                    ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
+                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
+                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
+                    
+                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_VOLUME_UPDATE, regAddrA, regValueA );
+                }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
                     i2c.shutdown();
@@ -231,35 +243,27 @@ void csd_AudioHwChanInit(chanend c)
 /*  split total volume into analog and digital volume. 
  *  Analog volume has priority and digital volume trims the remaining gain. 
  */
-void update_dac_volume(chanend c, int channel, int volume){
+unsigned update_dac_volume(int channel, int volume){
     int const A_RES = 512, D_RES = 128, A_RANGE = (-24 *256);
     float AVol = 0, DVol = 0, Vol_dB = volume;
     AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
     printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
+    return 0;
 }
 
 /* Update the volume of the audio hardware 
  */
 void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
 {
+    update_dac_volume(channel, val);
     unsafe
     {
-/*        if (channel == 0) {
-            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
-        }
-        else if (channel == 1) {
-            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
-        }
-        else if (channel == 2) {
-            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
-        }
-        else {
-            //never run 
-        }
-        c_audiohwremote <: val;*/
-        debug_printf("chan_end: 0x%x\n", (unsigned)c_audiohwremote );
-        debug_printf("Volume Update:tCH: %d\tVol: %d\n", channel, val );
+        c_audiohwremote <: (unsigned) AUDIOHW_CMD_VOLUME_UPDATE;;
+        c_audiohwremote <: channel;
+        c_audiohwremote <: update_dac_volume(channel, val);
+        //c_audiohwremote <: update_dac_volume(channel, val);
+        //c_audiohwremote <: update_dac_volume(channel, val);
     }
 }
 
