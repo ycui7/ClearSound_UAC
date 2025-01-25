@@ -11,6 +11,7 @@ extern "C" {
     #include "sw_pll.h"
 }
 
+#include <math.h>
 #include <debug_print.h>
 
 #define ES9219_USE_PLL_WITH_MCLK
@@ -186,6 +187,7 @@ static inline void DAC_REGWRITE(unsigned reg, unsigned val)
     }
 }
 
+
 static inline void DAC_REGREAD(unsigned reg, unsigned &val)
 {
     unsafe
@@ -194,7 +196,6 @@ static inline void DAC_REGREAD(unsigned reg, unsigned &val)
         uc_audiohw <: reg;
         uc_audiohw :> val;
         //debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
-
     }
 }
 
@@ -227,9 +228,44 @@ void csd_AudioHwChanInit(chanend c)
     unsafe{uc_audiohw = c;}
 }
 
+/*  split total volume into analog and digital volume. 
+ *  Analog volume has priority and digital volume trims the remaining gain. 
+ */
+void update_dac_volume(chanend c, int channel, int volume){
+    int const A_RES = 512, D_RES = 128, A_RANGE = (-24 *256);
+    float AVol = 0, DVol = 0, Vol_dB = volume;
+    AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
+    DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
+    printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
+}
+
+/* Update the volume of the audio hardware 
+ */
+void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
+{
+    unsafe
+    {
+/*        if (channel == 0) {
+            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
+        }
+        else if (channel == 1) {
+            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
+        }
+        else if (channel == 2) {
+            c_audiohwremote <: (unsigned) AUDIOHW_CMD_REGWR;;
+        }
+        else {
+            //never run 
+        }
+        c_audiohwremote <: val;*/
+        debug_printf("chan_end: 0x%x\n", (unsigned)c_audiohwremote );
+        debug_printf("Volume Update:tCH: %d\tVol: %d\n", channel, val );
+    }
+}
 
 /* Note this is called from tile[1] but the I2C lines to the CODEC are on tile[0]
- * use a channel to communicate CODEC reg read/writes to a remote core */
+ * use a channel to communicate CODEC reg read/writes to a remote core 
+ */
 void csd_AudioHwInit(const csd_config_t &config)
 {
     unsigned regVal = 0;
@@ -375,11 +411,7 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
         
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
         debug_printf("\033[42m\tCHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d\t\033[0m\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
-
-        //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
-        //    DAC_REGREAD(reg, regVal);
-        //    debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
-        //}   
+ 
     }
 
 }
