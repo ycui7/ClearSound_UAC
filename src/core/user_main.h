@@ -12,7 +12,7 @@
 #include <math.h>   
 #include <stdio.h>
 
-void AudioHwRemote(chanend c);
+void AudioHwRemote(chanend c[]);
 
 extern unsafe chanend uc_audiohw;
 extern unsafe chanend uc_audiohw2;
@@ -34,7 +34,7 @@ extern unsafe chanend uc_audiohw2;
                                             unsafe{\
                                                 uc_audiohw2 = (chanend) c_audiohw[1];\
                                             }\
-                                            AudioHwRemote(c_audiohw[0]);\
+                                            AudioHwRemote(c_audiohw);\
                                         }\
                                     }
                                             //unsafe {    \

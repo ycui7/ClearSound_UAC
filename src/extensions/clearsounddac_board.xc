@@ -88,33 +88,33 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 }
 
 
-[[combinable]] void AudioHwRemoteTile0(chanend c, client interface i2c_master_if i2c)
+[[combinable]] void AudioHwRemoteTile0(chanend c[], client interface i2c_master_if i2c)
 {
     while(1)
     {
         select{
-            case c :> unsigned cmd:
+            case c[0] :> unsigned cmd:
 
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
                     unsigned regAddr, regValue;
-                    c :> regAddr;
-                    c :> regValue;
+                    c[0] :> regAddr;
+                    c[0] :> regValue;
                     ES9219Q_PLL_REGWRITE(regAddr, regValue, i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_REGWR)
                 {
                     unsigned regAddr, regValue;
-                    c :> regAddr;
-                    c :> regValue;
+                    c[0] :> regAddr;
+                    c[0] :> regValue;
                     ES9219Q_REGWRITE(regAddr, regValue, i2c);
                 }
                 else if(cmd == AUDIOHW_CMD_REGRD)
                 {
                     unsigned regAddr, regVal;
-                    c :> regAddr;
+                    c[0] :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
-                    c <: regVal;
+                    c[0] <: regVal;
                 }
                 else if (cmd ==AUDIOHW_CMD_GPIORD)
                 {
@@ -122,9 +122,9 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     return;
                     //  add gpio read
                     unsigned regAddr, regVal;
-                    c :> regAddr;
+                    c[0] :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
-                    c <: regVal;
+                    c[0] <: regVal;
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
                 }
                 else if (cmd ==AUDIOHW_CMD_GPIOWR)
@@ -132,8 +132,8 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     //debug_printf("AudioHwRemote_GPIO_Write_Entering\n");
                     // add gpio write
                     unsigned regAddr, regValue;
-                    c :> regAddr;
-                    c :> regValue;
+                    c[0] :> regAddr;
+                    c[0] :> regValue;
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
                     p_codec_reset <: regValue;
                 } 
@@ -148,7 +148,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 
 }
 
-void csd_AudioHwRemote(chanend c)
+void csd_AudioHwRemote(chanend c[])
 {
 
     i2c_master_if i2c[1];

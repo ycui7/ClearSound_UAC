@@ -16,7 +16,7 @@ static const csd_config_t config = {
 };
 
 
-void AudioHwRemote(chanend c)
+void AudioHwRemote(chanend c[])
 {
 	csd_AudioHwRemote(c);
 }

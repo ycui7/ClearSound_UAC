@@ -43,7 +43,7 @@ typedef enum
  *
  *  \param   c    Server side of channel connecting I2C master server and HW config functions.
  */
-void csd_AudioHwRemote(chanend c);
+void csd_AudioHwRemote(chanend c[]);
 
 typedef enum
 {
