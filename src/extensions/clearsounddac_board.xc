@@ -94,7 +94,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     {
         select{
             case c[0] :> unsigned cmd:
-
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
                     unsigned regAddr, regValue;
@@ -142,7 +141,23 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     i2c.shutdown();
                     return;
                 }
-            break;
+                break;
+            case c[1] :> unsigned cmd:
+                if (cmd == AUDIOHW_CMD_REGWR)
+                {
+                    unsigned regAddr, regValue;
+                    c[1] :> regAddr;
+                    c[1] :> regValue;
+                    ES9219Q_REGWRITE(regAddr, regValue, i2c);
+                }
+                else if(cmd == AUDIOHW_CMD_REGRD)
+                {
+                    unsigned regAddr, regVal;
+                    c[1] :> regAddr;
+                    ES9219Q_REGREAD(regAddr, regVal, i2c);
+                    c[1] <: regVal;
+                }
+                break;
         }
     }
 
