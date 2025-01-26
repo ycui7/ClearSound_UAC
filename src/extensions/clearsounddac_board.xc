@@ -137,22 +137,23 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 } 
                 else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
                 {
-                    unsigned channel, valueA, valueDL, valueDR;
+                    unsigned channel;
+                    int valueA, valueDL, valueDR;
                     c[i] :> channel;    
                     c[i] :> valueA;
                     c[i] :> valueDL;
                     valueDR = valueDL;
-                    debug_printf("Vol_Update:\tvalueA: %d\tvalueDL:%d\tvalueDR:%d\n", valueA, valueDL, valueDR );
+                    //printf("Vol_Update:\tvalueA: %2.2f\tvalueD_L: %2.2f\tvalueD_R:%2.2f\n", (float)(valueA)/256, (float)(valueDL)/256, (float)(valueDR)/256 );
                     unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
                     regValueA = ((-valueA) >> 8) & 0x1F;
-                    regValueDL = (-valueDL) >> 8;
-                    regValueDR = (-valueDR) >> 8;
+                    regValueDL = (-valueDL) >> 7;
+                    regValueDR = (-valueDR) >> 7;
                         
                     ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
                     ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
                     
-                    debug_printf("Vol_Update:\tAVOL: 0x%x\tDVOL_L:0x%x\tVDOL_R:0x%x\n", regValueA, regValueDL, regValueDR );
+                    //debug_printf("Vol_Update:\tAVOL: %d\tDVOL_L: %d\tVDOL_R: %d\n", regValueA, regValueDL, regValueDR );
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -253,7 +254,7 @@ void csd_AudioHwChanInit(chanend c)
     float AVol = 0, DVol = 0, Vol_dB = volume;
     AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
-    printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
+    //printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
     return {(int)AVol, (int)DVol};
 }
 
