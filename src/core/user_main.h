@@ -17,6 +17,8 @@ void AudioHwRemote(chanend c[]);
 extern unsafe chanend uc_audiohw;
 extern unsafe chanend uc_audiohw2;
 
+#define SC_CLEARSOUND_DAC          1
+
 #define USER_MAIN_DECLARATIONS      chan c_audiohw[2];
 
 #define USER_MAIN_CORES on tile[1]: {\
