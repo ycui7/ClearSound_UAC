@@ -101,6 +101,14 @@
 #define PID_AUDIO_2		(0x0018)
 #define PID_AUDIO_1		(0x0019)
 
+#ifndef DFU_PID
+    #if (AUDIO_CLASS == 1)
+        #define DFU_PID             (0xD000 + PID_AUDIO_1)
+    #else
+        #define DFU_PID             (0xD000 + PID_AUDIO_2)
+    #endif
+#endif
+
 #ifdef SPECIALTYCIRCUITS_RELEASE
 #define VENDOR_STR		"SpecialtyCircuits LLC"
 #define PRODUCT_STR_A2	"ClearSound DAC (UAC2.0)"
@@ -116,61 +124,56 @@
 #define OUTPUT_VOLUME_CONTROL       (1)
 #define INPUT_VOLUME_CONTROL        (1)
 
-#define VOLUME_RES                  (0x0040)  //  Default: 0x40 (0.5db). The resolution of the volume control in db as a 8.8 fixed point number
+//  Default: 0x40 (0.5db). The resolution of the volume control in db as a 8.8 fixed point number
+#ifndef VOLUME_RES
+#define VOLUME_RES                  (0x0040)  
+#endif 
                                             
+//  Default: 0xD000 (-48db). The minimum volume setting. This is a signed 8.8 fixed point number.
 #ifndef MIN_VOLUME
-#define MIN_VOLUME                  (0xD000)    //  Default: 0xD000 (-48db). The minimum volume setting. This is a signed 8.8 fixed point number.
+#define MIN_VOLUME                  (0xD000)    
 #endif
 
+//  Default: 0x0000 (0db). The maximum volume setting. This is a signed 8.8 fixed point number.
 #ifndef MAX_VOLUME
-#define MAX_VOLUME                  (0x0000)    //  Default: 0x0000 (0db). The maximum volume setting. This is a signed 8.8 fixed point number.
+#define MAX_VOLUME                  (0x0000)    
 #endif
-
-#ifndef DFU_PID
-    #if (AUDIO_CLASS == 1)
-        #define DFU_PID             (0xD000 + PID_AUDIO_1)
-    #else
-        #define DFU_PID             (0xD000 + PID_AUDIO_2)
-    #endif
-#endif
-
-//:
 
 /* Enable/Disable example HID code */
 #ifndef HID_CONTROLS
 #define HID_CONTROLS       (0)
 #endif
 
-#define FL_QUADDEVICE_AT25FF321A \
-{ \
-    0,                      /* UNKNOWN */ \
-    256,                    /* page size */ \
-    16384,                  /* num pages */ \
-    3,                      /* address size */ \
-    3,                      /* log2 clock divider */ \
-    0x9F,                   /* QSPI_RDID */ \
-    0,                      /* id dummy bytes */ \
-    3,                      /* id size in bytes */ \
-    0x1F4708,               /* device id */ \
-    0x20,                   /* QSPI_SE */ \
-    4096,                   /* Sector erase is always 4KB */ \
-    0x06,                   /* QSPI_WREN */ \
-    0x04,                   /* QSPI_WRDI */ \
-    PROT_TYPE_SR,           /* Protection via SR */ \
-    {{0x3C,0x00},{0,0}},    /* QSPI_SP, QSPI_SU */ \
-    0x02,                   /* QSPI_PP */ \
-    0xEB,                   /* QSPI_READ_FAST */ \
-    1,                      /* 1 read dummy byte */ \
-    SECTOR_LAYOUT_REGULAR,  /* mad sectors */ \
-    {4096,{0,{0}}},         /* regular sector sizes */ \
-    0x05,                   /* QSPI_RDSR */ \
-    0x01,                   /* QSPI_WRSR */ \
-    0x01,                   /* QSPI_WIP_BIT_MASK */ \
-}
+//#define FL_QUADDEVICE_AT25FF321A \
+//{ \
+//    0,                      /* UNKNOWN */ \
+//    256,                    /* page size */ \
+//    8192,                  /* num pages */ \
+//    3,                      /* address size */ \
+//    3,                      /* log2 clock divider */ \
+//    0x9F,                   /* QSPI_RDID */ \
+//    0,                      /* id dummy bytes */ \
+//    3,                      /* id size in bytes */ \
+//    0x1F4708,               /* device id */ \
+//    0x20,                   /* QSPI_SE */ \
+//    4096,                   /* Sector erase is always 4KB */ \
+//    0x06,                   /* QSPI_WREN */ \
+//    0x04,                   /* QSPI_WRDI */ \
+//    PROT_TYPE_SR,           /* Protection via SR */ \
+//    {{0x3C,0x00},{0,0}},    /* QSPI_SP, QSPI_SU */ \
+//    0x02,                   /* QSPI_PP */ \
+//    0xEB,                   /* QSPI_READ_FAST */ \
+//    1,                      /* 1 read dummy byte */ \
+//    SECTOR_LAYOUT_REGULAR,  /* mad sectors */ \
+//    {4096,{0,{0}}},         /* regular sector sizes */ \
+//    0x05,                   /* QSPI_RDSR */ \
+//    0x01,                   /* QSPI_WRSR */ \
+//    0x01,                   /* QSPI_WIP_BIT_MASK */ \
+//}
 
 // DFU_FLASH_DEVICE is a comma-separated list of flash spec structures
 // This define is used in sc_usb_audio/module_usb_audio/flashlib_user.c
-#define DFU_FLASH_DEVICE FL_QUADDEVICE_AT25FF321A
+//#define DFU_FLASH_DEVICE FL_QUADDEVICE_AT25FF321A
 
 /* Calculate channel counts based on features */
 #if (XUA_SPDIF_TX_EN)
