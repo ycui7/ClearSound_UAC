@@ -318,7 +318,8 @@ void csd_AudioHwInit(const csd_config_t &config)
     //uint32_t VolumeMasterTrim = 0x7FFFFFFF;
     
     debug_printf("=====================================================\n");
-    
+    debug_printf("Build with XTC Tools %d.%d.%d on %d-%d\n", __XMOS_XTC_VERSION_MAJOR__, __XMOS_XTC_VERSION_MINOR__, __XMOS_XTC_VERSION_PATCH__, XCC_VERSION_YEAR, XCC_VERSION_MONTH);
+    debug_printf("=====================================================\n");    
     delay_milliseconds(1);
 
     // Set the fractional divider if used
@@ -441,7 +442,7 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
         debug_printf("===================Current State===============\n");   
 
         DAC_REGREAD(ES9219Q_GPIO_READBACK, regVal);
-        printf(ANSI_GREEN "CLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d" ANSI_RESET "\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
+        debug_printf(ANSI_GREEN "CLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d" ANSI_RESET "\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
         
         DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);        
         debug_printf(ANSI_GREEN "OC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d" ANSI_RESET "\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
