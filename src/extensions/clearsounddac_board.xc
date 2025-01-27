@@ -13,8 +13,30 @@ extern "C" {
 
 #include <math.h>
 #include <debug_print.h>
+#include <stdio.h>
+
+//#define SC_COLOR_DEBUG_OUTPUT
+
+#ifdef SC_COLOR_DEBUG_OUTPUT
+#define ANSI_RED        "\x1b[31m"
+#define ANSI_GREEN      "\x1b[32m"
+#define ANSI_YELLOW     "\x1b[33m"
+#define ANSI_BLUE       "\x1b[34m"
+#define ANSI_MAGENTA    "\x1b[35m"
+#define ANSI_CYAN       "\x1b[36m"
+#define ANSI_RESET      "\x1b[0m"
+#else
+#define ANSI_RED        ""
+#define ANSI_GREEN      ""
+#define ANSI_YELLOW     ""
+#define ANSI_BLUE       ""
+#define ANSI_MAGENTA    ""
+#define ANSI_CYAN       ""
+#define ANSI_RESET      ""
+#endif
 
 #define ES9219_USE_PLL_WITH_MCLK
+
 
 // DAC I2C lines
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
@@ -318,14 +340,14 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_PLL_REGWRITE    (198 ,   0x02); //Set Clock_OUT_Div = 2, and PFE_DELAY to 1.5ns
     DAC_PLL_REGWRITE    (199 ,   0xC2); 
     DAC_PLL_REGWRITE    (200 ,   0x0C); //Turn On PLL regulators as final step
-    debug_printf("CLOCK CONFIGURATION: \"MCLK => PLL => SYSTEM CLOCK\"\n");
+    debug_printf(ANSI_CYAN "CLOCK CONFIGURATION: \"MCLK => PLL => SYSTEM CLOCK\"" ANSI_RESET "\n");
     delay_milliseconds(1);
 #endif
         
     // Check we can talk to the DAC
     DAC_REGREAD(0x40, regVal);
-    assert(regVal != 0 && msg("DAC Chip ID Register Read Problem"));
-    debug_printf("CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
+    assert(regVal != 0 && msg(ANSI_RED "DAC Chip ID Register Read Problem" ANSI_RESET "\n"));
+    debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
 
     //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
     //    DAC_REGREAD(reg, regVal);
@@ -412,7 +434,6 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
     unsigned sampRes_DAC, unsigned sampRes_ADC)
 {    
     assert(samFreq >= 22050);
-    debug_printf("=================Clock Change===============\n");   
     sw_pll_fixed_clock(mClk);
     delay_milliseconds(10);
     {
@@ -420,16 +441,16 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
         debug_printf("===================Current State===============\n");   
 
         DAC_REGREAD(ES9219Q_GPIO_READBACK, regVal);
-        debug_printf("\033[42m\tCLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d\t\033[0m\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
+        printf(ANSI_GREEN "CLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d" ANSI_RESET "\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
         
         DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);        
-        debug_printf("\033[42m\tOC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d\t\033[0m\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
+        debug_printf(ANSI_GREEN "OC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d" ANSI_RESET "\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
         
         DAC_REGREAD(ES9219Q_READ_LOCK_STATUS, regVal);
-        debug_printf("\033[42m\tMQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d\t\033[0m\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
+        debug_printf(ANSI_GREEN "MQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d" ANSI_RESET "\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
         
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
-        debug_printf("\033[42m\tCHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d\t\033[0m\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
+        debug_printf(ANSI_GREEN "CHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
  
     }
 
