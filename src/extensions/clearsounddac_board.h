@@ -35,7 +35,11 @@ typedef enum
     AUDIOHW_CMD_GPIOWR,
     AUDIOHW_CMD_VOLUME_UPDATE,
     AUDIOHW_CMD_BALANCE_UPDATE,
-    AUDIOHW_CMD_EXIT
+    AUDIOHW_CMD_THD_UPDATE,
+    AUDIOHW_CMD_CROSSTALK_UPDATE,
+    AUDIOHW_CMD_EXIT,
+    AUDIOHW_CMD_ECHO, 
+    AUDIOHW_CMD_VOLUME_BOOST_UPDATE   //this is a workaround for android volume control
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 
