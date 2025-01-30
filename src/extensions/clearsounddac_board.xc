@@ -215,8 +215,8 @@ void csd_AudioHwRemote(chanend c[])
     i2c_master_if i2c[1];
     
     par {
-        xscope_host_data(xscope_data_in);
-        process_xscope(xscope_data_in);
+        //xscope_host_data(xscope_data_in);
+        //process_xscope(xscope_data_in);
         [[combine]] par
         {
             i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);

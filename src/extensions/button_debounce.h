@@ -10,6 +10,8 @@
 #ifndef BUTTON_PRESS_H_
 #define BUTTON_PRESS_H_
 
+#include <stdint.h>
+
 typedef enum {
     BUTTON_ACTION_VOID,
     BUTTON_ACTION_PRESSED,
@@ -37,9 +39,9 @@ typedef interface button_if_2 {
 #define BUTTONS_NUM_CLIENTS 3
 
 typedef struct {
-    bool pressed_now;
-    bool pressed_for_long;
-    bool inhibit_released_once;
+    int pressed_now;
+    int pressed_for_long;
+    int inhibit_released_once;
 } button_states_t;
 
 [[combinable]]
