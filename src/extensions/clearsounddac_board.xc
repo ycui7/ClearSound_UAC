@@ -10,6 +10,8 @@
 extern "C" {
     #include "sw_pll.h"
 }
+#include <xscope.h>
+#include <print.h>
 
 #include <math.h>
 #include <debug_print.h>
@@ -188,20 +190,44 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 
 }
 
+[[combinable]] void process_xscope(chanend xscope_data_in) {
+    int bytesRead = 0;
+    unsigned char buffer[256];
+
+    xscope_connect_data_from_host(xscope_data_in);
+
+    while (1) {
+        select {
+        case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
+        if (bytesRead) {
+            printstr(buffer);
+            if (buffer[0] == 'q')
+            return;
+        }
+        break;
+        }
+    }
+}
+
 void csd_AudioHwRemote(chanend c[])
 {
-
+    chan xscope_data_in;
     i2c_master_if i2c[1];
-
-    [[combine]] par
-    {
-        i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
-        AudioHwRemoteTile0(c, 2, i2c[0]);
-        button_press_deglitch(p_butt_up);
-        button_press_deglitch(p_butt_down);
+    
+    par {
+        xscope_host_data(xscope_data_in);
+        process_xscope(xscope_data_in);
+        [[combine]] par
+        {
+            i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
+            AudioHwRemoteTile0(c, 2, i2c[0]);
+            button_press_deglitch(p_butt_up);
+            button_press_deglitch(p_butt_down);
+        }
     }
-
 }
+
+
 
 unsafe chanend uc_audiohw;
 
