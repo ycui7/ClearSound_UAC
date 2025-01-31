@@ -10,12 +10,13 @@
 extern "C" {
     #include "sw_pll.h"
 }
-#include <xscope.h>
-#include <print.h>
+
 
 #include <math.h>
 #include <debug_print.h>
 #include <stdio.h>
+#include <xscope.h>
+#include <print.h>
 
 //#define SC_COLOR_DEBUG_OUTPUT
 
@@ -190,7 +191,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 
 }
 
-[[combinable]] void process_xscope(chanend xscope_data_in) {
+void process_xscope(chanend xscope_data_in) {
     int bytesRead = 0;
     unsigned char buffer[256];
 
@@ -211,12 +212,9 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 
 void csd_AudioHwRemote(chanend c[])
 {
-    chan xscope_data_in;
     i2c_master_if i2c[1];
     
     par {
-        //xscope_host_data(xscope_data_in);
-        //process_xscope(xscope_data_in);
         [[combine]] par
         {
             i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);

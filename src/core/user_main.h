@@ -19,26 +19,31 @@ extern unsafe chanend uc_audiohw2;
 
 #define SC_CLEARSOUND_DAC          1
 
-#define USER_MAIN_DECLARATIONS      chan c_audiohw[2];
+#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend);
 
-#define USER_MAIN_CORES on tile[1]: {\
-                                        par\
-                                        {\
-                                            unsafe{\
-                                                uc_audiohw = (chanend) c_audiohw[0];\
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[2]; \
+                                            chan xscope_data_in;
+                                    
+#define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
+                            on tile[1]: {\
+                                            par\
+                                            {\
+                                                unsafe{\
+                                                    uc_audiohw = (chanend) c_audiohw[0];\
+                                                }\
                                             }\
                                         }\
-                                    }\
-\
-                        on tile[0]: {\
-                                        par\
-                                        {\
-                                            unsafe{\
-                                                uc_audiohw2 = (chanend) c_audiohw[1];\
+    \
+                            on tile[0]: {\
+                                            par\
+                                            {\
+                                                process_xscope(xscope_data_in); \
+                                                unsafe{\
+                                                    uc_audiohw2 = (chanend) c_audiohw[1];\
+                                                }\
+                                                AudioHwRemote(c_audiohw);\
                                             }\
-                                            AudioHwRemote(c_audiohw);\
-                                        }\
-                                    }
+                                        }
 
 #endif
 
