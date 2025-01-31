@@ -388,7 +388,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     //uint32_t VolumeMasterTrim = 0x7FFFFFFF;
     
     debug_printf("=====================================================\n");
-    debug_printf("Build with XTC Tools %d.%d.%d on %d-%d\n", __XMOS_XTC_VERSION_MAJOR__, __XMOS_XTC_VERSION_MINOR__, __XMOS_XTC_VERSION_PATCH__, XCC_VERSION_YEAR, XCC_VERSION_MONTH);
+    debug_printf("Build with XTC Tools %d.%d.%d on %s\n", __XMOS_XTC_VERSION_MAJOR__, __XMOS_XTC_VERSION_MINOR__, __XMOS_XTC_VERSION_PATCH__, __DATE__ );
     debug_printf("=====================================================\n");    
     delay_milliseconds(1);
 
