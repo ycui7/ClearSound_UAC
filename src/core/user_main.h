@@ -23,7 +23,10 @@ extern unsafe chanend uc_audiohw2;
 
 #define USER_MAIN_DECLARATIONS              chan c_audiohw[2]; \
                                             chan xscope_data_in;
-                                    
+
+
+
+// xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
 #define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
                             on tile[1]: {\
                                             par\
