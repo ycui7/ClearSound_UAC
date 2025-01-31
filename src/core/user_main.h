@@ -14,14 +14,17 @@
 
 void AudioHwRemote(chanend c[]);
 
-extern unsafe chanend uc_audiohw;
+extern unsafe chanend uc_audiohw1;
 extern unsafe chanend uc_audiohw2;
+//extern unsafe chanend uc_audiohw3;
+//unsafe chanend uc_audiohw3;
+
 
 #define SC_CLEARSOUND_DAC          1
 
-#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend);
+#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend, chanend);
 
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[2]; \
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[3]; \
                                             chan xscope_data_in;
 
 
@@ -32,7 +35,7 @@ extern unsafe chanend uc_audiohw2;
                                             par\
                                             {\
                                                 unsafe{\
-                                                    uc_audiohw = (chanend) c_audiohw[0];\
+                                                    uc_audiohw1 = (chanend) c_audiohw[0];\
                                                 }\
                                             }\
                                         }\
@@ -40,14 +43,15 @@ extern unsafe chanend uc_audiohw2;
                             on tile[0]: {\
                                             par\
                                             {\
-                                                process_xscope(xscope_data_in); \
                                                 unsafe{\
                                                     uc_audiohw2 = (chanend) c_audiohw[1];\
                                                 }\
+                                                process_xscope(xscope_data_in, c_audiohw[2]); \
                                                 AudioHwRemote(c_audiohw);\
                                             }\
                                         }
 
+                                                    //uc_audiohw3 = (chanend) c_audiohw[2];
 #endif
 
 #endif

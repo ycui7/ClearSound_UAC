@@ -191,7 +191,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 
 }
 
-void process_xscope(chanend xscope_data_in) {
+void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
     int bytesRead = 0;
     unsigned char buffer[256];
 
@@ -209,6 +209,13 @@ void process_xscope(chanend xscope_data_in) {
                     {
                         if      (buffer[i+1] == '2'){
                             //call C2 left
+                            unsafe
+                            {
+                                //c_audiohwremote <: (unsigned) AUDIOHW_CMD_VOLUME_UPDATE;;
+                                //c_audiohwremote <: channel;
+                                //c_audiohwremote <: AVol;
+                                //c_audiohwremote <: DVol;
+                            }
                         }else if(buffer[i+1] == '3'){
                             //call C3 right
                         }else{
@@ -266,15 +273,15 @@ void csd_AudioHwRemote(chanend c[])
 
 
 
-unsafe chanend uc_audiohw;
+unsafe chanend uc_audiohw1;
 
 static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
 {
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_PLLREGWR;
-        uc_audiohw <: reg;
-        uc_audiohw <: val;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_PLLREGWR;
+        uc_audiohw1 <: reg;
+        uc_audiohw1 <: val;
         //debug_printf("PLL_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\n", reg, reg, val );
     }
 }
@@ -283,9 +290,9 @@ static inline void DAC_REGWRITE(unsigned reg, unsigned val)
 {
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_REGWR;
-        uc_audiohw <: reg;
-        uc_audiohw <: val;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_REGWR;
+        uc_audiohw1 <: reg;
+        uc_audiohw1 <: val;
         //debug_printf("I2C_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
     }
 }
@@ -295,9 +302,9 @@ static inline void DAC_REGREAD(unsigned reg, unsigned &val)
 {
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_REGRD;
-        uc_audiohw <: reg;
-        uc_audiohw :> val;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_REGRD;
+        uc_audiohw1 <: reg;
+        uc_audiohw1 :> val;
         //debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, val, val );
     }
 }
@@ -307,9 +314,9 @@ static inline void GPIO_WR(unsigned reg, unsigned val)
     //debug_printf("AudioHwRemote_GPIO_Write_Requesting\n");
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIOWR;
-        uc_audiohw <: reg;
-        uc_audiohw <: val;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_GPIOWR;
+        uc_audiohw1 <: reg;
+        uc_audiohw1 <: val;
         debug_printf("GPIO_WR\tPin: 0x%x\tValue: 0x%x\n", reg, val );
     }
 }
@@ -319,16 +326,16 @@ static inline void GPIO_RD(unsigned reg, unsigned &val)
     //debug_printf("AudioHwRemote_GPIO_Read_Requesting\n");
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_GPIORD;
-        uc_audiohw <: reg;
-        uc_audiohw :> val;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_GPIORD;
+        uc_audiohw1 <: reg;
+        uc_audiohw1 :> val;
         debug_printf("GPIO_RD\tPin: 0x%x\tValue: 0x%x\n", reg, val );
     }
 }
 
 void csd_AudioHwChanInit(chanend c)
 {
-    unsafe{uc_audiohw = c;}
+    unsafe{uc_audiohw1 = c;}
 }
 
 /*  split total volume into analog and digital volume. 
