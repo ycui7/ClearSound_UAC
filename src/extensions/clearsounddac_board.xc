@@ -199,12 +199,51 @@ void process_xscope(chanend xscope_data_in) {
 
     while (1) {
         select {
-        case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
-        if (bytesRead) {
-            printstr(buffer);
-            if (buffer[0] == 'q')
-            return;
-        }
+            case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
+                if (bytesRead) {
+                    printstr(buffer);
+                    int i = 0;
+                    for (i = 0; (i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9'); i++) {
+                    }
+                    if (buffer[i] == 'l')
+                    {
+                        if      (buffer[i+1] == '2'){
+                            //call C2 left
+                        }else if(buffer[i+1] == '3'){
+                            //call C3 right
+                        }else{
+                            //error
+                        }                            
+                        break;
+                    }
+                    else if (buffer[i] == 'r')
+                    {
+                        if      (buffer[i+1] == '2'){
+                            //call C2 left
+                        }else if(buffer[i+1] == '3'){
+                            //call C3 right
+                        }else{
+                            //error
+                        }                            
+                        break;
+                    }
+                    else if (buffer[i] == 'c')
+                    {
+                        if      (buffer[i+1] == 'l'){
+                            //call C2 left
+                        }else if(buffer[i+1] == 'r'){
+                            //call C3 right
+                        }else{
+                            //error
+                        }                            
+                        break;
+                    }
+                    else{
+                        //error
+                    }
+                    if (buffer[0] == 'q')
+                        return;
+                }
         break;
         }
     }
