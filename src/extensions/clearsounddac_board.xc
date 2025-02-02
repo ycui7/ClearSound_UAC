@@ -17,6 +17,7 @@ extern "C" {
 #include <stdio.h>
 #include <xscope.h>
 #include <print.h>
+#include <stdlib.h>
 
 //#define SC_COLOR_DEBUG_OUTPUT
 
@@ -202,7 +203,12 @@ void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
             case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
                 if (bytesRead) {
                     printstr(buffer);
+                    int value = atoi(buffer);
+                    debug_printf("param: %d\n", value);
                     int i = 0;
+                    //while ((i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9')){
+                    //    i++;
+                    //}
                     for (i = 0; (i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9'); i++) {
                     }
                     if (buffer[i] == 'l')
