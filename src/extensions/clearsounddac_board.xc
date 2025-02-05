@@ -1,19 +1,19 @@
 // Copyright 2024 XMOS LIMITED.
 // This Software is subject to the terms of the XMOS Public Licence: Version 1.
-#include <xs1.h>
 
+#include <xs1.h>
 #include "xassert.h"
 #include "i2c.h"
-#include "es9219q.h"
-#include "clearsounddac_board.h"
 #include <platform.h>
 extern "C" {
     #include "sw_pll.h"
 }
 
+#include "es9219q.h"
+#include "clearsounddac_board.h"
 
-#include <math.h>
 #include <debug_print.h>
+#include <math.h>
 #include <stdio.h>
 #include <xscope.h>
 #include <print.h>
@@ -41,11 +41,20 @@ extern "C" {
 
 #define ES9219_USE_PLL_WITH_MCLK
 
+// might be better to change all these color to macro
+unsigned const  LED_DSD_Mode = 0,
+                LED_samFreq = 1, 
+                LED_Volume = 2;
+unsigned const  led_Red = 0, 
+                led_Orange = 1,
+                led_Green = 2,
+                led_Blue = 3,
+                led_Purple = 4,
+                led_White = 5;
 
 // DAC I2C lines
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
 on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
-
 
 // Button lines
 on tile[0]: port p_butt_up = PORT_BUTTON_UP;
@@ -56,7 +65,6 @@ on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
 
 // CODEC Reset bit mask
 #define CODEC_RELEASE_RESET      (0x30) // Release codec from reset
-
 
 static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
 {
@@ -111,14 +119,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     }
 }
 
-unsigned const  LED_DSD_Mode = 0,
-                LED_samFreq = 1, 
-                LED_Volume = 2;
-unsigned const  led_Red = 0, 
-                led_Orange = 1,
-                led_Green = 2,
-                led_Blue = 3,
-                led_Purple = 4;
 
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
@@ -349,6 +349,15 @@ void csd_AudioHwChanInit(chanend c)
     return {(int)AVol, (int)DVol};
 }
 
+static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
+    unsafe
+    {
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
+        uc_audiohw1 <: led;
+        uc_audiohw1 <: color;
+    }
+}
+
 /* Update the volume of the audio hardware 
  */
 void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
@@ -362,6 +371,14 @@ void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsi
         c_audiohwremote <: AVol;
         c_audiohwremote <: DVol;
     }
+    unsigned color;
+    color = val <=0  ?  led_Red :
+            val <=8  ?  led_Orange:
+            val <=16 ?  led_Green:
+            val <=24 ?  led_Blue:
+            val <=32 ?  led_Purple:
+                        led_White;
+    AudioHwRemote_LED_Update(LED_Volume, color);
 }
 
 void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
@@ -381,15 +398,6 @@ static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, in
         uc_audiohw1 <: item;
         uc_audiohw1 <: channel;
         uc_audiohw1 <: value;
-    }
-}
-
-static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
-    unsafe
-    {
-        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
-        uc_audiohw1 <: led;
-        uc_audiohw1 <: color;
     }
 }
 
@@ -567,10 +575,6 @@ void csd_AudioHwInit(const csd_config_t &config)
     //     debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
     //}
 }
-
-
-
-
 
 /* Configures the external audio hardware for the required sample frequency.
  * See gpio.h for I2C helper functions and gpio access
