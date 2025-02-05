@@ -62,6 +62,10 @@ on tile[0]: port p_butt_down = PORT_BUTTON_DOWN;
 
 // DAC AMP reset line
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
+on tile[0]: out port p_led_024      = XS1_PORT_4F;
+on tile[0]: out port p_led_35       = XS1_PORT_4E;
+// on tile[0]: out port p_led_1        = XS1_PORT_8D;
+
 
 // CODEC Reset bit mask
 #define CODEC_RELEASE_RESET      (0x30) // Release codec from reset
@@ -149,21 +153,30 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 }
                 else if (cmd == AUDIOHW_CMD_GPIORD)
                 {
-                    return;
+                    unsigned bank, value;
+                    c[i] :> bank;
                     //  add gpio read
-                    unsigned regAddr, regVal;
-                    c[i] :> regAddr;
-                    ES9219Q_REGREAD(regAddr, regVal, i2c);
-                    c[i] <: regVal;
-                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, regAddr, regVal );
+                    c[i] <: value;
+                    return;
+                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIORD, bank, value );
                 }
                 else if (cmd == AUDIOHW_CMD_GPIOWR)
                 {
-                    unsigned regAddr, regValue;
-                    c[i] :> regAddr;
-                    c[i] :> regValue;
-                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
-                    p_codec_reset <: regValue;
+                    unsigned bank, value;
+                    static unsigned reset_cache = 0, led_cache = 0;
+                    c[i] :> bank;
+                    c[i] :> value;
+
+                    if       ( 0 == bank ){
+                        p_codec_reset <: (reset_cache = value & 0x30) & (led_cache) ; 
+                    }else if ( 1 == bank ){
+                        p_codec_reset <: (reset_cache) & (led_cache = value | 0xBF) ;
+                    }else if ( 2 == bank ){
+                        p_led_024 <: value & 0x0e;
+                    }else if ( 3 == bank ){
+                        p_led_35 <: value & 0x0c;
+                    }
+                    debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, bank, value );
                 } 
                 else if (cmd == AUDIOHW_CMD_COMP_UPDATE)
                 {
@@ -215,36 +228,36 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 }
                 else if (cmd == AUDIOHW_CMD_LED_UPDATE)
                 {
-                    unsigned led, color;
-                    c[i] :> led;
-                    c[i] :> color;
+                    // unsigned led, color;
+                    // c[i] :> led;
+                    // c[i] :> color;
 
-                    static uint16_t led_status = 0xffff;
-                    if (led == LED_DSD_Mode){
-                        led_status = led_status & ( color == led_Red     ?  0xffff :
-                                                    color == led_Orange  ?  0xffff :
-                                                    color == led_Green   ?  0xffff :
-                                                    color == led_Blue    ?  0xffff :
-                                                    color == led_Purple  ?  0xffff :
-                                                                            0xffff );
-                    }else if (led == LED_samFreq){
-                        led_status = led_status & ( color == led_Red     ?  0xffff :
-                                                    color == led_Orange  ?  0xffff :
-                                                    color == led_Green   ?  0xffff :
-                                                    color == led_Blue    ?  0xffff :
-                                                    color == led_Purple  ?  0xffff :
-                                                                            0xffff );
-                    }else if (led == LED_Volume){
-                        led_status = led_status & ( color == led_Red     ?  0xffff :
-                                                    color == led_Orange  ?  0xffff :
-                                                    color == led_Green   ?  0xffff :
-                                                    color == led_Blue    ?  0xffff :
-                                                    color == led_Purple  ?  0xffff :
-                                                                            0xffff );
-                    }else{
-                        debug_printf ("internal error, impoosible case");
-                    }
-                    debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
+                    // static uint16_t led_status = 0xffff;
+                    // if (led == LED_DSD_Mode){
+                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
+                    //                                 color == led_Orange  ?  0xffff :
+                    //                                 color == led_Green   ?  0xffff :
+                    //                                 color == led_Blue    ?  0xffff :
+                    //                                 color == led_Purple  ?  0xffff :
+                    //                                                         0xffff );
+                    // }else if (led == LED_samFreq){
+                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
+                    //                                 color == led_Orange  ?  0xffff :
+                    //                                 color == led_Green   ?  0xffff :
+                    //                                 color == led_Blue    ?  0xffff :
+                    //                                 color == led_Purple  ?  0xffff :
+                    //                                                         0xffff );
+                    // }else if (led == LED_Volume){
+                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
+                    //                                 color == led_Orange  ?  0xffff :
+                    //                                 color == led_Green   ?  0xffff :
+                    //                                 color == led_Blue    ?  0xffff :
+                    //                                 color == led_Purple  ?  0xffff :
+                    //                                                         0xffff );
+                    // }else{
+                    //     debug_printf ("internal error, impoosible case");
+                    // }
+                    // debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -308,15 +321,15 @@ static inline void DAC_REGREAD(unsigned reg, unsigned &val)
     }
 }
 
-static inline void GPIO_WR(unsigned reg, unsigned val)
+static inline void GPIO_WR(unsigned bank, unsigned val)
 {
     //debug_printf("AudioHwRemote_GPIO_Write_Requesting\n");
     unsafe
     {
         uc_audiohw1 <: (unsigned) AUDIOHW_CMD_GPIOWR;
-        uc_audiohw1 <: reg;
+        uc_audiohw1 <: bank;
         uc_audiohw1 <: val;
-        debug_printf("GPIO_WR\tPin: 0x%x\tValue: 0x%x\n", reg, val );
+        debug_printf("GPIO_WR\tPin: 0x%x\tValue: 0x%x\n", bank, val );
     }
 }
 
@@ -350,12 +363,42 @@ void csd_AudioHwChanInit(chanend c)
 }
 
 static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
-    unsafe
-    {
-        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
-        uc_audiohw1 <: led;
-        uc_audiohw1 <: color;
+    // unsafe
+    // {
+    //     uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
+    //     uc_audiohw1 <: led;
+    //     uc_audiohw1 <: color;
+    // }
+    static uint16_t led_status = 0xffff;
+    if (led == LED_DSD_Mode){
+    led_status = led_status & ( color == led_Red     ?  0xffff :
+                                color == led_Orange  ?  0xffff :
+                                color == led_Green   ?  0xffff :
+                                color == led_Blue    ?  0xffff :
+                                color == led_Purple  ?  0xffff :
+                                                        0xffff );
+    }else if (led == LED_samFreq){
+    led_status = led_status & ( color == led_Red     ?  0xffff :
+                                color == led_Orange  ?  0xffff :
+                                color == led_Green   ?  0xffff :
+                                color == led_Blue    ?  0xffff :
+                                color == led_Purple  ?  0xffff :
+                                                        0xffff );
+    }else if (led == LED_Volume){
+    led_status = led_status & ( color == led_Red     ?  0xffff :
+                                color == led_Orange  ?  0xffff :
+                                color == led_Green   ?  0xffff :
+                                color == led_Blue    ?  0xffff :
+                                color == led_Purple  ?  0xffff :
+                                                        0xffff );
+    }else{
+        debug_printf ("internal error, impoosible case");
     }
+    // dispatch a single color uint to three GPIO banks. 
+    GPIO_WR(1 , color & 0x000000ff);    //8D
+    GPIO_WR(2 , color & 0x0000ff00);    //4F ?
+    GPIO_WR(3 , color & 0x00ff0000);    //4E ?
+    debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
 }
 
 /* Update the volume of the audio hardware 
@@ -483,7 +526,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     delay_milliseconds(1);
 
     /* Take CODEC out of reset */
-    GPIO_WR(0x0b, CODEC_RELEASE_RESET);
+    GPIO_WR(0 , CODEC_RELEASE_RESET);
     delay_milliseconds(1);
 #ifdef ES9219_USE_PLL_WITH_MCLK    
     // start up sequence per ESS application note
