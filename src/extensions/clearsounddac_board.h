@@ -35,8 +35,7 @@ typedef enum
     AUDIOHW_CMD_GPIOWR,
     AUDIOHW_CMD_VOLUME_UPDATE,
     AUDIOHW_CMD_BALANCE_UPDATE,
-    AUDIOHW_CMD_THD_UPDATE,
-    AUDIOHW_CMD_CROSSTALK_UPDATE,
+    AUDIOHW_CMD_COMP_UPDATE,
     AUDIOHW_CMD_EXIT,
     AUDIOHW_CMD_ECHO, 
     AUDIOHW_CMD_VOLUME_BOOST_UPDATE   //this is a workaround for android volume control
@@ -89,5 +88,11 @@ void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
                                 unsigned sampRes_DAC, unsigned sampRes_ADC);
 
 /**@}*/ // END: addtogroup clearsounddac
+
+#define     THD_C2  0
+#define     THD_C3  1
+#define     XTLK    2
+#define     CH_LEFT 0                    
+#define     CH_RIGHT 1  
 
 #endif // __csd_BOARD_H__

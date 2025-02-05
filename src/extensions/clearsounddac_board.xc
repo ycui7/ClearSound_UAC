@@ -62,19 +62,16 @@ static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface
 {
     i2c_regop_res_t result;
     val = i2c.read_reg(ES9219Q_I2C_DEVICE_ADDR, reg, result);
-    //debug_printf("I2C_Read:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_I2C_DEVICE_ADDR, reg, val );
 }
 
 static inline void ES9219Q_REGWRITE(unsigned reg, unsigned val, client interface i2c_master_if i2c)
 {
     i2c.write_reg(ES9219Q_I2C_DEVICE_ADDR, reg, val);
-    //debug_printf("I2C_Write:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_I2C_DEVICE_ADDR, reg, val );
 }
 
 static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client interface i2c_master_if i2c)
 {
     i2c.write_reg(ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val);
-    //debug_printf("I2C_Write:\tAddr:\t0x%x\tRegAddr:\t0x%x\tValue:\t0x%x\n", ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val );
 }
 
 [[combinable]] void button_press_deglitch(port p_button)
@@ -121,7 +118,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     {
         select{
             case c[int i] :> unsigned cmd:
-                //debug_printf("Cmd:\t0x%x\n", cmd);  
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
                     unsigned regAddr, regValue;
@@ -181,6 +177,34 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     
                     //debug_printf("Vol_Update:\tAVOL: %d\tDVOL_L: %d\tVDOL_R: %d\n", regValueA, regValueDL, regValueDR );
                 }
+                else if (cmd == AUDIOHW_CMD_COMP_UPDATE)
+                {
+                    unsigned channel, item;
+                    int value;
+                    c[i] :> channel;    
+                    c[i] :> item;
+                    c[i] :> value;
+                    unsigned RegAddrLo, RegAddrHi;                  
+                    RegAddrLo = 
+                        (   item == THD_C2  ?   ( channel == CH_LEFT ? ES9219Q_THD_COMP_C2_LO               : ES9219Q_THD_COMP_C2_CH2_LO)           : 
+                            item == THD_C3  ?   ( channel == CH_LEFT ? ES9219Q_THD_COMP_C3_LO               : ES9219Q_THD_COMP_C3_CH2_LO)           :
+                            item == XTLK    ?   ( channel == CH_LEFT ? ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO  : ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO ) : 
+                                                (unsigned)0
+                        );
+                    RegAddrHi = 
+                        (   item == THD_C2  ?   ( channel == CH_LEFT ? ES9219Q_THD_COMP_C2_HI               : ES9219Q_THD_COMP_C2_CH2_HI)           : 
+                            item == THD_C3  ?   ( channel == CH_LEFT ? ES9219Q_THD_COMP_C3_HI               : ES9219Q_THD_COMP_C3_CH2_HI)           : 
+                            item == XTLK    ?   ( channel == CH_LEFT ? ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI  : ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI ) : 
+                                                (unsigned)0
+                        );
+                        
+                    if (NULL == RegAddrLo || NULL == RegAddrHi )  
+                        break;
+
+                    ES9219Q_REGWRITE(RegAddrLo, (uint8_t)((value> 0) & 0xFF), i2c);
+                    ES9219Q_REGWRITE(RegAddrHi, (uint8_t)((value> 1) & 0xFF), i2c);
+                    
+                }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
                     i2c.shutdown();
@@ -190,76 +214,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
         }
     }
 
-}
-
-void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
-    int bytesRead = 0;
-    unsigned char buffer[256];
-
-    xscope_connect_data_from_host(xscope_data_in);
-
-    while (1) {
-        select {
-            case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
-                if (bytesRead) {
-                    printstr(buffer);
-                    int value = atoi(buffer);
-                    debug_printf("param: %d\n", value);
-                    int i = 0;
-                    //while ((i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9')){
-                    //    i++;
-                    //}
-                    for (i = 0; (i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9'); i++) {
-                    }
-                    if (buffer[i] == 'l')
-                    {
-                        if      (buffer[i+1] == '2'){
-                            //call C2 left
-                            unsafe
-                            {
-                                //c_audiohwremote <: (unsigned) AUDIOHW_CMD_VOLUME_UPDATE;;
-                                //c_audiohwremote <: channel;
-                                //c_audiohwremote <: AVol;
-                                //c_audiohwremote <: DVol;
-                            }
-                        }else if(buffer[i+1] == '3'){
-                            //call C3 right
-                        }else{
-                            //error
-                        }                            
-                        break;
-                    }
-                    else if (buffer[i] == 'r')
-                    {
-                        if      (buffer[i+1] == '2'){
-                            //call C2 left
-                        }else if(buffer[i+1] == '3'){
-                            //call C3 right
-                        }else{
-                            //error
-                        }                            
-                        break;
-                    }
-                    else if (buffer[i] == 'c')
-                    {
-                        if      (buffer[i+1] == 'l'){
-                            //call C2 left
-                        }else if(buffer[i+1] == 'r'){
-                            //call C3 right
-                        }else{
-                            //error
-                        }                            
-                        break;
-                    }
-                    else{
-                        //error
-                    }
-                    if (buffer[0] == 'q')
-                        return;
-                }
-        break;
-        }
-    }
 }
 
 void csd_AudioHwRemote(chanend c[])
@@ -276,8 +230,6 @@ void csd_AudioHwRemote(chanend c[])
         }
     }
 }
-
-
 
 unsafe chanend uc_audiohw1;
 
@@ -377,6 +329,75 @@ void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
     {
         c_audiohwremote <: (unsigned) AUDIOHW_CMD_BALANCE_UPDATE;;
         c_audiohwremote <: val;
+    }
+}
+
+static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, int value, chanend uc_audiohw)
+{
+    unsafe
+    {
+        uc_audiohw <: (unsigned) AUDIOHW_CMD_COMP_UPDATE;
+        uc_audiohw <: item;
+        uc_audiohw <: channel;
+        uc_audiohw <: value;
+    }
+}
+
+void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
+    int bytesRead = 0;
+    unsigned char buffer[256];
+
+    xscope_connect_data_from_host(xscope_data_in);
+
+    while (1) {
+        select {
+            case xscope_data_from_host(xscope_data_in, buffer, bytesRead):
+                if (bytesRead) {
+                    printstr(buffer);
+                    int value = atoi(buffer);
+                    debug_printf("param: %d\n", value);
+                    int i = 0;
+                    //while ((i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9')){
+                    //    i++;
+                    //}
+                    for (i = 0; (i < bytesRead) && ('0' <= buffer[i]) && (buffer[i] <= '9'); i++) {
+                    }
+                    if (buffer[i] == 'l')
+                    {
+                        if      (buffer[i+1] == '2'){
+                            AudioHwRemote_Comp_Update (THD_C2,  CH_LEFT, value, c_audiohwremote);
+                        }else if(buffer[i+1] == '3'){
+                            AudioHwRemote_Comp_Update (THD_C3,  CH_LEFT, value, c_audiohwremote);
+                        }else if(buffer[i+1] == 'x'){
+                            AudioHwRemote_Comp_Update (XTLK,    CH_LEFT, value, c_audiohwremote);
+                        }else{
+                            debug_printf("internal error, impossible case");
+                            break;
+                        }     
+                        break;
+                    }
+                    else if (buffer[i] == 'r')
+                    {
+                        if      (buffer[i+1] == '2'){
+                            AudioHwRemote_Comp_Update (THD_C2,  CH_RIGHT, value, c_audiohwremote);
+                        }else if(buffer[i+1] == '3'){
+                            AudioHwRemote_Comp_Update (THD_C3,  CH_RIGHT, value, c_audiohwremote);
+                        }else if(buffer[i+1] == 'x'){
+                            AudioHwRemote_Comp_Update (XTLK,    CH_RIGHT, value, c_audiohwremote);
+                        }else{
+                            debug_printf("internal error, impossible case");
+                            break;
+                        }                            
+                        break;
+                    }
+                    else{
+                        debug_printf("internal error, impossible case");
+                        break;
+                    }
+                    break;
+                }
+            break;
+        }
     }
 }
 
