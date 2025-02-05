@@ -111,7 +111,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     }
 }
 
-
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
     while(1)
@@ -332,14 +331,14 @@ void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
     }
 }
 
-static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, int value, chanend uc_audiohw)
+static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, int value)
 {
     unsafe
     {
-        uc_audiohw <: (unsigned) AUDIOHW_CMD_COMP_UPDATE;
-        uc_audiohw <: item;
-        uc_audiohw <: channel;
-        uc_audiohw <: value;
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_COMP_UPDATE;
+        uc_audiohw1 <: item;
+        uc_audiohw1 <: channel;
+        uc_audiohw1 <: value;
     }
 }
 
@@ -365,11 +364,11 @@ void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
                     if (buffer[i] == 'l')
                     {
                         if      (buffer[i+1] == '2'){
-                            AudioHwRemote_Comp_Update (THD_C2,  CH_LEFT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (THD_C2,  CH_LEFT, value);
                         }else if(buffer[i+1] == '3'){
-                            AudioHwRemote_Comp_Update (THD_C3,  CH_LEFT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (THD_C3,  CH_LEFT, value);
                         }else if(buffer[i+1] == 'x'){
-                            AudioHwRemote_Comp_Update (XTLK,    CH_LEFT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (XTLK,    CH_LEFT, value);
                         }else{
                             debug_printf("internal error, impossible case");
                             break;
@@ -379,11 +378,11 @@ void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
                     else if (buffer[i] == 'r')
                     {
                         if      (buffer[i+1] == '2'){
-                            AudioHwRemote_Comp_Update (THD_C2,  CH_RIGHT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (THD_C2,  CH_RIGHT, value);
                         }else if(buffer[i+1] == '3'){
-                            AudioHwRemote_Comp_Update (THD_C3,  CH_RIGHT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (THD_C3,  CH_RIGHT, value);
                         }else if(buffer[i+1] == 'x'){
-                            AudioHwRemote_Comp_Update (XTLK,    CH_RIGHT, value, c_audiohwremote);
+                            AudioHwRemote_Comp_Update (XTLK,    CH_RIGHT, value);
                         }else{
                             debug_printf("internal error, impossible case");
                             break;
@@ -409,9 +408,9 @@ void csd_AudioHwInit(const csd_config_t &config)
     unsigned regVal = 0;
     uint8_t AnalogVolume = 0; 
     uint8_t UserVolummeL = 0, UserVolummeR = 0;  //0.5dB steps
-    //int16_t ThdCompC2Ch1 = 0, ThdCompC3Ch1 = 0; 
-    //int16_t ThdCompC2Ch2 = 0, ThdCompC3Ch2 = 0; 
-    //int16_t CrosstalkCompCh1 = 0, CrosstalkCompCh2 = 0; //0x0001 is -126dB 
+    int16_t ThdCompC2Ch1 = 0, ThdCompC3Ch1 = 0; 
+    int16_t ThdCompC2Ch2 = 0, ThdCompC3Ch2 = 0; 
+    int16_t CrosstalkCompCh1 = 0, CrosstalkCompCh2 = 0; //0x0001 is -126dB 
     //uint32_t VolumeMasterTrim = 0x7FFFFFFF;
     
     debug_printf("=====================================================\n");
@@ -474,20 +473,13 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE    (ES9219Q_CHARGE_PUMP_CLOCK_CONFIG_HI,   (uint8_t)(ES9219Q_CP_CLK_SEL | ES9219Q_CP_CLK_EN | ((ES9219Q_CP_CLK_DIV >> 8) & 0xFF)) ); 
     
     DAC_REGWRITE    (ES9219Q_THD_BYPASS_N_MONO_MODE,        ( ES9219Q_BYPASS_THD | ES9219Q_MONO_MODE )); // Enable THD Compensation
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_LO,                (uint8_t)((ThdCompC2Ch1> 0) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_HI,                (uint8_t)((ThdCompC2Ch1> 1) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_LO,                (uint8_t)((ThdCompC3Ch1 >> 0) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_HI,                (uint8_t)((ThdCompC3Ch1 >> 1) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_LO,            (uint8_t)((ThdCompC2Ch2 >> 0) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C2_CH2_HI,            (uint8_t)((ThdCompC2Ch2 >> 1) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_LO,            (uint8_t)((ThdCompC3Ch2 >> 0) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_THD_COMP_C3_CH2_HI,            (uint8_t)((ThdCompC3Ch2 >> 1) & 0xFF) ); 
-    
     DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_CONFIG,         (uint8_t)(ES9219Q_BYPASS_CT | ES9219Q_ENABLE_PLL_LOCK ) ); 
-    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_LO,   (uint8_t)((CrosstalkCompCh1 >> 0) & 0xFF ) ); 
-    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH1_HI,   (uint8_t)((CrosstalkCompCh1 >> 1) & 0xFF ) ); 
-    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_LO,   (uint8_t)((CrosstalkCompCh2 >> 0) & 0xFF ) ); 
-    //DAC_REGWRITE    (ES9219Q_CROSSTALK_COMP_SCALE_CH2_HI,   (uint8_t)((CrosstalkCompCh2 >> 1) & 0xFF ) ); 
+    AudioHwRemote_Comp_Update (THD_C2,  CH_LEFT,    ThdCompC2Ch1       );
+    AudioHwRemote_Comp_Update (THD_C2,  CH_RIGHT,   ThdCompC2Ch2       );
+    AudioHwRemote_Comp_Update (THD_C3,  CH_LEFT,    ThdCompC3Ch1       );
+    AudioHwRemote_Comp_Update (THD_C3,  CH_RIGHT,   ThdCompC3Ch2       );
+    AudioHwRemote_Comp_Update (XTLK,    CH_LEFT,    CrosstalkCompCh1   );
+    AudioHwRemote_Comp_Update (XTLK,    CH_RIGHT,   CrosstalkCompCh2   );
     
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_N_I2S_MON_CONFIG,  (uint8_t)(ES9219Q_DISALBE_ATR_CH2 | ES9219Q_DISALBE_ATR_CH1 | ES9219Q_PDB_ATR_R | ES9219Q_PDB_ATR_L) );     
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_1,        (uint8_t)(ES9219Q_CPH_APDB) );     
