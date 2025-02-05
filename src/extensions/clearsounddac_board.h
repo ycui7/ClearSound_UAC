@@ -36,8 +36,10 @@ typedef enum
     AUDIOHW_CMD_VOLUME_UPDATE,
     AUDIOHW_CMD_BALANCE_UPDATE,
     AUDIOHW_CMD_COMP_UPDATE,
+    AUDIOHW_CMD_LED_UPDATE,
     AUDIOHW_CMD_EXIT,
     AUDIOHW_CMD_ECHO, 
+    AUDIOHW_CMD_FIR_UPDATE,
     AUDIOHW_CMD_VOLUME_BOOST_UPDATE   //this is a workaround for android volume control
 } audioHwCmd_t;
 

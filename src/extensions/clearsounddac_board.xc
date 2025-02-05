@@ -111,6 +111,15 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     }
 }
 
+unsigned const  LED_DSD_Mode = 0,
+                LED_samFreq = 1, 
+                LED_Volume = 2;
+unsigned const  led_Red = 0, 
+                led_Orange = 1,
+                led_Green = 2,
+                led_Blue = 3,
+                led_Purple = 4;
+
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
     while(1)
@@ -156,26 +165,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, regAddr, regValue );
                     p_codec_reset <: regValue;
                 } 
-                else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
-                {
-                    unsigned channel;
-                    int valueA, valueDL, valueDR;
-                    c[i] :> channel;    
-                    c[i] :> valueA;
-                    c[i] :> valueDL;
-                    valueDR = valueDL;
-                    //printf("Vol_Update:\tvalueA: %2.2f\tvalueD_L: %2.2f\tvalueD_R:%2.2f\n", (float)(valueA)/256, (float)(valueDL)/256, (float)(valueDR)/256 );
-                    unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
-                    regValueA = ((-valueA) >> 8) & 0x1F;
-                    regValueDL = (-valueDL) >> 7;
-                    regValueDR = (-valueDR) >> 7;
-                        
-                    ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
-                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
-                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
-                    
-                    //debug_printf("Vol_Update:\tAVOL: %d\tDVOL_L: %d\tVDOL_R: %d\n", regValueA, regValueDL, regValueDR );
-                }
                 else if (cmd == AUDIOHW_CMD_COMP_UPDATE)
                 {
                     unsigned channel, item;
@@ -203,6 +192,59 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     ES9219Q_REGWRITE(RegAddrLo, (uint8_t)((value> 0) & 0xFF), i2c);
                     ES9219Q_REGWRITE(RegAddrHi, (uint8_t)((value> 1) & 0xFF), i2c);
                     
+                }
+                else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
+                {
+                    unsigned channel;
+                    int valueA, valueDL, valueDR;
+                    c[i] :> channel;    
+                    c[i] :> valueA;
+                    c[i] :> valueDL;
+                    valueDR = valueDL;
+                    //printf("Vol_Update:\tvalueA: %2.2f\tvalueD_L: %2.2f\tvalueD_R:%2.2f\n", (float)(valueA)/256, (float)(valueDL)/256, (float)(valueDR)/256 );
+                    unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
+                    regValueA = ((-valueA) >> 8) & 0x1F;
+                    regValueDL = (-valueDL) >> 7;
+                    regValueDR = (-valueDR) >> 7;
+                        
+                    ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
+                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
+                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
+                    
+                    //debug_printf("Vol_Update:\tAVOL: %d\tDVOL_L: %d\tVDOL_R: %d\n", regValueA, regValueDL, regValueDR );
+                }
+                else if (cmd == AUDIOHW_CMD_LED_UPDATE)
+                {
+                    unsigned led, color;
+                    c[i] :> led;
+                    c[i] :> color;
+
+                    static uint16_t led_status = 0xffff;
+                    if (led == LED_DSD_Mode){
+                        led_status = led_status & ( color == led_Red     ?  0xffff :
+                                                    color == led_Orange  ?  0xffff :
+                                                    color == led_Green   ?  0xffff :
+                                                    color == led_Blue    ?  0xffff :
+                                                    color == led_Purple  ?  0xffff :
+                                                                            0xffff );
+                    }else if (led == LED_samFreq){
+                        led_status = led_status & ( color == led_Red     ?  0xffff :
+                                                    color == led_Orange  ?  0xffff :
+                                                    color == led_Green   ?  0xffff :
+                                                    color == led_Blue    ?  0xffff :
+                                                    color == led_Purple  ?  0xffff :
+                                                                            0xffff );
+                    }else if (led == LED_Volume){
+                        led_status = led_status & ( color == led_Red     ?  0xffff :
+                                                    color == led_Orange  ?  0xffff :
+                                                    color == led_Green   ?  0xffff :
+                                                    color == led_Blue    ?  0xffff :
+                                                    color == led_Purple  ?  0xffff :
+                                                                            0xffff );
+                    }else{
+                        debug_printf ("internal error, impoosible case");
+                    }
+                    debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -339,6 +381,15 @@ static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, in
         uc_audiohw1 <: item;
         uc_audiohw1 <: channel;
         uc_audiohw1 <: value;
+    }
+}
+
+static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
+    unsafe
+    {
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
+        uc_audiohw1 <: led;
+        uc_audiohw1 <: color;
     }
 }
 
@@ -487,7 +538,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_2,        (uint8_t)(ES9219Q_DIG_OVER_EN | ES9219Q_SEL1V | ES9219Q_SHTOUTB | ES9219Q_SHTINB) );     
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_OVERRIDE_3,        (uint8_t)(ES9219Q_ENFCB | ES9219Q_ENCP_OE | ES9219Q_ENAUX_OE | ES9219Q_CPL_ENS | ES9219Q_CPL_ENW | ES9219Q_SEL3V3_PS | ES9219Q_ENSM_PS | ES9219Q_SEL3V3_CPH ) );     
     //DAC_REGWRITE    (ES9219Q_ANALOG_CTRL_SIGNALS,           (uint8_t)((1 << 6) | (1 << 3) | (1 << 2) | 1) ); 
-    delay_milliseconds(10);
+    // delay_milliseconds(10);
 
     // uint32_t fir1[128] = {};
     // for (unsigned i = 0 ; i < 128 ; i++ ){
@@ -517,32 +568,41 @@ void csd_AudioHwInit(const csd_config_t &config)
     //}
 }
 
+
+
+
+
 /* Configures the external audio hardware for the required sample frequency.
  * See gpio.h for I2C helper functions and gpio access
  */
-void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
-    unsigned sampRes_DAC, unsigned sampRes_ADC)
+void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
+                        unsigned sampRes_DAC, unsigned sampRes_ADC)
 {    
     assert(samFreq >= 22050);
     sw_pll_fixed_clock(mClk);
-    delay_milliseconds(10);
+
+    //also try query i2c bus to get DoP mode
+    // show DSD LED is native DSD is detected 
+    AudioHwRemote_LED_Update  (LED_DSD_Mode,  ( samFreq > 768000 ?  led_Purple : led_Green   ));      
+    AudioHwRemote_LED_Update  (LED_samFreq,   ( samFreq <= 48000 ?  led_Red :
+                                                samFreq <= 96000 ?  led_Orange :
+                                                samFreq <= 19200 ?  led_Green :
+                                                samFreq <= 38400 ?  led_Blue :
+                                                                    led_Purple )
+            );
+    // delay_milliseconds(10);
     {
         unsigned regVal = 0;
         debug_printf("===================Current State===============\n");   
-
         DAC_REGREAD(ES9219Q_GPIO_READBACK, regVal);
         debug_printf(ANSI_GREEN "CLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d" ANSI_RESET "\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
-        
         DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);        
         debug_printf(ANSI_GREEN "OC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d" ANSI_RESET "\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
-        
         DAC_REGREAD(ES9219Q_READ_LOCK_STATUS, regVal);
         debug_printf(ANSI_GREEN "MQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d" ANSI_RESET "\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
-        
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
         debug_printf(ANSI_GREEN "CHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
- 
-    }
+     }
 
 }
 
