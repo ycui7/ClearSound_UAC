@@ -170,11 +170,11 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     if       ( 0 == bank ){
                         p_codec_reset <: (reset_cache = value & 0x30) & (led_cache) ; 
                     }else if ( 1 == bank ){
-                        p_codec_reset <: (reset_cache) & (led_cache = value | 0xBF) ;
+                        p_codec_reset <: (reset_cache) & (led_cache = value | 0xbf) ;
                     }else if ( 2 == bank ){
-                        p_led_024 <: value & 0x0e;
+                        p_led_35  <: value & 0x0c;      // to gurard the other bits.
                     }else if ( 3 == bank ){
-                        p_led_35 <: value & 0x0c;
+                        p_led_024 <: value & 0x0e;      // to gurard the other bits.
                     }
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, bank, value );
                 } 
@@ -369,35 +369,36 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
     //     uc_audiohw1 <: led;
     //     uc_audiohw1 <: color;
     // }
-    static uint16_t led_status = 0x00ffffff;
+    static unsigned led_status = 0xffffffff;
+    unsigned led_bits = 0;
     if (led == LED_DSD_Mode){
-    led_status = led_status & ( color == led_Red     ?  0x00ffffff :
-                                color == led_Orange  ?  0x00ffffff :
-                                color == led_Green   ?  0x00ffff7f :
-                                color == led_Blue    ?  0x00ffffff :
-                                color == led_Purple  ?  0x00ffffff :
-                                                        0x00ffffff );
+    led_bits = led_bits & ( color == led_Red     ?  0           :
+                            color == led_Orange  ?  0           :
+                            color == led_Green   ?  ( 1 << 23 ) :
+                            color == led_Blue    ?  0           :
+                            color == led_Purple  ?  0           :
+                                                    0 );
     }else if (led == LED_samFreq){
-    led_status = led_status & ( color == led_Red     ?  0x00fff7ff :
-                                color == led_Orange  ?  0x00f7f7ff :
-                                color == led_Green   ?  0x00f7ffff :
-                                color == led_Blue    ?  0x00fffbff :
-                                color == led_Purple  ?  0x00fff3ff :
-                                                        0x00ffffff );
+    led_bits = led_bits & ( color == led_Red     ?  ( 1 << 3 )              :
+                            color == led_Orange  ?  ((1 << 3) | (1 << 11))  :
+                            color == led_Green   ?  ( 1 << 11 )             :
+                            color == led_Blue    ?  ( 1 << 2 )              :
+                            color == led_Purple  ?  ((1 << 3) | (1 << 2))   :
+                                                    0 );
     }else if (led == LED_Volume){
-    led_status = led_status & ( color == led_Red     ?  0x00fdffff :
-                                color == led_Orange  ?  0x00fdffbf :
-                                color == led_Green   ?  0x00ffffbf :
-                                color == led_Blue    ?  0x00fbffff :
-                                color == led_Purple  ?  0x009fffff :
-                                                        0x00ffffff );
+    led_bits = led_bits & ( color == led_Red     ?  ( 1  << 8 )             :
+                            color == led_Orange  ?  ((1 << 8) | (1 << 24))  :
+                            color == led_Green   ?  ( 1 << 24 )             :
+                            color == led_Blue    ?  ( 1 << 10 )             :
+                            color == led_Purple  ?  ((1 << 8) | (1<< 10))   :
+                                                    0 );
     }else{
         debug_printf ("internal error, impoosible case");
     }
-    // dispatch a single color uint to three GPIO banks. 
-    GPIO_WR(1 , color & 0x000000ff);    //8D
-    GPIO_WR(2 , color & 0x0000ff00);    //4F ?
-    GPIO_WR(3 , color & 0x00ff0000);    //4E ?
+    led_status = (led_status & !led_bits ) | led_bits;
+    GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
+    GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
+    GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
     debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
 }
 
