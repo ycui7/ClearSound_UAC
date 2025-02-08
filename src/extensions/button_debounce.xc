@@ -1,42 +1,26 @@
-/*
- * button_press.xc
- *
- *  Created on: 18. mars 2015
- *      Author: teig
- */
-#define INCLUDES
-#ifdef INCLUDES
-    #include <platform.h>
-    #include <xs1.h>
-    #include <stdlib.h>
-    #include <stdint.h>
-    #include <stdint.h>
-    #include <stdio.h>
-    #include <iso646.h>
-    #include <xccompat.h> // REFERENCE_PARAM
-    #include <debug_print.h>    
 
-    //#include "_version.h" // First this..
-    //#include "_globals.h" // ..then this
-    //#include "param.h"
-    #include "button_debounce.h"
-#endif
+#include <platform.h>
+#include <xs1.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <iso646.h>
+#include <xccompat.h> // REFERENCE_PARAM
+#include <debug_print.h>    
+
+//#include "_version.h" // First this..
+//#include "_globals.h" // ..then this
+//#include "param.h"
+#include "button_debounce.h"
 
 #define DEBOUNCE_TIMEOUT_MS 50
 #define BUTTON_PRESSED   0 // If pullup resistor
 #define BUTTON_RELEASED  1 // If pullup resistor
 
-/* COPYRIGHT (C) �yvind Teig
- * Source: https://www.teigfam.net/oyvind/home/technology/214-my-button-presses-vs-bounce-vs-emi-notes/
- * COPYRIGHT (C) SPECIALTYCIRCUITS LLC 2025
- * Modified for using chanend instead of interface
- */
-
 [[combinable]]
 void button_debounce_task ( in buffered port:1          p_button,
-                            // const long_button_enabled_e long_button_enabled,
-                            // chanend                     i_button_out,
-                            // (void*),         //add callback function
+                            // chanend                     c_remote,
                             const unsigned              button_n
                             )
 {
@@ -69,9 +53,8 @@ void button_debounce_task ( in buffered port:1          p_button,
                     debug_printf(" BUTTON_ACTION_PRESSED %u send, cnt %u\n", button_n, button_edge_cnt);
                     // i_button_out.button (BUTTON_ACTION_PRESSED, button_edge_cnt); // Button down
                     {
-                        // i_button_out <: BUTTON_ACTION_PRESSED;
-                        // i_button_out <: button_edge_cnt;
-                        debug_printf(" BUTTON_ACTION_PRESSED %u sent, cnt %u\n", button_n, button_edge_cnt);
+                        // c_remote <: BUTTON_ACTION_PRESSED;
+                        // c_remote <: button_edge_cnt;
                     }
                     // if (long_button_enabled == long_enabled) {
                     if (1) {
@@ -88,9 +71,8 @@ void button_debounce_task ( in buffered port:1          p_button,
                     debug_printf(" BUTTON_ACTION_RELEASED %u send, cnt %u\n", button_n, button_edge_cnt);
                     // i_button_out.button (BUTTON_ACTION_RELEASED, button_edge_cnt);
                     {
-                        // i_button_out <: BUTTON_ACTION_RELEASED;
-                        // i_button_out <: button_edge_cnt;
-                        debug_printf(" BUTTON_ACTION_RELEASED %u sent, cnt %u\n", button_n, button_edge_cnt);
+                        // c_remote <: BUTTON_ACTION_RELEASED;
+                        // c_remote <: button_edge_cnt;
                     }
                 }
                 filter_next_button_released = 0;
@@ -102,9 +84,8 @@ void button_debounce_task ( in buffered port:1          p_button,
                 if (button_on_event == BUTTON_PRESSED) {
                     debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u send, cnt %u\n", button_n, button_edge_cnt);
                     {
-                        // i_button_out <: BUTTON_ACTION_PRESSED_FOR_LONG;
-                        // i_button_out <: button_edge_cnt;
-                        debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u sent, cnt %u\n", button_n, button_edge_cnt);
+                        // c_remote <: BUTTON_ACTION_PRESSED_FOR_LONG;
+                        // c_remote <: button_edge_cnt;
                     }
                     filter_next_button_released = 1 ;
                 } else { // BUTTON_RELEASED
@@ -116,6 +97,12 @@ void button_debounce_task ( in buffered port:1          p_button,
         }
     }
 }
+
+/* COPYRIGHT (C) �yvind Teig
+ * Source: https://www.teigfam.net/oyvind/home/technology/214-my-button-presses-vs-bounce-vs-emi-notes/
+ * COPYRIGHT (C) SPECIALTYCIRCUITS LLC 2025
+ * Modified for using chanend instead of interface
+ */
 
 // [[combinable]]
 // void button_debounce_task ( const unsigned              button_n,

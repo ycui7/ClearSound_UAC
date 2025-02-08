@@ -47,8 +47,7 @@ typedef enum {long_enabled, long_disabled} long_button_enabled_e;
 [[combinable]]
 void button_debounce_task (
         in buffered port:1          p_button,
-        // const long_button_enabled_e long_button_enabled,
-        // chanend                     i_button_out,
+        // chanend                     c_remote,
         const unsigned              button_n
         );
 

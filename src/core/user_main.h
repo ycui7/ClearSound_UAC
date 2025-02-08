@@ -12,22 +12,31 @@
 #include <math.h>   
 #include <stdio.h>
 
+#include <button_debounce.h>
+
 void AudioHwRemote(chanend c[]);
 
 extern unsafe chanend uc_audiohw1;
-extern unsafe chanend uc_audiohw2;
+extern unsafe chanend uc_audiohw2;  //hardware volume control from lib_xua_mod
+extern unsafe chanend uc_audiohw3;
+extern unsafe chanend uc_audiohw4;
+extern unsafe chanend uc_audiohw5;
 //extern unsafe chanend uc_audiohw3;
 //unsafe chanend uc_audiohw3;
 
 
 #define SC_CLEARSOUND_DAC          1
 
-#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend, chanend);
+// on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; 
+// on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
 
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[3]; \
+#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend); 
+
+                                            // on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; \
+                                            // on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
+
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[5]; \
                                             chan xscope_data_in;
-
-
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
 #define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
@@ -45,13 +54,18 @@ extern unsafe chanend uc_audiohw2;
                                             {\
                                                 unsafe{\
                                                     uc_audiohw2 = (chanend) c_audiohw[1];\
+                                                    uc_audiohw3 = (chanend) c_audiohw[2];\
+                                                    uc_audiohw5 = (chanend) c_audiohw[4];\
+                                                    uc_audiohw4 = (chanend) c_audiohw[3];\
                                                 }\
-                                                process_xscope(xscope_data_in, c_audiohw[2]); \
                                                 AudioHwRemote(c_audiohw);\
+                                                process_xscope(xscope_data_in); \
                                             }\
                                         }
-
-                                                    //uc_audiohw3 = (chanend) c_audiohw[2];
 #endif
 
 #endif
+
+
+                                                // button_debounce_task (p_butt_down,  1 ); \
+                                                // button_debounce_task (p_butt_up,    0 ); \

@@ -57,9 +57,8 @@ unsigned const  led_Red = 0,
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
 on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
 
-// Button lines
-on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP;
-on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN;
+on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; 
+on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
 
 // DAC AMP reset line
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
@@ -223,6 +222,10 @@ void csd_AudioHwRemote(chanend c[])
 }
 
 unsafe chanend uc_audiohw1;
+// unsafe chanend uc_audiohw2;  //i2c hardware volume control from lib_xua
+unsafe chanend uc_audiohw3;
+unsafe chanend uc_audiohw4;
+unsafe chanend uc_audiohw5;
 
 static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
 {
@@ -376,7 +379,7 @@ static inline void AudioHwRemote_Comp_Update(unsigned item, unsigned channel, in
     }
 }
 
-void process_xscope(chanend xscope_data_in, chanend c_audiohwremote) {
+void process_xscope(chanend xscope_data_in) {
     int bytesRead = 0;
     unsigned char buffer[256];
 
