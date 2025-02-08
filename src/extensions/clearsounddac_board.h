@@ -89,6 +89,10 @@ void csd_AudioHwInit(const REFERENCE_PARAM(csd_config_t, config));
 void csd_AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode,
                                 unsigned sampRes_DAC, unsigned sampRes_ADC);
 
+void csd_AudioHwConfig_Mute(void);
+
+void csd_AudioHwConfig_UnMute(void);
+
 /**@}*/ // END: addtogroup clearsounddac
 
 #define     THD_C2  0

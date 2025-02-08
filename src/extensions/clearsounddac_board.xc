@@ -654,3 +654,12 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
 
 }
 
+
+void csd_AudioHwConfig_Mute(void){
+    DAC_REGWRITE    (ES9219Q_MUTE, 1 ); 
+}
+
+
+void csd_AudioHwConfig_UnMute(void){
+    DAC_REGWRITE    (ES9219Q_MUTE, 0 ); 
+}
