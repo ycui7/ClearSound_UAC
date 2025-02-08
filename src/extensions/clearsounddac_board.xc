@@ -369,28 +369,28 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
     //     uc_audiohw1 <: led;
     //     uc_audiohw1 <: color;
     // }
-    static uint16_t led_status = 0xffff;
+    static uint16_t led_status = 0x00ffffff;
     if (led == LED_DSD_Mode){
-    led_status = led_status & ( color == led_Red     ?  0xffff :
-                                color == led_Orange  ?  0xffff :
-                                color == led_Green   ?  0xffff :
-                                color == led_Blue    ?  0xffff :
-                                color == led_Purple  ?  0xffff :
-                                                        0xffff );
+    led_status = led_status & ( color == led_Red     ?  0x00ffffff :
+                                color == led_Orange  ?  0x00ffffff :
+                                color == led_Green   ?  0x00ffff7f :
+                                color == led_Blue    ?  0x00ffffff :
+                                color == led_Purple  ?  0x00ffffff :
+                                                        0x00ffffff );
     }else if (led == LED_samFreq){
-    led_status = led_status & ( color == led_Red     ?  0xffff :
-                                color == led_Orange  ?  0xffff :
-                                color == led_Green   ?  0xffff :
-                                color == led_Blue    ?  0xffff :
-                                color == led_Purple  ?  0xffff :
-                                                        0xffff );
+    led_status = led_status & ( color == led_Red     ?  0x00fff7ff :
+                                color == led_Orange  ?  0x00f7f7ff :
+                                color == led_Green   ?  0x00f7ffff :
+                                color == led_Blue    ?  0x00fffbff :
+                                color == led_Purple  ?  0x00fff3ff :
+                                                        0x00ffffff );
     }else if (led == LED_Volume){
-    led_status = led_status & ( color == led_Red     ?  0xffff :
-                                color == led_Orange  ?  0xffff :
-                                color == led_Green   ?  0xffff :
-                                color == led_Blue    ?  0xffff :
-                                color == led_Purple  ?  0xffff :
-                                                        0xffff );
+    led_status = led_status & ( color == led_Red     ?  0x00fdffff :
+                                color == led_Orange  ?  0x00fdffbf :
+                                color == led_Green   ?  0x00ffffbf :
+                                color == led_Blue    ?  0x00fbffff :
+                                color == led_Purple  ?  0x009fffff :
+                                                        0x00ffffff );
     }else{
         debug_printf ("internal error, impoosible case");
     }
