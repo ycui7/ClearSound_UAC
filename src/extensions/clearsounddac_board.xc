@@ -11,6 +11,7 @@ extern "C" {
 
 #include "es9219q.h"
 #include "clearsounddac_board.h"
+#include "button_debounce.h"
 
 #include <debug_print.h>
 #include <math.h>
@@ -57,8 +58,8 @@ on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
 on tile[0]: port p_i2c_sda = PORT_I2C_SDA;
 
 // Button lines
-on tile[0]: port p_butt_up = PORT_BUTTON_UP;
-on tile[0]: port p_butt_down = PORT_BUTTON_DOWN;
+on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP;
+on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN;
 
 // DAC AMP reset line
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
@@ -85,44 +86,6 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
 {
     i2c.write_reg(ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val);
 }
-
-[[combinable]] void button_press_deglitch(port p_button)
-{
-    int current_button_val = 0;
-    int is_stable = 1;
-    timer tmr;
-    const unsigned debounce_delay_ms = 50;
-    unsigned debounce_timeout;
-
-    while (1) {
-        select {
-            // If the button is "stable", react when the I/O pin changes value
-            case is_stable => p_button when pinsneq(current_button_val) :> current_button_val:
-                unsafe {
-                    if (current_button_val == 1) {
-                        debug_printf("Button %d up\n", (unsigned int)p_button);
-                    } else {
-                        debug_printf("Button %d down\n", (unsigned int)p_button);
-                    }
-                }
-                is_stable = 0;
-                int current_time;
-                tmr :> current_time;
-                debug_printf("Current time: %d \n", (unsigned int)current_time);
-
-                // Calculate time to event after debounce period
-                // note that XS1_TIMER_HZ is defined in timer.h
-                debounce_timeout = current_time + (debounce_delay_ms * XS1_TIMER_HZ);
-                break;
-            // If the button is not stable (i.e. bouncing around) then select
-            // when we the timer reaches the timeout to renter a stable period
-            case !is_stable => tmr when timerafter(debounce_timeout) :> void:
-                is_stable = 1;	
-                break;
-        }
-    }
-}
-
 
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
@@ -253,8 +216,8 @@ void csd_AudioHwRemote(chanend c[])
         {
             i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
             AudioHwRemoteTile0(c, 2, i2c[0]);
-            button_press_deglitch(p_butt_up);
-            button_press_deglitch(p_butt_down);
+            button_debounce_task (p_butt_up, 0 );
+            button_debounce_task (p_butt_down, 1 );
         }
     }
 }

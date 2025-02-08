@@ -33,10 +33,12 @@
  */
 
 [[combinable]]
-void button_debounce_task ( const unsigned              button_n,
-                            const long_button_enabled_e long_button_enabled,
-                            in buffered port:1          p_button,
-                            chanend                     i_button_out)
+void button_debounce_task ( in buffered port:1          p_button,
+                            // const long_button_enabled_e long_button_enabled,
+                            // chanend                     i_button_out,
+                            // (void*),         //add callback function
+                            const unsigned              button_n
+                            )
 {
     int      button_on_event = BUTTON_PRESSED;
     int      do_timeout_debounce_now = 0;
@@ -67,10 +69,12 @@ void button_debounce_task ( const unsigned              button_n,
                     debug_printf(" BUTTON_ACTION_PRESSED %u send, cnt %u\n", button_n, button_edge_cnt);
                     // i_button_out.button (BUTTON_ACTION_PRESSED, button_edge_cnt); // Button down
                     {
-                        i_button_out <: BUTTON_ACTION_PRESSED;
-                        i_button_out <: button_edge_cnt;
+                        // i_button_out <: BUTTON_ACTION_PRESSED;
+                        // i_button_out <: button_edge_cnt;
+                        debug_printf(" BUTTON_ACTION_PRESSED %u sent, cnt %u\n", button_n, button_edge_cnt);
                     }
-                    if (long_button_enabled == long_enabled) {
+                    // if (long_button_enabled == long_enabled) {
+                    if (1) {
                         do_timeout_long_now = 1 ;
                         tmr_long :> current_time;
                         timeout_long = current_time + (BUTTON_ACTION_PRESSED_FOR_LONG_TIMEOUT_MS * XS1_TIMER_KHZ);
@@ -84,8 +88,9 @@ void button_debounce_task ( const unsigned              button_n,
                     debug_printf(" BUTTON_ACTION_RELEASED %u send, cnt %u\n", button_n, button_edge_cnt);
                     // i_button_out.button (BUTTON_ACTION_RELEASED, button_edge_cnt);
                     {
-                        i_button_out <: BUTTON_ACTION_RELEASED;
-                        i_button_out <: button_edge_cnt;
+                        // i_button_out <: BUTTON_ACTION_RELEASED;
+                        // i_button_out <: button_edge_cnt;
+                        debug_printf(" BUTTON_ACTION_RELEASED %u sent, cnt %u\n", button_n, button_edge_cnt);
                     }
                 }
                 filter_next_button_released = 0;
@@ -97,8 +102,9 @@ void button_debounce_task ( const unsigned              button_n,
                 if (button_on_event == BUTTON_PRESSED) {
                     debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u send, cnt %u\n", button_n, button_edge_cnt);
                     {
-                        i_button_out <: BUTTON_ACTION_PRESSED_FOR_LONG;
-                        i_button_out <: button_edge_cnt;
+                        // i_button_out <: BUTTON_ACTION_PRESSED_FOR_LONG;
+                        // i_button_out <: button_edge_cnt;
+                        debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u sent, cnt %u\n", button_n, button_edge_cnt);
                     }
                     filter_next_button_released = 1 ;
                 } else { // BUTTON_RELEASED
@@ -178,3 +184,41 @@ void button_debounce_task ( const unsigned              button_n,
 //         }
 //     }
 // }
+
+
+[[combinable]] void button_press_deglitch(port p_button)
+{
+    int current_button_val = 0;
+    int is_stable = 1;
+    timer tmr;
+    const unsigned debounce_delay_ms = 50;
+    unsigned debounce_timeout;
+
+    while (1) {
+        select {
+            // If the button is "stable", react when the I/O pin changes value
+            case is_stable => p_button when pinsneq(current_button_val) :> current_button_val:
+                unsafe {
+                    if (current_button_val == 1) {
+                        debug_printf("Button %d up\n", (unsigned int)p_button);
+                    } else {
+                        debug_printf("Button %d down\n", (unsigned int)p_button);
+                    }
+                }
+                is_stable = 0;
+                int current_time;
+                tmr :> current_time;
+                debug_printf("Current time: %d \n", (unsigned int)current_time);
+
+                // Calculate time to event after debounce period
+                // note that XS1_TIMER_HZ is defined in timer.h
+                debounce_timeout = current_time + (debounce_delay_ms * XS1_TIMER_HZ);
+                break;
+            // If the button is not stable (i.e. bouncing around) then select
+            // when we the timer reaches the timeout to renter a stable period
+            case !is_stable => tmr when timerafter(debounce_timeout) :> void:
+                is_stable = 1;	
+                break;
+        }
+    }
+}

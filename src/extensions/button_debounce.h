@@ -46,10 +46,11 @@ typedef enum {long_enabled, long_disabled} long_button_enabled_e;
 
 [[combinable]]
 void button_debounce_task (
-        const unsigned              button_n,
-        const long_button_enabled_e long_button_enabled,
         in buffered port:1          p_button,
-        chanend                     i_button_out);
+        // const long_button_enabled_e long_button_enabled,
+        // chanend                     i_button_out,
+        const unsigned              button_n
+        );
 
 #else
     #error Nested include BUTTON_PRESS_H_
