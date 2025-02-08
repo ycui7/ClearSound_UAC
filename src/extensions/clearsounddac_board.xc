@@ -231,33 +231,7 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     // unsigned led, color;
                     // c[i] :> led;
                     // c[i] :> color;
-
-                    // static uint16_t led_status = 0xffff;
-                    // if (led == LED_DSD_Mode){
-                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
-                    //                                 color == led_Orange  ?  0xffff :
-                    //                                 color == led_Green   ?  0xffff :
-                    //                                 color == led_Blue    ?  0xffff :
-                    //                                 color == led_Purple  ?  0xffff :
-                    //                                                         0xffff );
-                    // }else if (led == LED_samFreq){
-                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
-                    //                                 color == led_Orange  ?  0xffff :
-                    //                                 color == led_Green   ?  0xffff :
-                    //                                 color == led_Blue    ?  0xffff :
-                    //                                 color == led_Purple  ?  0xffff :
-                    //                                                         0xffff );
-                    // }else if (led == LED_Volume){
-                    //     led_status = led_status & ( color == led_Red     ?  0xffff :
-                    //                                 color == led_Orange  ?  0xffff :
-                    //                                 color == led_Green   ?  0xffff :
-                    //                                 color == led_Blue    ?  0xffff :
-                    //                                 color == led_Purple  ?  0xffff :
-                    //                                                         0xffff );
-                    // }else{
-                    //     debug_printf ("internal error, impoosible case");
-                    // }
-                    // debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
+                    // AudioHwRemote_LED_Update(led, color);
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -363,14 +337,8 @@ void csd_AudioHwChanInit(chanend c)
 }
 
 static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
-    // unsafe
-    // {
-    //     uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_UPDATE;
-    //     uc_audiohw1 <: led;
-    //     uc_audiohw1 <: color;
-    // }
     static unsigned led_status = 0xffffffff;
-    unsigned led_bits = 0;
+    unsigned led_bits;
     if (led == LED_DSD_Mode){
     led_bits = ~(   color == led_Red     ?  0           :
                     color == led_Orange  ?  0           :
