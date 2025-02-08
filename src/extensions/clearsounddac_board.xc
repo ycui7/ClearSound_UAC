@@ -372,30 +372,30 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
     static unsigned led_status = 0xffffffff;
     unsigned led_bits = 0;
     if (led == LED_DSD_Mode){
-    led_bits = led_bits & ( color == led_Red     ?  0           :
-                            color == led_Orange  ?  0           :
-                            color == led_Green   ?  ( 1 << 23 ) :
-                            color == led_Blue    ?  0           :
-                            color == led_Purple  ?  0           :
-                                                    0 );
+    led_bits = ~(   color == led_Red     ?  0           :
+                    color == led_Orange  ?  0           :
+                    color == led_Green   ?  ( 1 << 23 ) :
+                    color == led_Blue    ?  0           :
+                    color == led_Purple  ?  0           :
+                                            0 );
     }else if (led == LED_samFreq){
-    led_bits = led_bits & ( color == led_Red     ?  ( 1 << 3 )              :
-                            color == led_Orange  ?  ((1 << 3) | (1 << 11))  :
-                            color == led_Green   ?  ( 1 << 11 )             :
-                            color == led_Blue    ?  ( 1 << 2 )              :
-                            color == led_Purple  ?  ((1 << 3) | (1 << 2))   :
-                                                    0 );
+    led_bits = ~(   color == led_Red     ?  ( 1 << 3 )              :
+                    color == led_Orange  ?  ((1 << 3) | (1 << 11))  :
+                    color == led_Green   ?  ( 1 << 11 )             :
+                    color == led_Blue    ?  ( 1 << 2 )              :
+                    color == led_Purple  ?  ((1 << 3) | (1 << 2))   :
+                                            0 );
     }else if (led == LED_Volume){
-    led_bits = led_bits & ( color == led_Red     ?  ( 1  << 8 )             :
-                            color == led_Orange  ?  ((1 << 8) | (1 << 24))  :
-                            color == led_Green   ?  ( 1 << 24 )             :
-                            color == led_Blue    ?  ( 1 << 10 )             :
-                            color == led_Purple  ?  ((1 << 8) | (1<< 10))   :
-                                                    0 );
+    led_bits = ~(   color == led_Red     ?  ( 1  << 8 )             :
+                    color == led_Orange  ?  ((1 << 8) | (1 << 22))  :
+                    color == led_Green   ?  ( 1 << 22 )             :
+                    color == led_Blue    ?  ( 1 << 10 )             :
+                    color == led_Purple  ?  ((1 << 8) | (1<< 10))   :
+                                            0 );
     }else{
         debug_printf ("internal error, impoosible case");
     }
-    led_status = (led_status & !led_bits ) | led_bits;
+    led_status = (led_status | ~led_bits ) & led_bits;
     GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
     GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
     GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
