@@ -12,6 +12,7 @@ extern "C" {
 #include "es9219q.h"
 #include "clearsounddac_board.h"
 #include "button_debounce.h"
+#include "xua_defs.h"
 
 #include <debug_print.h>
 #include <math.h>
@@ -299,7 +300,7 @@ void csd_AudioHwChanInit(chanend c)
     float AVol = 0, DVol = 0, Vol_dB = volume;
     AVol = ceil(((Vol_dB >= A_RANGE) ? Vol_dB : A_RANGE) / A_RES) * A_RES;
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
-    //printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
+    printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
     return {(int)AVol, (int)DVol};
 }
 
@@ -342,6 +343,13 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
 void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
 {
     unsigned AVol, DVol;
+    debug_printf("Volume_Update:\tMIN: %d\tValue: %d\n", (int32_t)(int16_t)MIN_VOLUME, val);
+    if((int)val <= (int32_t)(int16_t)MIN_VOLUME ){
+        val = (unsigned)(int16_t)(-149.5*256);
+        //csd_AudioHwConfig_Mute();
+    }else{
+        //csd_AudioHwConfig_UnMute();
+    }
     {AVol, DVol} = ADVolume_Split(channel, val);
     unsafe
     {
