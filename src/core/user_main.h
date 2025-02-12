@@ -55,8 +55,6 @@ extern unsafe chanend uc_audiohw5;
                                                 unsafe{\
                                                     uc_audiohw2 = (chanend) c_audiohw[1];\
                                                     uc_audiohw3 = (chanend) c_audiohw[2];\
-                                                    uc_audiohw5 = (chanend) c_audiohw[4];\
-                                                    uc_audiohw4 = (chanend) c_audiohw[3];\
                                                 }\
                                                 AudioHwRemote(c_audiohw);\
                                                 process_xscope(xscope_data_in); \
@@ -69,3 +67,5 @@ extern unsafe chanend uc_audiohw5;
 
                                                 // button_debounce_task (p_butt_down,  1 ); \
                                                 // button_debounce_task (p_butt_up,    0 ); \
+                                                    //uc_audiohw5 = (chanend) c_audiohw[4];\
+                                                    //uc_audiohw4 = (chanend) c_audiohw[3];\

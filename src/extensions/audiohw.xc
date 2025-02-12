@@ -33,8 +33,8 @@ void AudioHwInit()
  */
 void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode, unsigned sampRes_DAC, unsigned sampRes_ADC)
 {
-	csd_AudioHwConfig(samFreq, mClk, dsdMode, sampRes_DAC, sampRes_ADC);
 	debug_printf("AudioHWConfig:F:%d\tMCK:%d\tDAC:%d,ADC:%d\r\n",samFreq, mClk, sampRes_DAC, sampRes_ADC );
+	csd_AudioHwConfig(samFreq, mClk, dsdMode, sampRes_DAC, sampRes_ADC);
 }
 
 /**
@@ -47,8 +47,8 @@ void AudioHwConfig(unsigned samFreq, unsigned mClk, unsigned dsdMode, unsigned s
  *  changed
  */
 void AudioHwConfig_Mute(void){
-	csd_AudioHwConfig_Mute();	
 	debug_printf("AudioHWConfig:Mute\r\n");
+	csd_AudioHwConfig_Mute();	
 }
 
 /**
@@ -58,6 +58,6 @@ void AudioHwConfig_Mute(void){
  *  sample rate change
  */
 void AudioHwConfig_UnMute(void){
-	csd_AudioHwConfig_UnMute();
 	debug_printf("AudioHWConfig:UnMute\r\n");
+	csd_AudioHwConfig_UnMute();
 }
