@@ -130,9 +130,10 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     c[i] :> value;
 
                     if       ( 0 == bank ){
-                        p_codec_reset <: (reset_cache = value & 0x30) & (led_cache) ; 
+                        p_codec_reset <: (reset_cache = value) ; 
+                        //p_codec_reset <: (reset_cache = value & 0x30) & (led_cache) ;                         
                     }else if ( 1 == bank ){
-                        p_codec_reset <: (reset_cache) & (led_cache = value | 0xbf) ;
+                        //p_codec_reset <: (reset_cache) & (led_cache = value | 0xbf) ;
                     }else if ( 2 == bank ){
                         p_led_35  <: value & 0x0c;      // to gurard the other bits.
                     }else if ( 3 == bank ){
@@ -330,10 +331,10 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
         debug_printf ("internal error, impoosible case");
     }
     led_status = (led_status | ~led_bits ) & led_bits;
-    GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
-    GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
-    GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
-    debug_printf("settign LED %d to %d\t(0x%x)", led, color, led_status);
+    debug_printf("setting LED %d to %d\t(0x%x)\n", led, color, led_status);
+    //GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
+    //GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
+    //GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
 }
 
 /* Update the volume of the audio hardware 
