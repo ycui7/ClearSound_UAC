@@ -331,7 +331,7 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
         debug_printf ("internal error, impoosible case");
     }
     led_status = (led_status | ~led_bits ) & led_bits;
-    debug_printf("setting LED %d to %d\t(0x%x)\n", led, color, led_status);
+    //debug_printf("setting LED %d to %d\t(0x%x)\n", led, color, led_status);
     //GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
     //GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
     //GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
@@ -591,10 +591,10 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
 
 
 void csd_AudioHwConfig_Mute(void){
-    DAC_REGWRITE    (ES9219Q_MUTE, 1 ); 
+    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_UNMUTE) );
 }
 
 
 void csd_AudioHwConfig_UnMute(void){
-    DAC_REGWRITE    (ES9219Q_MUTE, 0 ); 
+    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE) );
 }

@@ -54,6 +54,7 @@
 #define ES9219Q_FILTER_SHAPE            	    	(1 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
 #define ES9219Q_BYPASS_OSF              	    	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
 #define ES9219Q_MUTE                     	    	(0 << 0)    //0: unmute, 1: mute
+#define ES9219Q_UNMUTE                     	    	(1 << 0)    //0: unmute, 1: mute
 
 #define ES9219Q_GPIO12_CONFIG					(0x08)
 #define ES9219Q_MASTER_MODE_N_SYNC_CONFIG		(0x0A)
