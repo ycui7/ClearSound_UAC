@@ -223,11 +223,11 @@ void csd_AudioHwRemote(chanend c[])
     }
 }
 
-unsafe chanend uc_audiohw1;
+unsafe chanend uc_audiohw1; // audio core to i2c 
 // unsafe chanend uc_audiohw2;  //i2c hardware volume control from lib_xua
-unsafe chanend uc_audiohw3;
-unsafe chanend uc_audiohw4;
-unsafe chanend uc_audiohw5;
+unsafe chanend uc_audiohw3; //xscope in
+unsafe chanend uc_audiohw4; //button up
+unsafe chanend uc_audiohw5; //botton down
 
 static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
 {
