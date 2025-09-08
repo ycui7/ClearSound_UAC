@@ -492,15 +492,22 @@ void csd_AudioHwInit(const csd_config_t &config)
     delay_milliseconds(1);
 #endif
         
-    // Check we can talk to the DAC
+    for (unsigned reg = 0 ; reg < 61 ; reg++ ){
+        DAC_REGREAD(reg, regVal);
+         debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
+    }
+    
+    // Check we can talk to the DAC    
     DAC_REGREAD(0x40, regVal);
-    assert(regVal != 0 && msg(ANSI_RED "DAC Chip ID Register Read Problem" ANSI_RESET "\n"));
+    if (regVal == 0 ){
+        debug_printf(ANSI_RED "Error: No CODEC found at I2C address 0x%x\n" ANSI_RESET, ES9219Q_I2C_DEVICE_ADDR);
+        debug_printf("I2C Communication failed, Bypass PLL use MCLK directly.\n");
+        DAC_PLL_REGWRITE    (197 ,   0x80);     //bypass pll
+        delay_milliseconds(1);
+    }
+    DAC_REGREAD(0x40, regVal);
     debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
-
-    //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
-    //    DAC_REGREAD(reg, regVal);
-    //    // debug_printf("I2C_READ\tAddr: 0x%x\t(%d)\tValue: 0x%x\t(%d)\n", reg, reg, regVal, regVal );
-    //}
+    assert(regVal != 0);
     
     // General Comment:
     // XMOS's I2C lib is very low overhead on physical layer. There is no need to batch send I2C commands. 
