@@ -71,6 +71,41 @@ on tile[0]: out port p_led_35       = XS1_PORT_4E;
 // CODEC Reset bit mask
 #define CODEC_RELEASE_RESET      (0x30) // Release codec from reset
 
+/* ---- mute state + mute indicator ---------------------------------------
+ * RGB dies are common-anode to 3.3VD, so a driven-LOW bit lights a die
+ * (ASB schematic "01 - XMOS XU316.SchDoc" + XU316-1024-QF60A datasheet
+ * pin/port table). Bonded dies:
+ *   4F (p_led_024): b1=D1-R(X0D29) b2=D1-B(X0D30) b3=D2-G(X0D31)
+ *   4E (p_led_35) : b2=D2-B(X0D32) b3=D2-R(X0D33)
+ *   8D (p_codec_reset): b6=D1-G(X0D42) b7=D3-R(X0D43); b4|b5 = codec reset
+ * D3-B is not wired on this board (R36.1 floats), so "all blue" lights the
+ * two bonded blue dies and drives every other bonded die off.
+ * Sole writer of all three ports and of reg 7: AudioHwRemoteTile0. */
+/* Datasheet pin table (XU316-1024-QF60A):
+ *   4F: b1=X0D29 D1-R   b2=X0D30 D1-B   b3=X0D31 D2-G
+ *   4E: b2=X0D32 D2-B   b3=X0D33 D2-R          (b0/b1 not bonded)
+ *   8D: b4=X0D40 DAC_MUTE_N  b5=X0D41 AMP_EN(SUSPEND_N)  b6=X0D42 D1-G  b7=X0D43 D3-R
+ * so CODEC_RELEASE_RESET (0x30) = mute_n high + amp_en high, and the LED-off
+ * word for this bank is 0x30|0xC0 = 0xF0. D3-B is not wired (R36.1 floats),
+ * hence "all blue" lights the two bonded blue dies and drives every other
+ * bonded die off. Common anode to 3.3VD -> LOW = lit.
+ *   mute   : 4F 0x0D (D1-B lit, D1-R off), 4E 0x0B (D2-B lit, D2-R off),
+ *            8D 0xF0 (D1-G, D3-R off)   => every lit die is blue.
+ *   unmute : 4F 0x0F, 4E 0x0F, 8D 0xF0   => all dies dark.
+ * Sole writer of these ports and of reg 7: AudioHwRemoteTile0. */
+#define LED_4F_BLUE     (0x0D)
+#define LED_4F_OFF      (0x0F)
+#define LED_4E_BLUE     (0x0B)
+#define LED_4E_OFF      (0x0F)
+#define LED_8D_OFF_BITS (0xC0)    /* D1-G, D3-R high = off (OR onto reset word) */
+
+/* Host mute intent. Written only by AudioHwRemoteTile0, read only there; the
+ * ep0 side keeps its own last-sent copy so repeated SET_CURs write nothing. */
+static unsigned host_muted = 0;
+/* Last 8D reset word requested by GPIO_WR bank 0; the mute path ORs the LED
+ * bits on top of it so the two writers stay consistent inside one task. */
+static unsigned gpio_8d_reset = CODEC_RELEASE_RESET;
+
 static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
 {
     i2c_regop_res_t result;
@@ -197,6 +232,33 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     // c[i] :> color;
                     // AudioHwRemote_LED_Update(led, color);
                 }
+                else if (cmd == AUDIOHW_CMD_MUTE_SET)
+                {
+                    /* Host mute intent from AudioHwRemote_Volume_Update. Reg 7 bit0
+                     * is the codec system mute, so the digital/analog volume regs are
+                     * left untouched and unmute restores the previous level exactly.
+                     * Idempotent: re-applying the same state writes nothing. */
+                    unsigned muted;
+                    c[i] :> muted;
+                    if (muted != host_muted)
+                    {
+                        host_muted = muted;
+                        ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                            (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
+                             (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+                        p_led_024 <: muted ? LED_4F_BLUE : LED_4F_OFF;
+                        p_led_35  <: muted ? LED_4E_BLUE : LED_4E_OFF;
+                        p_codec_reset <: gpio_8d_reset | LED_8D_OFF_BITS;
+                        debug_printf(ANSI_YELLOW "MUTE_SET: %d" ANSI_RESET "\n", muted);
+                    }
+                }
+                else if (cmd == AUDIOHW_CMD_MUTE_RESYNC)
+                {
+                    /* AudioHwConfig's unmute just overwrote reg 7; re-assert mute. */
+                    ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                        (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
+                         (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+                }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
                     i2c.shutdown();
@@ -287,6 +349,28 @@ static inline void GPIO_RD(unsigned reg, unsigned &val)
     }
 }
 
+/* Mute intent to the server task (sole writer of reg 7 and the LED ports).
+ * Sent on the caller's channel so it stays FIFO-ordered with the volume
+ * writes that precede/follow it on the same channel. */
+static inline void DAC_MUTE_SET(chanend c, unsigned muted)
+{
+    unsafe
+    {
+        c <: (unsigned) AUDIOHW_CMD_MUTE_SET;
+        c <: muted;
+    }
+}
+
+/* Re-assert reg 7 for the current host mute state. Called after AudioHwConfig,
+ * whose UnMute write would otherwise silently override a host mute. */
+static inline void DAC_MUTE_RESYNC(void)
+{
+    unsafe
+    {
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_MUTE_RESYNC;
+    }
+}
+
 void csd_AudioHwChanInit(chanend c)
 {
     unsafe{uc_audiohw1 = c;}
@@ -343,13 +427,17 @@ static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
 void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
 {
     unsigned AVol, DVol;
+    unsigned muted;
     debug_printf("Volume_Update:\tMIN: %d\tValue: %d\n", (int32_t)(int16_t)MIN_VOLUME, val);
-    if((int)val <= (int32_t)(int16_t)MIN_VOLUME ){
-        val = (unsigned)(int16_t)(-149.5*256);
-        //csd_AudioHwConfig_Mute();
-    }else{
-        //csd_AudioHwConfig_UnMute();
-    }
+    /* lib_xua forwards UAC2 -inf (0x8000) here on FU_MUTE SET_CUR (updateVol),
+     * and the real dB on unmute/volume SET_CUR. Sign-extend, then anything at or
+     * below the USB floor is a mute request. The server task is the single owner
+     * of mute state, reg 7 and the LED ports, so forward intent unconditionally:
+     * reg 7 is a hardware mute and the volume registers are never touched while
+     * muted, so the unmute that follows restores the level with nothing cached. */
+    muted = ((int)(int16_t)val <= (int)(int16_t)MIN_VOLUME) ? 1u : 0u;
+    DAC_MUTE_SET(c_audiohwremote, muted);
+    if (muted) return;               /* keep codec regs at last host level */
     {AVol, DVol} = ADVolume_Split(channel, val);
     unsafe
     {
@@ -599,10 +687,13 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
 
 
 void csd_AudioHwConfig_Mute(void){
-    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_UNMUTE) );
+    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE) );
 }
 
 
 void csd_AudioHwConfig_UnMute(void){
-    DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE) );
+    /* Runs after AudioHwConfig on every rate change. Must not override a host
+     * mute: ask the server to re-assert reg 7 for its cached mute state
+     * (unmuted -> writes unmuted, exactly as before). */
+    DAC_MUTE_RESYNC();
 }

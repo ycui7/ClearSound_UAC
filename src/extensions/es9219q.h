@@ -51,10 +51,12 @@
 #define ES9219Q_VOLUME_RATE							(0b010 << 0)
 
 #define ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE      (0x07)
-#define ES9219Q_FILTER_SHAPE            	    	(0 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
-#define ES9219Q_BYPASS_OSF              	    	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
-#define ES9219Q_MUTE                     	    	(0 << 0)    //0: unmute, 1: mute
-#define ES9219Q_UNMUTE                     	    	(1 << 0)    //0: unmute, 1: mute
+#define ES9219Q_FILTER_SHAPE            	     	(0 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
+#define ES9219Q_BYPASS_OSF              	     	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
+/* Datasheet rev1.3 Reg 7 bit0 SYSTEM MUTE: 1 = mute, 0 = unmute.
+ * (These were inverted here before — the names now match the silicon.) */
+#define ES9219Q_MUTE                     	     	(1 << 0)    //1: mute
+#define ES9219Q_UNMUTE                   	     	(0 << 0)    //0: unmute
 
 #define ES9219Q_GPIO12_CONFIG					(0x08)
 #define ES9219Q_MASTER_MODE_N_SYNC_CONFIG		(0x0A)
