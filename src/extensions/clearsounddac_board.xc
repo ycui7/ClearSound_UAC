@@ -122,8 +122,74 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
     i2c.write_reg(ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val);
 }
 
+#define VOL_INTERNAL_MIN_DB8 (-64 * 256)
+#define VOL_BTN_STEP_DB8     (256)
+
+/* ---- Volume mixer (bring-over a5bc0ed, adapted). SOLE OWNER:
+ * AudioHwRemoteTile0 — declared here only because XC takes file-scope
+ * statics, not task-local functions. The host terms come from ep0's
+ * AudioHwRemote_Volume_Update split words; the button term is a shared
+ * offset, 0 dB at power-up, +/-1 dB (256) per press.
+ * BUT_0 = X0D36/1M = UP (S2), BUT_1 = X0D37/1N = DOWN (S1); pad -> switch
+ * -> R19/R20 -> 1.8VD so pressed = high, released floats -> pull-downs.
+ * The SUM is kept inside internal limits 0..-64 dB (wider than the
+ * USB-advertised -48..0) by coercing the BUTTON term only, never the host
+ * term. Writes deduped at the register boundary (072111a). */
+static int      volHostDl8[2] = {0, 0};       /* digital term per channel, 8.8 dB */
+static int      volBtnDb8     = 0;            /* button offset, 8.8 dB */
+static unsigned volRegLastD[2]  = {0, 0};     /* dedupe for regs 15/16 */
+static unsigned volRegValidD[2] = {0, 0};
+static unsigned volRegLastA  = 0;             /* dedupe for reg 3 (analog) */
+static unsigned volRegValidA = 0;
+
+static void vol_clamp_button(void)
+{
+    int hmax = (volHostDl8[0] > volHostDl8[1]) ? volHostDl8[0] : volHostDl8[1];
+    int hmin = (volHostDl8[0] < volHostDl8[1]) ? volHostDl8[0] : volHostDl8[1];
+    if (volBtnDb8 + hmax > 0) {
+        volBtnDb8 = -hmax;                        /* total pinned at    0 dB */
+    }
+    if (volBtnDb8 + hmin < VOL_INTERNAL_MIN_DB8) {
+        volBtnDb8 = VOL_INTERNAL_MIN_DB8 - hmin;  /* total pinned at  -64 dB */
+    }
+}
+
+static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
+{
+    int total = volHostDl8[ch] + volBtnDb8;
+    unsigned reg = (ch == 0) ? ES9219Q_VOL_CTRL_LO : ES9219Q_VOL_CTRL_HI;
+    int code = (total <= 0) ? (-total + 64) / 128 : 0;   /* 0.5 dB/LSB, round */
+    if (code > 255) code = 255;
+    if (volRegValidD[ch] && volRegLastD[ch] == (unsigned)code) return;   /* dedup */
+    volRegLastD[ch]  = (unsigned)code;
+    volRegValidD[ch] = 1;
+    ES9219Q_REGWRITE(reg, (unsigned)code, i2c);
+    debug_printf("VOLWR ch:%d code:%d tot88:%d host88:%d btn88:%d\n",
+                 ch, code, total, volHostDl8[ch], volBtnDb8);
+}
+
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
+    /* ---- Volume mixer (bring-over a5bc0ed, adapted): this task is the SOLE
+     * writer of codec volume regs 3/15/16 after boot and the sole owner of
+     * everything below.
+     *  host term   : last split words from ep0's AudioHwRemote_Volume_Update
+     *                (valueA / valueDL, signed 8.8 dB), per channel slot.
+     *  button term : shared offset, 0 dB at power-up, +/-1 dB (256) per press.
+     *                BUT_0 = X0D36/1M = UP (S2), BUT_1 = X0D37/1N = DOWN (S1);
+     *                pad -> switch -> R19/R20 -> 1.8VD so pressed = high and
+     *                released floats -> internal pull-downs.
+     *  The SUM is kept inside the internal limits 0..-64 dB (wider than the
+     *  USB-advertised -48..0) by coercing the BUTTON term only, never the
+     *  host term. Writes are deduped at the register boundary (072111a). */
+    unsigned btn_up_val = 0, btn_dn_val = 0;
+    unsigned btn_up_stable = 1, btn_dn_stable = 1;
+    timer btn_up_tmr, btn_dn_tmr;
+    unsigned btn_up_to = 0, btn_dn_to = 0;
+    const unsigned BTN_DEBOUNCE_TICKS = 5000000u;   /* 50 ms @ 100 MHz */
+    set_port_pull_down(p_butt_up);
+    set_port_pull_down(p_butt_down);
+
     while(1)
     {
         select{
@@ -207,37 +273,30 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 }
                 else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
                 {
-                    /* bring-over 072111a: drop any write that does not change the
-                     * register. Host re-sends volume on stream start / rate change;
-                     * identical values must not hit the I2C bus. Cache updated only
-                     * on real writes; sole writer of regs 3/15/16 after boot. */
+                    /* Host SET_CUR split words from ep0 (bring-over 072111a
+                     * merged with a5bc0ed mixer): update the host terms, then
+                     * rewrite regs 3/15/16 from (host + button). Value repeats
+                     * are dropped at the register boundary. */
                     unsigned channel;
                     int valueA, valueDL, valueDR;
-                    static unsigned volRegLast[3] = {0, 0, 0};
-                    static unsigned volRegValid[3] = {0, 0, 0};
                     c[i] :> channel;
                     c[i] :> valueA;
                     c[i] :> valueDL;
                     valueDR = valueDL;
-                    //printf("Vol_Update:\tvalueA: %2.2f\tvalueD_L: %2.2f\tvalueD_R:%2.2f\n", (float)(valueA)/256, (float)(valueDL)/256, (float)(valueDR)/256 );
-                    unsigned regAddrA, regValueA, regAddrDL, regValueDL, regAddrDR, regValueDR;
-                    regValueA = ((-valueA) >> 8) & 0x1F;
-                    regValueDL = (-valueDL) >> 7;
-                    regValueDR = (-valueDR) >> 7;
 
-                    if (!(volRegValid[0] && volRegLast[0] == regValueA)) {
-                        volRegLast[0] = regValueA; volRegValid[0] = 1;
-                        ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
+                    if (channel < 2) {
+                        volHostDl8[channel] = valueDL;
+                        vol_clamp_button();
+                        /* analog term (reg 3): same dedupe discipline */
+                        unsigned regValueA = ((-valueA) >> 8) & 0x1F;
+                        if (!(volRegValidA && volRegLastA == regValueA)) {
+                            volRegLastA = regValueA; volRegValidA = 1;
+                            ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL, ((0b010 << 5) | (regValueA & 0x1F)), i2c);
+                        }
+                        vol_apply_digital(0, i2c);
+                        vol_apply_digital(1, i2c);
                     }
-                    if (!(volRegValid[1] && volRegLast[1] == regValueDL)) {
-                        volRegLast[1] = regValueDL; volRegValid[1] = 1;
-                        ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );
-                    }
-                    if (!(volRegValid[2] && volRegLast[2] == regValueDR)) {
-                        volRegLast[2] = regValueDR; volRegValid[2] = 1;
-                        ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c );
-                    }
-                    debug_printf("VOLCMD ch:%d A:%d DL:%d DR:%d\n", channel, regValueA, regValueDL, regValueDR );
+                    debug_printf("VOLCMD ch:%d A:%d DL:%d\n", channel, valueA, valueDL);
                 }
                 else if (cmd == AUDIOHW_CMD_LED_UPDATE)
                 {
@@ -279,6 +338,43 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     return;
                 }
                 break;
+
+            /* ---- Button volume (bring-over a5bc0ed): 50 ms debounce FSM
+             * inlined in the mixer's own task — XC forbids exchanging
+             * channels between tasks combined onto one thread, and only this
+             * task may mutate the mixer. Active-high pads (pull-downs set at
+             * task entry); act on the edge confirmed stable for the window. */
+            case btn_up_stable => p_butt_up when pinsneq(btn_up_val) :> btn_up_val:
+                btn_up_stable = 0;
+                btn_up_tmr :> btn_up_to;
+                btn_up_to += BTN_DEBOUNCE_TICKS;
+                break;
+            case !btn_up_stable => btn_up_tmr when timerafter(btn_up_to) :> void:
+                btn_up_stable = 1;
+                if (btn_up_val == 1) {                  /* confirmed press */
+                    volBtnDb8 += VOL_BTN_STEP_DB8;      /* +1 dB */
+                    vol_clamp_button();
+                    debug_printf("BTN_UP btn88:%d\n", volBtnDb8);
+                    vol_apply_digital(0, i2c);
+                    vol_apply_digital(1, i2c);
+                }
+                break;
+
+            case btn_dn_stable => p_butt_down when pinsneq(btn_dn_val) :> btn_dn_val:
+                btn_dn_stable = 0;
+                btn_dn_tmr :> btn_dn_to;
+                btn_dn_to += BTN_DEBOUNCE_TICKS;
+                break;
+            case !btn_dn_stable => btn_dn_tmr when timerafter(btn_dn_to) :> void:
+                btn_dn_stable = 1;
+                if (btn_dn_val == 1) {                  /* confirmed press */
+                    volBtnDb8 -= VOL_BTN_STEP_DB8;      /* -1 dB */
+                    vol_clamp_button();
+                    debug_printf("BTN_DOWN btn88:%d\n", volBtnDb8);
+                    vol_apply_digital(0, i2c);
+                    vol_apply_digital(1, i2c);
+                }
+                break;
         }
     }
 
@@ -292,9 +388,11 @@ void csd_AudioHwRemote(chanend c[])
         [[combine]] par
         {
             i2c_master(i2c, 1, p_i2c_scl, p_i2c_sda, 400);
+            /* Buttons are serviced inside AudioHwRemoteTile0 (50 ms debounce
+             * inlined there — the mixer state must live with the port owner).
+             * button_debounce_task instances removed: a port may only be
+             * selected by one task. */
             AudioHwRemoteTile0(c, 2, i2c[0]);
-            button_debounce_task (p_butt_up, 0 );
-            button_debounce_task (p_butt_down, 1 );
         }
     }
 }
