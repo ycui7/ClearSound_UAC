@@ -22,7 +22,9 @@
             <Port Location="XS1_PORT_4B" Name="PORT_SQI_SIO"/>
             
 			      <Port Location="XS1_PORT_8D" Name="PORT_CODEC_RST_N"/>	<!-- TBD -->
-  	      	<Port Location="XS1_PORT_1O"  Name="PORT_I2C_SCL"/>
+
+			      <Port Location="XS1_PORT_1A" Name="PORT_LED_D3G"/>		<!-- X0D00 = LED_7 = D3-green -->
+		     <Port Location="XS1_PORT_1O"  Name="PORT_I2C_SCL"/>
             <Port Location="XS1_PORT_1P"  Name="PORT_I2C_SDA"/>
             
             <Port Location="XS1_PORT_1M"  Name="PORT_BUTTON_UP"/>

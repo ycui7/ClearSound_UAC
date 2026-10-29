@@ -42,7 +42,9 @@ typedef enum
     AUDIOHW_CMD_FIR_UPDATE,
     AUDIOHW_CMD_VOLUME_BOOST_UPDATE,  //this is a workaround for android volume control
     AUDIOHW_CMD_MUTE_SET,             //host mute intent: {muted}     -> reg7 + LED
-    AUDIOHW_CMD_MUTE_RESYNC           //re-apply reg7 for host_muted  (after AudioHwConfig)
+    AUDIOHW_CMD_MUTE_RESYNC,          //re-apply reg7 for host_muted  (after AudioHwConfig)
+    AUDIOHW_CMD_LED_STATUS,           //bring-over fd9242e: {LED_ST_*} boot status
+    AUDIOHW_CMD_LED_RATE              //{samFreq, dsdMode} rate tier display
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 

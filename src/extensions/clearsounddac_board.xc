@@ -65,46 +65,79 @@ on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN;
 on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
 on tile[0]: out port p_led_024      = XS1_PORT_4F;
 on tile[0]: out port p_led_35       = XS1_PORT_4E;
+on tile[0]: out port p_led_d3g      = PORT_LED_D3G;
 // on tile[0]: out port p_led_1        = XS1_PORT_8D;
 
 
 // CODEC Reset bit mask
 #define CODEC_RELEASE_RESET      (0x30) // Release codec from reset
 
-/* ---- mute state + mute indicator ---------------------------------------
- * RGB dies are common-anode to 3.3VD, so a driven-LOW bit lights a die
- * (ASB schematic "01 - XMOS XU316.SchDoc" + XU316-1024-QF60A datasheet
- * pin/port table). Bonded dies:
- *   4F (p_led_024): b1=D1-R(X0D29) b2=D1-B(X0D30) b3=D2-G(X0D31)
- *   4E (p_led_35) : b2=D2-B(X0D32) b3=D2-R(X0D33)
- *   8D (p_codec_reset): b6=D1-G(X0D42) b7=D3-R(X0D43); b4|b5 = codec reset
- * D3-B is not wired on this board (R36.1 floats), so "all blue" lights the
- * two bonded blue dies and drives every other bonded die off.
- * Sole writer of all three ports and of reg 7: AudioHwRemoteTile0. */
-/* Datasheet pin table (XU316-1024-QF60A):
+/* ---- LED status display + mute indicator ------------------------------
+ * bring-over fd9242e (board-proven), adapted: mute-blue joins the same
+ * state machine so display arbitration lives in exactly one place.
+ * RGB dies common-anode to 3.3VD -> driven-LOW = lit.
+ * Datasheet pin table (XU316-1024-QF60A):
  *   4F: b1=X0D29 D1-R   b2=X0D30 D1-B   b3=X0D31 D2-G
  *   4E: b2=X0D32 D2-B   b3=X0D33 D2-R          (b0/b1 not bonded)
- *   8D: b4=X0D40 DAC_MUTE_N  b5=X0D41 AMP_EN(SUSPEND_N)  b6=X0D42 D1-G  b7=X0D43 D3-R
- * so CODEC_RELEASE_RESET (0x30) = mute_n high + amp_en high, and the LED-off
- * word for this bank is 0x30|0xC0 = 0xF0. D3-B is not wired (R36.1 floats),
- * hence "all blue" lights the two bonded blue dies and drives every other
- * bonded die off. Common anode to 3.3VD -> LOW = lit.
- *   mute   : 4F 0x0D (D1-B lit, D1-R off), 4E 0x0B (D2-B lit, D2-R off),
- *            8D 0xF0 (D1-G, D3-R off)   => every lit die is blue.
- *   unmute : 4F 0x0F, 4E 0x0F, 8D 0xF0   => all dies dark.
+ *   8D: b4=X0D40 DAC_MUTE_N  b5=X0D41 AMP_EN  b6=X0D42 D1-G  b7=X0D43 D3-R
+ *   1A: X0D00 D3-G (PORT_LED_D3G)
+ * D3-B unwired (R36.1 floats). CODEC_RELEASE_RESET 0x30 keeps mute_n/amp_en
+ * high. Display priority: mute-blue > chipid-fail > bypass-3s > rate tier > off.
  * Sole writer of these ports and of reg 7: AudioHwRemoteTile0. */
-#define LED_4F_BLUE     (0x0D)
-#define LED_4F_OFF      (0x0F)
-#define LED_4E_BLUE     (0x0B)
-#define LED_4E_OFF      (0x0F)
-#define LED_8D_OFF_BITS (0xC0)    /* D1-G, D3-R high = off (OR onto reset word) */
+#define LED_ST_SOLID_RED     0   /* power-on default: all three red solid */
+#define LED_ST_CHIPID_FAIL   1   /* chip-ID unreadable: blink red forever */
+#define LED_ST_BYPASS        2   /* PLL bypassed: blink red 3 s, then normal */
+#define LED_ST_ALL_OFF       3   /* DAC healthy, no rate from host yet */
+#define LED_ST_RATE          4   /* rate tier display */
+#define LED_ST_MUTED         5   /* host mute: only blue dies lit */
 
-/* Host mute intent. Written only by AudioHwRemoteTile0, read only there; the
- * ep0 side keeps its own last-sent copy so repeated SET_CURs write nothing. */
+#define LED_8D_OFF_BITS (0xC0)    /* D1-G, D3-R high = off */
+
+/* Host mute intent + display state. Written only by AudioHwRemoteTile0. */
 static unsigned host_muted = 0;
-/* Last 8D reset word requested by GPIO_WR bank 0; the mute path ORs the LED
- * bits on top of it so the two writers stay consistent inside one task. */
+static unsigned led_state  = LED_ST_SOLID_RED;
+static unsigned led_on     = 1;      /* blink phase */
+static unsigned led_tier   = 0;      /* last rate tier */
+/* Last 8D reset word requested by GPIO_WR bank 0; the renderer ORs LED bits
+ * on top of it so both intents compose inside the one writer task. */
 static unsigned gpio_8d_reset = CODEC_RELEASE_RESET;
+
+/* One writer for all four LED ports: render the current display state. */
+static void led_write_words(unsigned v4f, unsigned v4e, unsigned v8d, unsigned d3g)
+{
+    p_led_024    <: v4f;
+    p_led_35     <: v4e;
+    p_codec_reset <: (gpio_8d_reset & 0x3F) | (v8d & 0xC0);  /* reset bits from GPIO_WR, LED bits here */
+    p_led_d3g    <: d3g;
+}
+
+static void led_render(void)
+{
+    switch (led_state) {
+        case LED_ST_MUTED:       /* every lit die is blue */
+            led_write_words(0x0B, 0x0B, LED_8D_OFF_BITS, 1);
+            break;
+        case LED_ST_CHIPID_FAIL:
+        case LED_ST_BYPASS:
+            if (led_on) led_write_words(0xD, 0x7, 0x70, 1);   /* D1-R, D2-R, D3-R */
+            else        led_write_words(0xF, 0xF, LED_8D_OFF_BITS, 1);
+            break;
+        case LED_ST_ALL_OFF:
+            led_write_words(0xF, 0xF, LED_8D_OFF_BITS, 1);
+            break;
+        case LED_ST_RATE:
+            switch (led_tier) {
+                case 1:  led_write_words(0xF, 0xF, 0xB0, 1); break;   /* D1-G */
+                case 2:  led_write_words(0x7, 0xF, 0xB0, 1); break;   /* +D2-G */
+                case 3:  led_write_words(0x7, 0xF, 0xF0, 0); break;   /* +D3 yellow (R+G) */
+                default: led_write_words(0x7, 0xF, 0xB0, 0); break;   /* all G */
+            }
+            break;
+        default:                 /* SOLID_RED */
+            led_write_words(0xD, 0x7, 0x70, 1);
+            break;
+    }
+}
 
 static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
 {
@@ -190,9 +223,31 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
 
+    /* LED blink scheduler: 0.5 s phase grid (1 Hz blink) for the error states. */
+    timer led_tmr;
+    unsigned led_now;
+    unsigned led_bypass_until = 0;
+    led_tmr :> led_now;
+    led_render();                                 /* power-on: solid red */
+
     while(1)
     {
         select{
+            case led_tmr when timerafter(led_now) :> void:
+            {
+                if (led_state == LED_ST_CHIPID_FAIL || led_state == LED_ST_BYPASS) {
+                    led_on = !led_on;
+                    if (led_state == LED_ST_BYPASS && led_on &&
+                        (int)(led_now - led_bypass_until) >= 0) {
+                        /* 3 s window elapsed: drop bypass indication */
+                        led_state = (led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF;
+                    }
+                }
+                led_now += 50000000;              /* 0.5 s @ 100 MHz */
+                led_render();
+            }
+            break;
+
             case c[int i] :> unsigned cmd:
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
@@ -226,20 +281,19 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                 }
                 else if (cmd == AUDIOHW_CMD_GPIOWR)
                 {
+                    /* bring-over fd9242e: GPIO_WR bank 0 updates the reset word,
+                     * bank 2/3 (4E/4F LED requests) refresh the display; all port
+                     * writes go through led_write_words so reset + LED bits
+                     * compose without ever fighting for the same pins. */
                     unsigned bank, value;
-                    static unsigned reset_cache = 0, led_cache = 0;
                     c[i] :> bank;
                     c[i] :> value;
 
-                    if       ( 0 == bank ){
-                        p_codec_reset <: (reset_cache = value) ; 
-                        //p_codec_reset <: (reset_cache = value & 0x30) & (led_cache) ;                         
-                    }else if ( 1 == bank ){
-                        //p_codec_reset <: (reset_cache) & (led_cache = value | 0xbf) ;
-                    }else if ( 2 == bank ){
-                        p_led_35  <: value & 0x0c;      // to gurard the other bits.
-                    }else if ( 3 == bank ){
-                        p_led_024 <: value & 0x0e;      // to gurard the other bits.
+                    if (0 == bank) {
+                        gpio_8d_reset = value & 0x30;
+                        led_render();
+                    } else if (2 == bank || 3 == bank) {
+                        led_render();             /* display owns 4E/4F now */
                     }
                     debug_printf("Cmd:\t0x%x\tPin:0x%x\tValue:0x%x\n", AUDIOHW_CMD_GPIOWR, bank, value );
                 } 
@@ -310,7 +364,7 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                     /* Host mute intent from AudioHwRemote_Volume_Update. Reg 7 bit0
                      * is the codec system mute, so the digital/analog volume regs are
                      * left untouched and unmute restores the previous level exactly.
-                     * Idempotent: re-applying the same state writes nothing. */
+                     * Display: mute-blue outranks everything while held. */
                     unsigned muted;
                     c[i] :> muted;
                     if (muted != host_muted)
@@ -319,10 +373,42 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                         ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
                             (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
                              (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
-                        p_led_024 <: muted ? LED_4F_BLUE : LED_4F_OFF;
-                        p_led_35  <: muted ? LED_4E_BLUE : LED_4E_OFF;
-                        p_codec_reset <: gpio_8d_reset | LED_8D_OFF_BITS;
+                        led_state = muted ? LED_ST_MUTED
+                                          : ((led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF);
+                        led_render();
                         debug_printf(ANSI_YELLOW "MUTE_SET: %d" ANSI_RESET "\n", muted);
+                    }
+                }
+                else if (cmd == AUDIOHW_CMD_LED_STATUS)
+                {
+                    /* bring-over fd9242e: boot health report from AudioHwInit */
+                    unsigned st;
+                    c[i] :> st;
+                    debug_printf("LED_STATUS: %d\n", st);
+                    if (st == LED_ST_CHIPID_FAIL) { led_state = LED_ST_CHIPID_FAIL; led_on = 1; }
+                    else if (st == LED_ST_BYPASS) {
+                        led_state = LED_ST_BYPASS; led_on = 1;
+                        led_bypass_until = led_now + 300000000u;    /* 3 s */
+                    }
+                    else if (st == LED_ST_ALL_OFF && !host_muted) {
+                        led_state = (led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF;
+                    }
+                    led_render();
+                }
+                else if (cmd == AUDIOHW_CMD_LED_RATE)
+                {
+                    /* bring-over fd9242e: rate tier from AudioHwConfig */
+                    unsigned f, dsd;
+                    c[i] :> f;
+                    c[i] :> dsd;
+                    if (dsd != 0)              led_tier = 4;
+                    else if (f <= 48000)       led_tier = 1;
+                    else if (f <= 96000)       led_tier = 2;
+                    else if (f <= 192000)      led_tier = 3;
+                    else                       led_tier = 4;
+                    if (!host_muted && led_state != LED_ST_CHIPID_FAIL && led_state != LED_ST_BYPASS) {
+                        led_state = LED_ST_RATE;
+                        led_render();
                     }
                 }
                 else if (cmd == AUDIOHW_CMD_MUTE_RESYNC)
