@@ -553,7 +553,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     delay_milliseconds(1);
 
     // Set the fractional divider if used
-    sw_pll_fixed_clock(config.default_mclk);
+    sw_pll_fixed_clock(config.default_mclk);   /* lib_sw_pll pinned v2.4.1: single-arg API (v2.5.0 added required tile_mask; lib_xua develop still calls the old API) */
     debug_printf("sw_pll_fixed_clock_Done\n");
     delay_milliseconds(1);
 
@@ -658,7 +658,7 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
                         unsigned sampRes_DAC, unsigned sampRes_ADC)
 {    
     assert(samFreq >= 22050);
-    sw_pll_fixed_clock(mClk);
+    sw_pll_fixed_clock(mClk);   /* lib_sw_pll pinned v2.4.1 (see note in AudioHwInit) */
 
     //also try query i2c bus to get DoP mode
     // show DSD LED is native DSD is detected 
