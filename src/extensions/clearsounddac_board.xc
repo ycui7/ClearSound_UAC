@@ -207,9 +207,15 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                 }
                 else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
                 {
+                    /* bring-over 072111a: drop any write that does not change the
+                     * register. Host re-sends volume on stream start / rate change;
+                     * identical values must not hit the I2C bus. Cache updated only
+                     * on real writes; sole writer of regs 3/15/16 after boot. */
                     unsigned channel;
                     int valueA, valueDL, valueDR;
-                    c[i] :> channel;    
+                    static unsigned volRegLast[3] = {0, 0, 0};
+                    static unsigned volRegValid[3] = {0, 0, 0};
+                    c[i] :> channel;
                     c[i] :> valueA;
                     c[i] :> valueDL;
                     valueDR = valueDL;
@@ -218,12 +224,20 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
                     regValueA = ((-valueA) >> 8) & 0x1F;
                     regValueDL = (-valueDL) >> 7;
                     regValueDR = (-valueDR) >> 7;
-                        
-                    ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
-                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );           
-                    ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c ); 
-                    
-                    //debug_printf("Vol_Update:\tAVOL: %d\tDVOL_L: %d\tVDOL_R: %d\n", regValueA, regValueDL, regValueDR );
+
+                    if (!(volRegValid[0] && volRegLast[0] == regValueA)) {
+                        volRegLast[0] = regValueA; volRegValid[0] = 1;
+                        ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL,   ((0b010 << 5) | (regValueA & 0x1F)),    i2c );
+                    }
+                    if (!(volRegValid[1] && volRegLast[1] == regValueDL)) {
+                        volRegLast[1] = regValueDL; volRegValid[1] = 1;
+                        ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_LO,       regValueDL,                             i2c );
+                    }
+                    if (!(volRegValid[2] && volRegLast[2] == regValueDR)) {
+                        volRegLast[2] = regValueDR; volRegValid[2] = 1;
+                        ES9219Q_REGWRITE(ES9219Q_VOL_CTRL_HI,       regValueDR,                             i2c );
+                    }
+                    debug_printf("VOLCMD ch:%d A:%d DL:%d DR:%d\n", channel, regValueA, regValueDL, regValueDR );
                 }
                 else if (cmd == AUDIOHW_CMD_LED_UPDATE)
                 {
