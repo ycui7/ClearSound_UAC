@@ -33,6 +33,11 @@
 #define MIXER              (0)
 #endif
 
+/* PCM in-line DSP (linear-phase bass shelf). OFF by default: zero footprint. */
+#ifndef PCM_DSP_EN
+#define PCM_DSP_EN         (0)
+#endif
+
 /* Mixing disabled by default */
 #ifndef MAX_MIX_COUNT
 #define MAX_MIX_COUNT      (0)
