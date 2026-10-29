@@ -13,6 +13,9 @@ extern "C" {
 #include "clearsounddac_board.h"
 #include "button_debounce.h"
 #include "xua_defs.h"
+#if PCM_DSP_EN
+#include "csd_dsp.h"
+#endif
 
 #include <debug_print.h>
 #include <math.h>
@@ -858,6 +861,14 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
 {    
     assert(samFreq >= 22050);
     sw_pll_fixed_clock(mClk);   /* lib_sw_pll pinned v2.4.1 (see note in AudioHwInit) */
+
+#if PCM_DSP_EN
+    /* DSP state re-seeds with the new rate family + stream DSD mode.
+     * Called from the audiohub core -- same single writer as the frame hook. */
+    csd_dsp_set_rate(samFreq);
+    csd_dsp_set_dsd(dsdMode);
+    csd_dsp_preset_boot();     /* no-op unless -DCSD_DSP_PRESET_DEFAULT=n */
+#endif
 
     /* Display: report the rate to the tile[0] LED state machine (bring-over
      * fd9242e). Replaces the dead AudioHwRemote_LED_Update colour ladder, whose
