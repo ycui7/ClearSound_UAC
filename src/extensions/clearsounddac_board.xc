@@ -43,16 +43,9 @@ extern "C" {
 
 #define ES9219_USE_PLL_WITH_MCLK
 
-// might be better to change all these color to macro
-unsigned const  LED_DSD_Mode = 0,
-                LED_samFreq = 1, 
-                LED_Volume = 2;
-unsigned const  led_Red = 0, 
-                led_Orange = 1,
-                led_Green = 2,
-                led_Blue = 3,
-                led_Purple = 4,
-                led_White = 5;
+/* Legacy colour/LED selector constants (LED_DSD_Mode, LED_samFreq, LED_Volume,
+ * led_Red..led_White) removed with the dead AudioHwRemote_LED_Update ladder —
+ * the display is the tile[0] state machine (LED_ST_* + rate tier). */
 
 // DAC I2C lines
 on tile[0]: port p_i2c_scl = PORT_I2C_SCL;
@@ -126,11 +119,14 @@ static void led_render(void)
             led_write_words(0xF, 0xF, LED_8D_OFF_BITS, 1);
             break;
         case LED_ST_RATE:
+            /* Words verified against the XU316-1024-QF60A datasheet pad table +
+             * current ASB netlist (LOW = lit): 4F{b1 D1-R, b2 D1-B, b3 D2-G},
+             * 4E{b2 D2-B, b3 D2-R}, 8D{b6 D1-G, b7 D3-R}, 1A{D3-G}. Tiers accumulate. */
             switch (led_tier) {
                 case 1:  led_write_words(0xF, 0xF, 0xB0, 1); break;   /* D1-G */
                 case 2:  led_write_words(0x7, 0xF, 0xB0, 1); break;   /* +D2-G */
-                case 3:  led_write_words(0x7, 0xF, 0xF0, 0); break;   /* +D3 yellow (R+G) */
-                default: led_write_words(0x7, 0xF, 0xB0, 0); break;   /* all G */
+                case 3:  led_write_words(0x7, 0xF, 0x00, 0); break;   /* +D3 yellow (D3-R b7 low, D3-G low) */
+                default: led_write_words(0x7, 0xF, 0xB0, 0); break;   /* tier4/DSD: all green */
             }
             break;
         default:                 /* SOLID_RED */
@@ -352,13 +348,6 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                     }
                     debug_printf("VOLCMD ch:%d A:%d DL:%d\n", channel, valueA, valueDL);
                 }
-                else if (cmd == AUDIOHW_CMD_LED_UPDATE)
-                {
-                    // unsigned led, color;
-                    // c[i] :> led;
-                    // c[i] :> color;
-                    // AudioHwRemote_LED_Update(led, color);
-                }
                 else if (cmd == AUDIOHW_CMD_MUTE_SET)
                 {
                     /* Host mute intent from AudioHwRemote_Volume_Update. Reg 7 bit0
@@ -569,6 +558,27 @@ static inline void DAC_MUTE_RESYNC(void)
     }
 }
 
+/* LED status senders (bring-over fd9242e, adapted): the display state machine
+ * lives entirely in the tile[0] server task; tile[1] only reports events. */
+static inline void DAC_LED_STATUS(unsigned st)
+{
+    unsafe
+    {
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_STATUS;
+        uc_audiohw1 <: st;
+    }
+}
+
+static inline void DAC_LED_RATE(unsigned samFreq, unsigned dsdMode)
+{
+    unsafe
+    {
+        uc_audiohw1 <: (unsigned) AUDIOHW_CMD_LED_RATE;
+        uc_audiohw1 <: samFreq;
+        uc_audiohw1 <: dsdMode;
+    }
+}
+
 void csd_AudioHwChanInit(chanend c)
 {
     unsafe{uc_audiohw1 = c;}
@@ -584,40 +594,6 @@ void csd_AudioHwChanInit(chanend c)
     DVol = ceil((Vol_dB - AVol) / D_RES) * D_RES;
     printf("Ch:%d\tVol_dB:\t%2.2f\tA:\t%2.2f\tD:\t%2.2f\n", channel, (float)Vol_dB/256, (float)AVol/256, (float)DVol/256);
     return {(int)AVol, (int)DVol};
-}
-
-static inline void  AudioHwRemote_LED_Update(unsigned led, unsigned color){
-    static unsigned led_status = 0xffffffff;
-    unsigned led_bits;
-    if (led == LED_DSD_Mode){
-    led_bits = ~(   color == led_Red     ?  0           :
-                    color == led_Orange  ?  0           :
-                    color == led_Green   ?  ( 1 << 23 ) :
-                    color == led_Blue    ?  0           :
-                    color == led_Purple  ?  0           :
-                                            0 );
-    }else if (led == LED_samFreq){
-    led_bits = ~(   color == led_Red     ?  ( 1 << 3 )              :
-                    color == led_Orange  ?  ((1 << 3) | (1 << 11))  :
-                    color == led_Green   ?  ( 1 << 11 )             :
-                    color == led_Blue    ?  ( 1 << 2 )              :
-                    color == led_Purple  ?  ((1 << 3) | (1 << 2))   :
-                                            0 );
-    }else if (led == LED_Volume){
-    led_bits = ~(   color == led_Red     ?  ( 1  << 8 )             :
-                    color == led_Orange  ?  ((1 << 8) | (1 << 22))  :
-                    color == led_Green   ?  ( 1 << 22 )             :
-                    color == led_Blue    ?  ( 1 << 10 )             :
-                    color == led_Purple  ?  ((1 << 8) | (1<< 10))   :
-                                            0 );
-    }else{
-        debug_printf ("internal error, impoosible case");
-    }
-    led_status = (led_status | ~led_bits ) & led_bits;
-    //debug_printf("setting LED %d to %d\t(0x%x)\n", led, color, led_status);
-    //GPIO_WR(1 , (led_status & 0x000000ff) >> 0);    //8D
-    //GPIO_WR(2 , (led_status & 0x0000ff00) >> 8);    //4E
-    //GPIO_WR(3 , (led_status & 0x00ff0000) >> 16);   //4F
 }
 
 /* Update the volume of the audio hardware 
@@ -644,14 +620,10 @@ void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsi
         c_audiohwremote <: AVol;
         c_audiohwremote <: DVol;
     }
-    unsigned color;
-    color = val <=0  ?  led_Red :
-            val <=8  ?  led_Orange:
-            val <=16 ?  led_Green:
-            val <=24 ?  led_Blue:
-            val <=32 ?  led_Purple:
-                        led_White;
-    AudioHwRemote_LED_Update(LED_Volume, color);
+    /* Volume colour ladder removed (bring-over fd9242e): its AudioHwRemote_LED_Update
+     * wrote nothing (GPIO_WR lines were already commented out). Display is the
+     * tile[0] state machine — rate tier + mute blue. Volume display can be
+     * re-added there in the future LED-assignment pass. */
 }
 
 void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
@@ -794,9 +766,17 @@ void csd_AudioHwInit(const csd_config_t &config)
         if (pll_bypass) break;          // both paths failed: fall through to assert
         pll_bypass = 1;                 // PLL enabled didn't clock the core: fall back
     }
+    if (regVal == 0) {
+        DAC_LED_STATUS(LED_ST_CHIPID_FAIL);   /* blink red forever until assert kills us */
+        delay_milliseconds(2000);             /* let the tile[0] task render it */
+    }
 #endif
         
     assert(regVal != 0 && msg(ANSI_RED "DAC Chip ID Register Read Problem" ANSI_RESET "\n"));
+    /* DAC functional: bypassed boards blink red 3 s then forget it; healthy
+     * boards go dark until the host starts changing rates (bring-over fd9242e). */
+    if (pll_bypass) DAC_LED_STATUS(LED_ST_BYPASS);
+    else            DAC_LED_STATUS(LED_ST_ALL_OFF);
     debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
 
     //for (unsigned reg = 0 ; reg < 61 ; reg++ ){
@@ -879,15 +859,10 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
     assert(samFreq >= 22050);
     sw_pll_fixed_clock(mClk);   /* lib_sw_pll pinned v2.4.1 (see note in AudioHwInit) */
 
-    //also try query i2c bus to get DoP mode
-    // show DSD LED is native DSD is detected 
-    AudioHwRemote_LED_Update  (LED_DSD_Mode,  ( samFreq > 768000 ?  led_Purple : led_Green   ));      
-    AudioHwRemote_LED_Update  (LED_samFreq,   ( samFreq <= 48000 ?  led_Red :
-                                                samFreq <= 96000 ?  led_Orange :
-                                                samFreq <= 19200 ?  led_Green :
-                                                samFreq <= 38400 ?  led_Blue :
-                                                                    led_Purple )
-            );
+    /* Display: report the rate to the tile[0] LED state machine (bring-over
+     * fd9242e). Replaces the dead AudioHwRemote_LED_Update colour ladder, whose
+     * GPIO_WR output was commented out — one display arbiter, one writer. */
+    DAC_LED_RATE(samFreq, dsdMode);
     // delay_milliseconds(10);
     {
         unsigned regVal = 0;
