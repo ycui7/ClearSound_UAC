@@ -560,23 +560,44 @@ void csd_AudioHwInit(const csd_config_t &config)
     /* Take CODEC out of reset */
     GPIO_WR(0 , CODEC_RELEASE_RESET);
     delay_milliseconds(1);
-#ifdef ES9219_USE_PLL_WITH_MCLK    
-    // start up sequence per ESS application note
-    DAC_PLL_REGWRITE    (201 ,   0x19); //Set DAC Clock input to MCLK
-    DAC_PLL_REGWRITE    (193 ,   0xC0); //Turn On PLL Charge Pump and VCo
-    DAC_PLL_REGWRITE    (194 ,   0x00); //Set Clock_IN_DIV = 8 and FB_DIV = 131072
-    DAC_PLL_REGWRITE    (195 ,   0x00); 
-    DAC_PLL_REGWRITE    (196 ,   0x82); 
-    DAC_PLL_REGWRITE    (197 ,   0x00); 
-    DAC_PLL_REGWRITE    (198 ,   0x02); //Set Clock_OUT_Div = 2, and PFE_DELAY to 1.5ns
-    DAC_PLL_REGWRITE    (199 ,   0xC2); 
-    DAC_PLL_REGWRITE    (200 ,   0x0C); //Turn On PLL regulators as final step
-    debug_printf(ANSI_CYAN "CLOCK CONFIGURATION: \"MCLK => PLL => SYSTEM CLOCK\"" ANSI_RESET "\n");
-    delay_milliseconds(1);
+#ifdef ES9219_USE_PLL_WITH_MCLK
+    /* Marginal-PLL boards: start with the PLL enabled; if the chip-ID readback
+     * fails (core has no clock), switch to PLL bypass and continue.
+     * (bring-over ec898a2, validated: bypass locks instantly, all rates play) */
+    unsigned idtries = 0;
+    unsigned pll_bypass = 0;
+    for (;;) {
+        // start up sequence per ESS application note
+        DAC_PLL_REGWRITE    (201 ,   0x19); //Set DAC Clock input to MCLK
+        DAC_PLL_REGWRITE    (193 ,   0xC0); //Turn On PLL Charge Pump and VCo
+        DAC_PLL_REGWRITE    (194 ,   0x00); //Set Clock_IN_DIV = 8 and FB_DIV = 131072
+        DAC_PLL_REGWRITE    (195 ,   0x00); 
+        DAC_PLL_REGWRITE    (196 ,   0x82); 
+        if (pll_bypass) {
+            DAC_PLL_REGWRITE(197, 0x80);    // PLL_BYPASS=1: clock around the loop
+            debug_printf(ANSI_CYAN "CLOCK CONFIGURATION: \"MCLK => BYPASS => SYSTEM CLOCK\"" ANSI_RESET "\n");
+        } else {
+            DAC_PLL_REGWRITE(197, 0x00);
+            debug_printf(ANSI_CYAN "CLOCK CONFIGURATION: \"MCLK => PLL => SYSTEM CLOCK\"" ANSI_RESET "\n");
+        }
+        DAC_PLL_REGWRITE    (198 ,   0x02); //Set Clock_OUT_Div = 2, and PFE_DELAY to 1.5ns
+        DAC_PLL_REGWRITE    (199 ,   0xC2); 
+        DAC_PLL_REGWRITE    (200 ,   0x0C); //Turn On PLL regulators as final step
+        delay_milliseconds(1);
+
+        // Check we can talk to the DAC (retry: marginal boards boot slow)
+        for (idtries = 0; idtries < 20; idtries++) {
+            DAC_REGREAD(0x40, regVal);
+            if (regVal != 0) break;
+            delay_milliseconds(5);
+        }
+        debug_printf("CHIPID tries: %d (pll_bypass=%d)\n", idtries, pll_bypass);
+        if (regVal != 0) break;
+        if (pll_bypass) break;          // both paths failed: fall through to assert
+        pll_bypass = 1;                 // PLL enabled didn't clock the core: fall back
+    }
 #endif
         
-    // Check we can talk to the DAC
-    DAC_REGREAD(0x40, regVal);
     assert(regVal != 0 && msg(ANSI_RED "DAC Chip ID Register Read Problem" ANSI_RESET "\n"));
     debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
 
