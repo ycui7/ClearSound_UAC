@@ -77,7 +77,9 @@ if [ -f "$OUT" ] && cmp -s "$NEW" "$OUT"; then
     rm -f "$NEW"
 else
     mv "$NEW" "$OUT"
-    echo "csd_version.h -> $VERSION"
+    # Notice goes to stderr: stdout carries only the version, so cmake can
+    # capture it whole in OUTPUT_VARIABLE.
+    echo "csd_version.h -> $VERSION" >&2
 fi
 
 echo "$VERSION"
