@@ -36,6 +36,28 @@ else
     echo "T5 FAIL: ring core test — see /tmp/dsp_ring.log"; fail=1
 fi
 
+# T6 (B1): shipped FD tables — reconstruct taps from csdfd_*.h exactly as the
+# vendor kernel unpacks them; gate SNR/scale/response vs the design (T4's job
+# was the design; this gates the artifact that enters the build).
+if tools/dsp/.venv-dspgen/bin/python tools/dsp/verify_fd_tables.py \
+      >/tmp/dsp_t6.log 2>&1; then
+    echo "T6 PASS: shipped fd_block_fir tables == design (all rates)"
+else
+    echo "T6 FAIL: fd table verification — see /tmp/dsp_t6.log"; fail=1
+fi
+
+# T7 (B2): shipped biquad header == design, and the QUANTISED integers meet the
+# acoustic spec (bass plateau ~0 dB, -3 dB at the 90 Hz corner, treble plateau
+# -6 dB, no int32 overflow at full scale). This is the filter that actually
+# ships on the audiohub thread -- the block-FIR tables in T6 are the offline
+# experiment path (CSD_DSP_ENGINE_FD=1).
+if tools/dsp/.venv-dspgen/bin/python tools/dsp/verify_bq_tables.py \
+      >/tmp/dsp_t7.log 2>&1; then
+    echo "T7 PASS: shipped biquad header == design (all rates, quantised spec)"
+else
+    echo "T7 FAIL: biquad table verification — see /tmp/dsp_t7.log"; fail=1
+fi
+
 # T2/T3 build matrix (OFF clean, ON links the frame function)
 bash ~/.hermes/cache/scratch/dsp_build.sh >/tmp/dsp_matrix.log 2>&1
 grep -q "T2 PASS: csd_dsp_frame linked" /tmp/dsp_matrix.log && echo "T2 PASS: ON build links csd_dsp_frame" \
