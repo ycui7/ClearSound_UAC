@@ -31,4 +31,15 @@ include(${CMAKE_CURRENT_LIST_DIR}/configs_test.cmake)
 set(APP_INCLUDES src src/core src/extensions)
 set(XMOS_SANDBOX_DIR ${CMAKE_CURRENT_LIST_DIR}/../..)
 
+# Stamp the build version on every configure. Our build entry configures
+# before compiling, so the count only advances on a real build, and the
+# header is what carries the version into the binary (IDN + boot banner).
+execute_process(
+    COMMAND ${CMAKE_CURRENT_LIST_DIR}/tools/gen_version.sh
+            ${CMAKE_CURRENT_LIST_DIR}
+    OUTPUT_VARIABLE CSD_BUILD_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+message(STATUS "ClearSoundDac firmware version: ${CSD_BUILD_VERSION}")
+
 XMOS_REGISTER_APP()

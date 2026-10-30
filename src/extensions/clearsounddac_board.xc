@@ -11,6 +11,7 @@ extern "C" {
 
 #include "es9219q.h"
 #include "clearsounddac_board.h"
+#include "csd_version.h"
 #include "button_debounce.h"
 #include "xua_defs.h"
 #if PCM_DSP_EN
@@ -784,6 +785,7 @@ void csd_AudioHwInit(const csd_config_t &config)
     
     debug_printf("=====================================================\n");
     debug_printf("Build with XTC Tools %d.%d.%d on %s\n", __XMOS_XTC_VERSION_MAJOR__, __XMOS_XTC_VERSION_MINOR__, __XMOS_XTC_VERSION_PATCH__, __DATE__ );
+    debug_printf("Firmware %s\n", CSD_FW_VERSION);
     debug_printf("=====================================================\n");    
     delay_milliseconds(1);
 

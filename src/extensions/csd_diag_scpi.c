@@ -18,11 +18,15 @@
 #include "scpi/scpi.h"
 #include "csd_diag.h"
 #include "csd_dsp.h"
+#include "csd_version.h"
 
 #define CSD_IDN_VENDOR   "ClearSound"
 #define CSD_IDN_MODEL    "CSD-22"
-#define CSD_IDN_SERIAL   "00000000"   /* replaced by the chip-id SN task */
-#define CSD_IDN_FIRMWARE "1.0"
+#define CSD_IDN_SERIAL   "00000000"   /* static placeholder: not read from
+                                       * OTP, every board answers the same.
+                                       * Tying it to the chip needs OTP
+                                       * provisioning (xburn) + otp3 read. */
+#define CSD_IDN_FIRMWARE CSD_FW_VERSION
 
 /* ---- output plumbing -------------------------------------------------- */
 #define REPLY_MAX 320
