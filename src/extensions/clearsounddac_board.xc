@@ -186,9 +186,45 @@ static void vol_clamp_button(void)
     }
 }
 
-static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
+/* Register 3 is ANALOG_VOLUME_MAIN: per the ES9219 datasheet it "controls both
+ * channel 1 and channel 2 analog volume controls". It is ONE register for the
+ * pair, so it can only ever carry an attenuation both channels agree on. The
+ * split used to derive it per channel, so on an asymmetric request the louder
+ * channel wrote 0 dB over the quieter channel's -24 dB and that channel kept
+ * only its digital trim -- it stopped at -8 dB when the host asked for -32.
+ * Measured on the bench: 64,192 -> -8.0 dB while 192,64 -> -34.3 dB for the
+ * same nominal request (rig/vol_analog.py).
+ * So take the analog term from the LOUDEST channel: analog has priority for
+ * noise performance, and the loudest request is the largest attenuation that
+ * is still common to both. Whatever each channel still needs beyond it is
+ * made up in the per-channel digital volume (regs 15/16), which is genuinely
+ * independent and covers 0..-127.5 dB at 0.5 dB/LSB. */
+static int vol_analog_common(void)
 {
-    int total = volHostDl8[ch] + volBtnDb8;
+    int const A_RES = 512, A_RANGE = (-24 * 256);   /* 2 dB step, -24 dB floor */
+    int t0 = volHostDl8[0] + volBtnDb8;
+    int t1 = volHostDl8[1] + volBtnDb8;
+    int tmax = (t0 > t1) ? t0 : t1;
+    if (tmax > 0) tmax = 0;                 /* never amplify */
+    if (tmax < A_RANGE) tmax = A_RANGE;     /* analog cannot go below -24 dB */
+    /* Truncation toward zero on a negative dividend is a ceil, which is what
+     * the original split used to round an attenuation toward 0 dB. */
+    return (tmax / A_RES) * A_RES;
+}
+
+static void vol_apply_analog(int aCom, client interface i2c_master_if i2c)
+{
+    unsigned regValueA = (unsigned)((-aCom) >> 8) & 0x1F;
+    if (volRegValidA && volRegLastA == regValueA) return;
+    volRegLastA = regValueA; volRegValidA = 1;
+    ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL, ((0b010 << 5) | regValueA), i2c);
+}
+
+static void vol_apply_digital(int ch, int aCom, client interface i2c_master_if i2c)
+{
+    /* aCom is applied to both channels by the analog stage, so the digital
+     * trim carries only what is left for THIS channel. */
+    int total = volHostDl8[ch] + volBtnDb8 - aCom;
     unsigned reg = (ch == 0) ? ES9219Q_VOL_CTRL_LO : ES9219Q_VOL_CTRL_HI;
     int code = (total <= 0) ? (-total + 64) / 128 : 0;   /* 0.5 dB/LSB, round */
     if (code > 255) code = 255;
@@ -196,8 +232,20 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
     volRegLastD[ch]  = (unsigned)code;
     volRegValidD[ch] = 1;
     ES9219Q_REGWRITE(reg, (unsigned)code, i2c);
-    debug_printf("VOLWR ch:%d code:%d tot88:%d host88:%d btn88:%d\n",
-                 ch, code, total, volHostDl8[ch], volBtnDb8);
+    debug_printf("VOLWR ch:%d code:%d tot88:%d host88:%d btn88:%d aCom88:%d\n",
+                 ch, code, total, volHostDl8[ch], volBtnDb8, aCom);
+}
+
+/* One entry point: the analog term depends on BOTH channels, so any change to
+ * either channel's host term or to the shared button term must recompute all
+ * three registers together. Calling vol_apply_digital for one channel alone
+ * would leave reg 3 describing a level neither channel asked for. */
+static void vol_apply_all(client interface i2c_master_if i2c)
+{
+    int aCom = vol_analog_common();
+    vol_apply_analog(aCom, i2c);
+    vol_apply_digital(0, aCom, i2c);
+    vol_apply_digital(1, aCom, i2c);
 }
 
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
@@ -338,16 +386,19 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                     valueDR = valueDL;
 
                     if (channel < 2) {
-                        volHostDl8[channel] = valueDL;
+                        /* Keep the FULL host request per channel (analog +
+                         * digital halves of ep0's split). The mixer must be
+                         * able to re-partition the total itself, because the
+                         * analog half is one shared register: partitioning at
+                         * ep0 per channel is what lost the quieter channel's
+                         * -24 dB when the louder channel rewrote reg 3. */
+                        volHostDl8[channel] = valueA + valueDL;
                         vol_clamp_button();
-                        /* analog term (reg 3): same dedupe discipline */
-                        unsigned regValueA = ((-valueA) >> 8) & 0x1F;
-                        if (!(volRegValidA && volRegLastA == regValueA)) {
-                            volRegLastA = regValueA; volRegValidA = 1;
-                            ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL, ((0b010 << 5) | (regValueA & 0x1F)), i2c);
-                        }
-                        vol_apply_digital(0, i2c);
-                        vol_apply_digital(1, i2c);
+                        /* Analog term is COMMON to both channels (reg 3 is one
+                         * register), so it cannot be recomputed from this
+                         * channel's word alone. Re-derive all three registers
+                         * from both host terms. */
+                        vol_apply_all(i2c);
                     }
                     debug_printf("VOLCMD ch:%d A:%d DL:%d\n", channel, valueA, valueDL);
                 }
@@ -433,8 +484,7 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                     volBtnDb8 += VOL_BTN_STEP_DB8;      /* +1 dB */
                     vol_clamp_button();
                     debug_printf("BTN_UP btn88:%d\n", volBtnDb8);
-                    vol_apply_digital(0, i2c);
-                    vol_apply_digital(1, i2c);
+                    vol_apply_all(i2c);
                 }
                 break;
 
@@ -449,8 +499,7 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
                     volBtnDb8 -= VOL_BTN_STEP_DB8;      /* -1 dB */
                     vol_clamp_button();
                     debug_printf("BTN_DOWN btn88:%d\n", volBtnDb8);
-                    vol_apply_digital(0, i2c);
-                    vol_apply_digital(1, i2c);
+                    vol_apply_all(i2c);
                 }
                 break;
         }
@@ -461,7 +510,7 @@ static void vol_apply_digital(int ch, client interface i2c_master_if i2c)
 void csd_AudioHwRemote(chanend c[])
 {
     i2c_master_if i2c[1];
-    
+
     par {
         [[combine]] par
         {
@@ -470,7 +519,13 @@ void csd_AudioHwRemote(chanend c[])
              * inlined there — the mixer state must live with the port owner).
              * button_debounce_task instances removed: a port may only be
              * selected by one task. */
-            AudioHwRemoteTile0(c, 2, i2c[0]);
+                        /* 3 client channels now: 0/1 as before, plus index 3 for the
+             * diagnostic core's codec-register access. AudioHwRemoteTile0
+             * already dispatches AUDIOHW_CMD_REGRD/REGWR generically for any
+             * c[i] it selects on, so this adds no server code and, more
+             * importantly, no second I2C client -- the task at c[3] shares the
+             * one bus owner instead of racing it. */
+            AudioHwRemoteTile0(c, 4, i2c[0]);
         }
     }
 }
@@ -480,6 +535,13 @@ unsafe chanend uc_audiohw1; // audio core to i2c
 unsafe chanend uc_audiohw3; //xscope in
 unsafe chanend uc_audiohw4; //button up
 unsafe chanend uc_audiohw5; //botton down
+/* Diagnostic core's codec-register channel (SCPI over USB MIDI). Bound to
+ * c_audiohw[3] in src/core/user_main.h; the tile-0 server services it through
+ * the same `case c[int i]` branch as the others, so no server-side code is
+ * needed for REGWR/REGRD. Dedicated index on purpose: sharing uc_audiohw1
+ * would let a bench request interleave with the audio core's own request/reply
+ * and read back the wrong answer. */
+unsafe chanend uc_audiohw_diag;
 
 static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
 {
