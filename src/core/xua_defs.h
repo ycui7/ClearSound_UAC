@@ -46,9 +46,23 @@
 /* Board is self-powered i.e. not USB bus-powered */
 #define SELF_POWERED       (0)
 
-/* Enable/Disable MIDI - Default is MIDI off */
+/* Enable/Disable MIDI.
+ *
+ * ON for this product: the SCPI diagnostic interface rides USB-MIDI
+ * (csd_diag_midi.xc), and MIDI here is a USB class only -- the board has no
+ * physical MIDI ports, so the ports/clock handed to the task are null and the
+ * only MIDI entity is the bulk endpoint.
+ *
+ * This MUST be set in this header rather than by a -DMIDI on the command line.
+ * The USB configuration descriptor is assembled inside lib_xua
+ * (core/endpoint0), whose translation units are compiled with the library's
+ * flags, not the app's: a -D that reaches only the app target leaves MIDI
+ * undefined where the descriptors are built, and the device enumerates with
+ * the Audio interfaces and no MIDI class -- the task then links, is priced,
+ * and can never be reached by a host. Verified the hard way: with -DMIDI=1 on
+ * the app only, lsusb showed 6 interfaces, all Audio. */
 #ifndef MIDI
-#define MIDI 		       (0)
+#define MIDI (1)
 #endif
 
 /* Enable/Disable S/PDIF output - Default is S/PDIF off */

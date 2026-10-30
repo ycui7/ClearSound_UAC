@@ -20,7 +20,8 @@ set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -fcomment-asm
                                             -DUAC_FORCE_FEEDBACK=1
 											-DDEBUG_PRINT_ENABLE=1
                                             -DDSD_CHANS_DAC=2
-                                            -DNATIVE_DSD=1)
+                                            -DNATIVE_DSD=1
+                                            -DSCPI_USER_CONFIG=1)
 											
 											
 set(APP_COMPILER_FLAGS_2AMi2o2xxxxxd ${SW_USB_AUDIO_FLAGS})

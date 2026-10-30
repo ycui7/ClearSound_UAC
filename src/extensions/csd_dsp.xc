@@ -42,6 +42,10 @@ void csd_dsp_bq_clear(void);
 int  csd_dsp_bq_ready(void);
 void csd_dsp_bq_frame(unsigned s[2]);
 
+/* Adopt a posted preset on the audio thread. Defined with the posting side
+ * below; needed by both audio-thread entry points (set_rate, frame hook). */
+static void csd_dsp_apply_pending_preset(void);
+
 #define CSD_DSP_PRESET_FIR 2u    // presets >= this apply the bass shelf
 
 /* Engine selection. Default = vendor biquad (VPU asm, O(1) per sample, no
@@ -176,6 +180,13 @@ static void csd_dsp_clear_state(void)
 void csd_dsp_set_rate(unsigned hz)
 {
     int idx = pick_table(hz);
+
+    /* Honour a preset change made while no stream was running. This is the
+     * other audio-thread entry point (called from AudioHwConfig at every
+     * stream start); the frame hook only runs while a stream is live, so
+     * without this a preset posted during idle would never be adopted. */
+    csd_dsp_apply_pending_preset();
+
     /* IDEMPOTENT: the board's AudioHwConfig is re-invoked repeatedly while a
      * stream is live (console shows config every few hundred ms). A teardown on
      * every call resets fd_idx and memsets the block state, so the FD engine
@@ -194,23 +205,136 @@ void csd_dsp_set_rate(unsigned hz)
 
 void csd_dsp_set_dsd(unsigned dsdMode) { csd_dsp.dsd = dsdMode; }
 
-void csd_dsp_set_preset(unsigned p)
+/* Preset requests from the diagnostic thread.
+ *
+ * The MIDI diagnostic task and the audiohub thread are DIFFERENT THREADS
+ * (measured 2026-10-30: the audio thread's frame counter advanced 2.09M ->
+ * 2.53M while its view of csd_dsp.preset stayed frozen at the boot default,
+ * even though the diagnostic thread's readback reported the new value
+ * correctly -- see workspace/csd-diag stamp_test.sh). Whatever resolves that
+ * split, the rule below is the one that is safe under it.
+ *
+ * The audio thread owns csd_dsp.preset: it is the only writer. The diagnostic
+ * thread only posts requests. This is stricter than the previous design, which
+ * published the preset word directly from the diagnostic thread on the theory
+ * that an aligned word store cannot be torn. Torn or not, the reader can still
+ * never see it: XC's single-writer model lets xcc cache the load of a global
+ * across the blocking calls in the streaming loop (observed directly once --
+ * disassembly of a plain-global flag showed the store and no load at all).
+ * A store the reader has hoisted away is just as invisible as a torn one.
+ *
+ * Every field that crosses threads is therefore read/written through the
+ * volatile helpers below, which force a memory access on the XCore, and only
+ * the audio thread mutates DSP state.
+ *
+ * csd_dsp_bump exists to make the ownership question measurable from the host:
+ * the diagnostic thread increments it on every set-preset command, and under
+ * CSD_DSP_DIAG_BUMP the audio thread stamps it into the mic-path L channel.
+ * Resolved 2026-10-30 by this instrument: the host saw the bump advance
+ * 1->2->3 across three preset commands, so the two threads DO share memory
+ * (the diagnostic task is not on its own tile), and the frozen preset was
+ * therefore a LOGIC bug -- not a cache/coherency problem and not a hoisted
+ * load. The actual fault is documented at csd_dsp_preset_boot().
+ *
+ * Keep the bump. It is the only cheap way to distinguish "threads do not share
+ * memory" from "threads share memory but disagree about a value", and those
+ * two symptoms are otherwise indistinguishable from the host -- I spent a long
+ * stretch assuming the former while it was the latter.
+ *
+ * The volatile accessors below are retained on correctness grounds: XC's
+ * single-writer model genuinely does permit xcc to cache a global's load
+ * across the blocking calls in the streaming loop, and a cross-thread global
+ * is exactly the case where that is not allowed. They were necessary, not
+ * sufficient, and they were NOT the fix -- do not remove them on the theory
+ * that they were tried and failed. */
+#define CSD_DSP_PRESET_NONE (0xFFFFFFFFu)
+/* The compile-time default IS the initial request, not something re-posted at
+ * stream start -- see csd_dsp_preset_boot(). */
+#ifdef CSD_DSP_PRESET_DEFAULT
+#define CSD_DSP_PRESET_BOOT CSD_DSP_PRESET_DEFAULT
+#else
+#define CSD_DSP_PRESET_BOOT 0u
+#endif
+unsigned csd_dsp_preset_req = CSD_DSP_PRESET_BOOT;    /* host-requested preset */
+unsigned csd_dsp_bump = 0;                            /* command counter      */
+
+/* volatile-through-unsafe-pointer is the documented XCore way to defeat
+ * register caching: XC accepts `volatile` only on unsafe pointer targets, and
+ * `shared` only on variables declared inside a par block, so a plain global
+ * with a plain read is the one combination the compiler is free to optimize
+ * away. Cast and deref must both sit inside the unsafe region. */
+static unsigned csd_vol_load(unsigned *v)
 {
-    if (p == csd_dsp.preset) return;
-    if (p >= CSD_DSP_PRESET_FIR && csd_dsp.rateIdx < 0) return;  // no table
-    csd_dsp.preset = p;
-    csd_dsp_restart();                       // avoid pop from stale state
+    unsigned x;
+    unsafe { x = *(volatile unsigned * unsafe)v; }
+    return x;
+}
+static void csd_vol_store(unsigned *v, unsigned x)
+{
+    unsafe { *(volatile unsigned * unsafe)v = x; }
 }
 
-/* A3 test builds force the DELAY preset with -DCSD_DSP_PRESET_DEFAULT=1
- * (button/host selection arrives with B3). */
-#ifdef CSD_DSP_PRESET_DEFAULT
-void csd_dsp_preset_boot(void) { csd_dsp_set_preset(CSD_DSP_PRESET_DEFAULT); }
-#else
-void csd_dsp_preset_boot(void) { }
-#endif
+void csd_dsp_set_preset(unsigned p)
+{
+    /* Diagnostic-thread side: post only. Never touches csd_dsp. */
+    csd_vol_store(&csd_dsp_preset_req, p);
+    /* Read and write the counter in separate statements. The one-expression
+     * form (store(x, load(x)+1)) is rejected outright: "use of csd_dsp_bump
+     * causes an ambiguous evaluation". XC refuses to leave a same-object
+     * read/write pair inside one expression, where C would compile it and
+     * assign the ordering to chance -- take the hint and sequence it. */
+    unsigned b = csd_vol_load(&csd_dsp_bump);
+    csd_vol_store(&csd_dsp_bump, b + 1u);
+}
 
-unsigned csd_dsp_get_preset(void) { return csd_dsp.preset; }
+/* Adopt a posted preset. Called from the audio thread only, at points where
+ * no sample is mid-computation: the top of the frame hook and stream (re-)
+ * configuration (the hook runs only while a stream is live, so a command
+ * posted during idle must also be picked up here at stream start -- that was
+ * the bug behind "PRESet accepted, PRESet? answers boot default forever"). */
+static void csd_dsp_apply_pending_preset(void)
+{
+    unsigned p = csd_vol_load(&csd_dsp_preset_req);
+    if (p == CSD_DSP_PRESET_NONE || p == csd_dsp.preset) return;
+    csd_dsp.preset = p;
+    csd_dsp_restart();                   /* clears stale state: no pop */
+}
+
+/* Read by the AUDIO thread for the CSD_DSP_DIAG_BUMP stamp, so it must go
+ * through the volatile accessor like every other cross-thread field. */
+static unsigned csd_dsp_bump_read(void) { return csd_vol_load(&csd_dsp_bump); }
+
+/* No-op, deliberately. It exists only because the board calls it from
+ * csd_AudioHwConfig on every stream (re)configuration.
+ *
+ * It MUST NOT post the boot default here, and doing so was the real reason
+ * the audio thread never honoured a host preset. AudioHwConfig is re-invoked
+ * every few hundred ms while a stream is live (the same reason set_rate must
+ * be idempotent -- see its comment), so re-posting CSD_DSP_PRESET_DEFAULT on
+ * each call re-asserted the boot preset over the host's request within a
+ * few hundred ms of every command. Measured: the host posted 0, the audio
+ * thread's own stamp reported 2 for the entire capture, while the diagnostic
+ * thread's readback reported 0 -- and the diagnostic thread's bump counter
+ * advanced normally, proving the two threads share memory, so this was a
+ * logic race rather than a memory barrier.
+ *
+ * The boot default is therefore the initialiser of csd_dsp_preset_req above:
+ * it is adopted once, at the first stream start, and a host command is never
+ * overwritten by a later reconfiguration. */
+void csd_dsp_preset_boot(void) { }
+
+/* Readback for DIAG:DSP:PRESet? -- runs on the DIAGNOSTIC thread, so it must
+ * not read csd_dsp.preset (audio-thread-owned; its load could be hoisted in
+ * this thread exactly as the audio thread's was in the other direction). The
+ * posted request is the truthful answer to "what did the host ask for"; the
+ * audio thread's applied value is verified separately through the mic-path
+ * stamp, which is the only channel that provably crosses to the host. */
+unsigned csd_dsp_get_preset(void)
+{
+    unsigned p = csd_vol_load(&csd_dsp_preset_req);
+    return p == CSD_DSP_PRESET_NONE ? CSD_DSP_PRESET_BOOT : p;
+}
+
 
 #ifdef CSD_DSP_DIAG
 /* Device-execution proof, diagnostics only: the mic path is independent of the
@@ -231,6 +355,11 @@ unsigned csd_dsp_diag_count(void) { return csd_diag_frames; }
 void UserBufferManagement(unsigned sampsFromUsbToAudio[],
                           unsigned sampsFromAudioToUsb[])
 {
+    /* Adopt any preset the diagnostic thread posted, here at a frame boundary
+     * where no sample is mid-computation. Only this thread writes csd_dsp.
+     * See csd_dsp_set_preset for why the diagnostic thread may not. */
+    csd_dsp_apply_pending_preset();
+
 #ifdef CSD_DSP_DIAG_SLOTS
     /* Where does the audio actually sit in the USB->DAC buffer at hook entry?
      * Print a slot census every 50k calls (~130 ms at 384 kHz) so the census
@@ -298,6 +427,25 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     sampsFromAudioToUsb[0] = fp & 0x00FFFFFFu;
     sampsFromAudioToUsb[1] = ((unsigned)csd_dsp_diag_state() << 24) |
                              ((fp >> 24) & 0x00FFFFFFu);
+#endif
+#ifdef CSD_DSP_DIAG_BUMP
+    /* Thread-ownership discriminator, on the mic path L channel.
+     *
+     * csd_dsp_bump is incremented by the DIAGNOSTIC thread inside
+     * csd_dsp_set_preset(); this line is executed by the AUDIO thread. So what
+     * the host reads in L answers the one question that decides the fix:
+     *   bump advances  -> the threads share memory; the frozen preset was a
+     *                     hoisted load, and volatile accessors are the fix.
+     *   bump frozen    -> the threads see different memories (the task landed
+     *                     on another tile, which has its own RAM); no shared
+     *                     global will ever bridge them and the preset must
+     *                     travel over a channel instead.
+     *
+     * Counter sits in bits 8..23, not 0..15: the capture path is 24-bit and
+     * the low byte is what gets lost (the hook-magic comment above records
+     * exactly that), and the low byte of a counter is precisely the bits that
+     * change -- losing them would make a live counter look dead. */
+    sampsFromAudioToUsb[0] = (csd_dsp_bump_read() << 8) & 0x00FFFFFFu;
 #endif
 #endif
 #ifdef CSD_DSP_DIAG_RAW

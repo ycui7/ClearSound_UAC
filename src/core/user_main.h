@@ -24,11 +24,19 @@ extern unsafe chanend uc_audiohw5;
 //extern unsafe chanend uc_audiohw3;
 //unsafe chanend uc_audiohw3;
 
+/* Client end of the diagnostic core's codec-register channel. Its peer is
+ * passed to the tile-0 register server; the two endpoints go to two different
+ * tasks of the same top-level par, connected by the compiler -- the same way
+ * uc_audiohw1/c_audiohw[0] already work.
+ *
+ * A dedicated channel (not another index of c_audiohw[]) so our request/reply
+ * sequence can never interleave with the audio core's on one chanend: sharing
+ * would let us read back someone else's answer, which for a diagnostic
+ * interface is worse than returning an error. */
+extern unsafe chanend uc_audiohw_diag;
+
 
 #define SC_CLEARSOUND_DAC          1
-
-// on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; 
-// on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
 
 #define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend); 
 
@@ -45,6 +53,7 @@ extern unsafe chanend uc_audiohw5;
                                             {\
                                                 unsafe{\
                                                     uc_audiohw1 = (chanend) c_audiohw[0];\
+                                                    uc_audiohw_diag = (chanend) c_audiohw[3];\
                                                 }\
                                             }\
                                         }\
