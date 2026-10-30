@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClearSoundDac bench console</title>
+<style>
+  :root { --ok:#1a7f37; --bad:#b3261e; --dim:#666; --line:#d8d8d8; --bg:#fafafa; }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+         margin:0; background:var(--bg); color:#111; }
+  header { padding:10px 14px; background:#111; color:#eee; display:flex;
+           gap:10px; align-items:center; flex-wrap:wrap; }
+  header b { font-weight:600; letter-spacing:.02em; }
+  header .sp { flex:1; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:14px; padding:14px; }
+  @media (max-width: 900px){ main{ grid-template-columns:1fr; } }
+  .card { background:#fff; border:1px solid var(--line); border-radius:6px; padding:12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em;
+             color:var(--dim); margin:0 0 10px; font-weight:600; }
+  button { font:inherit; padding:6px 11px; border:1px solid #bbb; background:#f2f2f2;
+           border-radius:4px; cursor:pointer; }
+  button:hover { background:#e6e6e6; }
+  button.primary { background:#111; color:#fff; border-color:#111; }
+  button.primary:hover { background:#333; }
+  button[disabled] { opacity:.45; cursor:not-allowed; }
+  input[type=text], input[type=number] { font:inherit; padding:5px 7px;
+           border:1px solid #bbb; border-radius:4px; width:100%; }
+  .row { display:flex; gap:7px; align-items:center; margin:6px 0; flex-wrap:wrap; }
+  .row label { color:var(--dim); min-width:5.5em; }
+  .btns { display:flex; gap:6px; flex-wrap:wrap; }
+  #log { height:56vh; overflow:auto; background:#111; color:#ddd; padding:10px;
+         border-radius:6px; white-space:pre-wrap; word-break:break-word; }
+  #log .tx { color:#7fd1ff; }
+  #log .rx { color:#9ff0a0; }
+  #log .er { color:#ff9a94; }
+  #log .in { color:#ffd479; }
+  #log .hd { color:#888; }
+  .stat { display:inline-block; padding:1px 7px; border-radius:10px; font-size:12px; }
+  .pass { background:#e3f3e6; color:var(--ok); }
+  .fail { background:#fbe7e6; color:var(--bad); }
+  .grid { display:grid; grid-template-columns:repeat(16, 1fr); gap:2px; margin-top:8px; }
+  .grid div { font-size:10px; text-align:center; padding:3px 0; background:#eee; border-radius:2px; }
+  .grid div.na { background:#fff; color:#bbb; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  td { padding:3px 6px; border-bottom:1px solid #eee; }
+  .hint { color:var(--dim); font-size:12px; }
+  .banner { background:#fff4e5; border:1px solid #f0c987; padding:8px 10px;
+            border-radius:5px; margin:10px 14px 0; display:none; }
+  .banner code { background:#f6e9d2; padding:1px 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <b>ClearSoundDac bench console</b>
+  <span id="dev" class="hint">not connected</span>
+  <span class="sp"></span>
+  <label class="hint" for="via">via</label>
+  <select id="via">
+    <option value="webmidi" selected>Web MIDI</option>
+    <option value="webusb">WebUSB</option>
+  </select>
+  <input type="text" id="needle" value="XMOS" title="port label to match"
+         style="width:7em;background:#222;color:#eee;border-color:#444">
+  <button id="connect" class="primary">Connect board</button>
+  <button id="qualify" disabled>Run qualification</button>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<main>
+  <div>
+    <div class="card">
+      <h2>DSP preset</h2>
+      <div class="btns" id="presets">
+        <button data-p="0">0 · bypass</button>
+        <button data-p="1">1 · delay</button>
+        <button data-p="2">2 · bass shelf</button>
+      </div>
+      <div class="row"><label>read back</label><span id="presetNow">–</span>
+        <button id="presetPoll">Poll</button></div>
+      <div class="row"><label>auto</label>
+        <label><input type="checkbox" id="presetCycle"> cycle 2 s</label></div>
+      <div class="hint">Set-commands are silent; the read-back is a separate
+        query. Preset 7 is refused with −224 and must leave state unchanged.</div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>Codec registers</h2>
+      <div class="row"><label>addr</label>
+        <input type="text" id="regAddr" value="0x00" style="width:6.5em"></div>
+      <div class="row"><label>value</label>
+        <input type="text" id="regVal" value="0x00" style="width:6.5em">
+        <button id="regWr">write</button>
+        <button id="regRd">read</button></div>
+      <div class="row"><label>range</label>
+        <input type="text" id="regLo" value="0x00" style="width:5.5em">
+        <input type="text" id="regHi" value="0x0f" style="width:5.5em">
+        <button id="regDump">dump</button></div>
+      <div class="hint">Address 0x00 is the read-only chip id. Writes apply in
+        order with no rollback; read back to confirm.</div>
+      <div class="grid" id="regGrid"></div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>Error queue</h2>
+      <div class="row">
+        <button id="errCount">count</button>
+        <button id="errNext">next</button>
+        <button id="errDrain">drain</button>
+      </div>
+      <div class="hint">A rejected command produces no reply at all, so this
+        queue is the only proof it arrived.</div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>Sanity</h2>
+      <div class="row"><button id="b64self">base64 self-test</button>
+        <button id="idnx5">5× IDN stability</button></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <div class="row">
+        <input type="text" id="cmd" placeholder="SCPI command, e.g. DIAG:DSP:PRESet?  or  REGister:READ? &quot;Aw==&quot;"
+               style="flex:1;min-width:18em">
+        <button id="send" class="primary">Send</button>
+        <button id="clear">Clear log</button>
+      </div>
+      <div class="btns" id="quick" style="margin-top:4px"></div>
+    </div>
+    <div id="log" style="margin-top:12px"></div>
+    <div class="card" style="margin-top:12px">
+      <h2>Qualification result</h2>
+      <div id="qual">not run</div>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+import { CsdDiag, ProtoError, TimeoutError, buildSysex, packPackets,
+         encodeB64, decodeB64Strict } from "./csd-proto.js";
+import { WebUsbTransport } from "./csd-transport-webusb.js";
+import { WebMidiTransport } from "./csd-transport-webmidi.js";
+import { Qualify, roundTripCheck } from "./csd-qualify.js";
+
+const $ = (id) => document.getElementById(id);
+const log = $("log");
+let client = null, transport = null, cycleTimer = null;
+
+function put(cls, text) {
+  const span = document.createElement("span");
+  span.className = cls;
+  span.textContent = text + "\n";
+  log.appendChild(span);
+  log.scrollTop = log.scrollHeight;
+}
+const hex = (n, w = 2) => "0x" + Number(n).toString(16).padStart(w, "0");
+
+function needClient() {
+  if (!client) { put("er", "not connected — press Connect board"); return false; }
+  return true;
+}
+
+// ---- connect ---------------------------------------------------------------
+// Transport choice is a bench decision, not a code preference: WebUSB and Web
+// MIDI both round-trip on paper but fail differently (driver ownership versus
+// SysEx permission), and the framing differs -- WebUSB needs 4-byte USB-MIDI
+// events, Web MIDI hands over raw MIDI bytes and lets the UA packetise. So
+// each transport states the framing the client must use.
+const TRANSPORTS = {
+  webmidi: { open: (o) => WebMidiTransport.open(o), framing: "raw" },
+  webusb: { open: () => WebUsbTransport.open({}), framing: "usb-midi" },
+};
+
+$("connect").onclick = async () => {
+  const via = $("via").value;
+  const spec = TRANSPORTS[via];
+  try {
+    put("hd", `opening ${via}…`);
+    transport = await spec.open({ needle: $("needle").value.trim() || "XMOS" });
+    client = new CsdDiag(transport, spec.framing);
+    const label = transport.describe ? transport.describe() : via;
+    $("dev").textContent = `connected via ${via}`;
+    $("qualify").disabled = false;
+    $("banner").style.display = "none";
+    put("hd", `connected: ${label}  (framing ${spec.framing})`);
+    const idn = await client.query("*IDN?");
+    put("rx", "*IDN? -> " + idn.trim());
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    put("er", `connect failed via ${via}: ` + msg);
+    const b = $("banner");
+    b.style.display = "block";
+    if (/sysex/i.test(msg)) {
+      b.innerHTML = msg;
+    } else if (/Not selected|cancelled|gesture|Security|no connected MIDI/i.test(msg)) {
+      b.innerHTML = "Nothing selected or no port matched. Press <b>Connect board</b> " +
+        "again and pick the board in the picker (VID 20b1).<br>" +
+        msg.replace(/</g, "&lt;");
+    } else if (/claim|busy|driver|unbind/i.test(msg)) {
+      b.innerHTML = "The kernel driver holds the MIDI interface. On Linux unbind " +
+        "snd-usb-audio from the board, then reconnect:<br>" +
+        "<code>lsusb | grep 20b1</code> then " +
+        "<code>echo -n BUS-DEV | sudo tee /sys/bus/usb/drivers/usb/unbind</code> " +
+        "(rebind by writing the same string to <code>.../bind</code>).<br>" +
+        "Or switch <b>via</b> to <b>Web MIDI</b>, which needs no unbind.";
+    } else if (/WebUSB is not available|Web MIDI is not available/i.test(msg)) {
+      b.innerHTML = msg + " WebUSB needs Chromium-based Chrome/Edge over " +
+        "<b>https</b> or <b>localhost</b>: open this page at http://localhost " +
+        "or serve it over TLS.";
+    } else {
+      b.innerHTML = msg.replace(/</g, "&lt;");
+    }
+  }
+};
+
+// ---- raw console -----------------------------------------------------------
+const QUICK = ["*IDN?", "*OPC?", "DIAG:DSP:PRESet?", "DIAG:DSP:PRESet 0",
+               "DIAG:DSP:PRESet 1", "DIAG:DSP:PRESet 2", "DIAG:DSP:PRESet 7",
+               "SYSTem:ERRor:COUNt?", "SYSTem:ERRor?", 'REGister:READ? "AA=="'];
+const quick = $("quick");
+for (const q of QUICK) {
+  const b = document.createElement("button");
+  b.textContent = q;
+  b.onclick = () => { $("cmd").value = q; sendCmd(); };
+  quick.appendChild(b);
+}
+
+async function sendCmd() {
+  const cmd = $("cmd").value.trim();
+  if (!cmd || !needClient()) return;
+  put("tx", ">> " + cmd);
+  const t0 = performance.now();
+  try {
+    if (!cmd.includes("?")) {
+      await client.command(cmd);
+      put("hd", `   (set-command, silent by design) ${(performance.now()-t0).toFixed(0)} ms`);
+    } else {
+      const r = await client.query(cmd, 3, false);
+      put(/^-\d+,/.test(r) ? "er" : "rx",
+          `   ${JSON.stringify(r)}  ${(performance.now()-t0).toFixed(0)} ms`);
+    }
+  } catch (e) {
+    put("er", "   " + (e.name || "Error") + ": " + e.message);
+    // Distinguish "device refused this" from "device is not there": a
+    // rejection is silent, so a timeout alone never tells you which.
+    if (e instanceof TimeoutError) {
+      try {
+        const q = await client.query("SYSTem:ERRor:NEXT?", 2, false);
+        if (q && !q.trim().startsWith("0,")) put("er", "   REJECTED: " + q.trim());
+        else put("er", "   no reply and nothing queued — transport suspect");
+      } catch (_) { put("er", "   error queue unreadable"); }
+    }
+  }
+}
+$("send").onclick = sendCmd;
+$("cmd").addEventListener("keydown", (ev) => { if (ev.key === "Enter") sendCmd(); });
+$("clear").onclick = () => { log.textContent = ""; };
+
+// ---- DSP preset ------------------------------------------------------------
+async function readPreset() {
+  if (!needClient()) return;
+  try {
+    const v = (await client.query("DIAG:DSP:PRESet?")).trim();
+    $("presetNow").textContent = v;
+    return v;
+  } catch (e) { $("presetNow").textContent = "err"; put("er", "preset read: " + e.message); }
+}
+for (const b of document.querySelectorAll("#presets button")) {
+  b.onclick = async () => {
+    if (!needClient()) return;
+    const p = b.dataset.p;
+    put("tx", `>> DIAG:DSP:PRESet ${p}`);
+    await client.command(`DIAG:DSP:PRESet ${p}`);
+    put("hd", "   sent (silent), reading back…");
+    const v = await readPreset();
+    if (v !== null) put(v === p ? "rx" : "er", `   read-back ${v}${v === p ? "" : "  MISMATCH"}`);
+  };
+}
+$("presetPoll").onclick = readPreset;
+$("presetCycle").onchange = (ev) => {
+  if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; }
+  if (!ev.target.checked) return;
+  let i = 0;
+  cycleTimer = setInterval(async () => {
+    const p = [0, 2, 1][i++ % 3];
+    put("tx", `>> DIAG:DSP:PRESet ${p} (cycle)`);
+    await client.command(`DIAG:DSP:PRESet ${p}`);
+    const v = await readPreset();
+    put(v === String(p) ? "rx" : "er", `   cycle read-back ${v}`);
+  }, 2000);
+};
+
+// ---- registers -------------------------------------------------------------
+function parseAddr(s, name) {
+  const t = String(s).trim().toLowerCase();
+  const n = t.startsWith("0x") ? parseInt(t.slice(2), 16) : parseInt(t, 10);
+  if (!Number.isFinite(n) || n < 0 || n > 0xff) throw new ProtoError(`${name} out of range: ${s}`);
+  return n;
+}
+
+$("regRd").onclick = async () => {
+  if (!needClient()) return;
+  try {
+    const a = parseAddr($("regAddr").value, "addr");
+    const v = await client.regRead(a);
+    put("rx", `REG ${hex(a)} = ${hex(v[0])}`);
+  } catch (e) { put("er", "read: " + e.message); }
+};
+
+$("regWr").onclick = async () => {
+  if (!needClient()) return;
+  try {
+    const a = parseAddr($("regAddr").value, "addr");
+    const v = parseAddr($("regVal").value, "value");
+    await client.regWrite({ [a]: v });
+    const back = await client.regRead(a);
+    put(back[0] === v ? "rx" : "er",
+        `REG ${hex(a)} <- ${hex(v)}, read ${hex(back[0])}` +
+        (back[0] === v ? "" : "  (read-only register, or write did not land)"));
+  } catch (e) { put("er", "write: " + e.message); }
+};
+
+$("regDump").onclick = async () => {
+  if (!needClient()) return;
+  try {
+    const lo = parseAddr($("regLo").value, "lo"), hi = parseAddr($("regHi").value, "hi");
+    if (lo > hi) throw new ProtoError("lo > hi");
+    if (hi - lo + 1 > 64) throw new ProtoError("range exceeds 64 addresses (device cap)");
+    const addrs = [];
+    for (let a = lo; a <= hi; a++) addrs.push(a);
+    const t0 = performance.now();
+    const vals = await client.regRead(addrs);
+    put("rx", `dump ${hex(lo)}..${hex(hi)} = ${addrs.length} bytes in one command ` +
+              `(${(performance.now()-t0).toFixed(0)} ms)`);
+    const g = $("regGrid");
+    g.textContent = "";
+    for (let a = 0; a < 256; a++) {
+      const d = document.createElement("div");
+      const inRange = a >= lo && a <= hi;
+      d.textContent = inRange ? vals[a - lo].toString(16).padStart(2, "0") : "";
+      if (!inRange) d.className = "na";
+      d.title = hex(a);
+      g.appendChild(d);
+    }
+  } catch (e) { put("er", "dump: " + e.message); }
+};
+
+// ---- error queue -----------------------------------------------------------
+$("errCount").onclick = async () => { if (needClient()) put("rx", "ERR:COUNt -> " + await client.errorCount()); };
+$("errNext").onclick  = async () => { if (needClient()) put("rx", "ERR:NEXT  -> " + await client.errorNext()); };
+$("errDrain").onclick = async () => {
+  if (!needClient()) return;
+  for (let i = 0; i < 32; i++) {
+    const t = await client.errorNext();
+    put("rx", "  " + t);
+    if (t.startsWith("0,")) break;
+  }
+};
+
+// ---- sanity ----------------------------------------------------------------
+$("b64self").onclick = () => {
+  const r = roundTripCheck();
+  put(r.ok ? "rx" : "er", r.ok ? `base64 self-test: ${r.cases} payload sizes OK`
+                               : `base64 self-test FAILED at ${r.at}: ${r.why}`);
+};
+$("idnx5").onclick = async () => {
+  if (!needClient()) return;
+  const got = [];
+  for (let i = 0; i < 5; i++) {
+    try { got.push((await client.query("*IDN?")).trim()); }
+    catch (e) { got.push("ERR " + e.message); }
+  }
+  const stable = new Set(got).size === 1;
+  put(stable ? "rx" : "er", "5x IDN " + (stable ? "stable" : "UNSTABLE") + ": " + got[0]);
+  if (!stable) got.forEach((g, i) => put("er", `  #${i + 1} ${g}`));
+};
+
+// ---- qualification ---------------------------------------------------------
+$("qualify").onclick = async () => {
+  if (!needClient()) return;
+  $("qualify").disabled = true;
+  $("qual").textContent = "running…";
+  const t0 = performance.now();
+  const q = new Qualify(client, {
+    log: (r) => put(r.passed ? "rx" : "er",
+                    `  ${r.passed ? "PASS" : "FAIL"}  ${r.name}  ${r.value ?? ""}`)
+  });
+  put("hd", "== qualification ==");
+  let res;
+  try { res = await q.run(); }
+  catch (e) { put("er", "qualification aborted: " + e.message); res = { error: e.message }; }
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  $("qual").textContent = res.error ? "aborted: " + res.error
+                                    : `${res.passed}/${res.total} passed in ${secs}s`;
+  if (res.failed) $("qual").style.color = "var(--bad)";
+  else $("qual").style.color = "var(--ok)";
+  $("qualify").disabled = false;
+};
+
+// Wire frame bytes for protocol debugging are intentionally NOT exposed: this
+// console qualifies builds, it is not a coding tool.
+</script>
+</body>
+</html>

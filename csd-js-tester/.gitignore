@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+native_scpi_harness
+# rig runs keep their WAVs under $SCRATCH, never here
+*.wav
