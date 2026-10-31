@@ -981,6 +981,55 @@ static SCPI_FPTR_CMD scpi_result_t gen_counts_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* GENerator:VOLume? -> cmds,last_index,last_multiplier
+ *
+ * Did the host's SET_CUR for 'Mix 2 Playback Volume' reach the mixer at all?
+ * amixer returns rc=0 and the control then reads back 0 counts (-48 dB = our
+ * MIN_VOLUME), never the value written, on builds with and without the
+ * generator -- so the question is live and three instruments have already
+ * failed to answer it:
+ *   - amixer cget: snd-usb-mixer caches what it wrote, so it can report the
+ *     kernel's belief rather than the device's;
+ *   - raw pyusb control transfers: EIO against our build AND against the
+ *     factory EEPROM image, i.e. the transfers never landed -- an instrument
+ *     that "fails" identically on a control group has measured nothing;
+ *   - the xrun console: zero lines even at boot, so no printf reaches the
+ *     host in this configuration, and the AudioHwRemote_Volume_Update trace
+ *     print sits in the #else branch of updateVol, compiled out entirely
+ *     because XUA_OUT_VOLUME_IN_MIXER is 1.
+ * This counts the commands at their destination, the mixer's SET_MIX_OUT_VOL
+ * handler, and reports them over SCPI -- the one transport proven on this
+ * board (the whole 51-check rig rides it). cmds == 0 across a host write
+ * means the command never arrived; cmds advancing with a sane multiplier
+ * means it did, and the fault is downstream of the mixer.
+ *
+ * Separate command rather than extra fields on GENerator:COUNts?: that
+ * reply's 5-field shape is asserted by the rig's parser, and widening a
+ * proven contract to carry a diagnostic risks the suite that proves the
+ * generator.
+ */
+static SCPI_FPTR_CMD scpi_result_t gen_volume_q(scpi_t *context)
+{
+    char buf[3 * 10 + 3];
+    unsigned v[3];
+    unsigned len = 0;
+
+    v[0] = csd_mb_get_vol_cmds();
+    v[1] = csd_mb_get_vol_index();
+    v[2] = csd_mb_get_vol_val();
+    for (unsigned i = 0; i < 3u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 /* GENerator:STATe:REJect? -> last_reject_code,reject_count */
 static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
 {
@@ -1056,6 +1105,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:OFF",           .callback = gen_off     },
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
     { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
+    { .pattern = "GENerator:VOLume?",       .callback = gen_volume_q },
     { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
 
     SCPI_CMD_LIST_END

@@ -107,6 +107,13 @@ static void csd_dsp_restart(void)
         CSD_ENGINE_CLEAR();
 }
 
+#if !(defined(CSD_GEN_EN) && defined(CSD_GEN_PREMIX))
+/* Post-mixer detector. In a pre-mixer build the mixer thread votes instead,
+ * on the RAW host pair before the tone is summed in (see csd_gen_mix_begin),
+ * so this would be dead code -- and dead code in a per-frame path is how a
+ * stale detector survives to disagree with the live one. Guarded rather than
+ * deleted: the non-mixer build still needs it, and the gate that proves DSD
+ * suppression was measured on that build. */
 static void dop_check(unsigned *s)
 {
     int match = DOP_MARK(s[0]) && DOP_MARK(s[1]);
@@ -125,6 +132,7 @@ static void dop_check(unsigned *s)
         }
     }
 }
+#endif
 
 #pragma unsafe arrays
 void csd_dsp_frame(unsigned *s)
@@ -147,12 +155,33 @@ void csd_dsp_frame(unsigned *s)
      * ALREADY suppresses injection, so a false latch cannot corrupt audio --
      * and keeping the clear would erase the legitimate DoP latch the hook
      * votes every frame, undoing the suppression this path exists for. */
-#ifdef CSD_GEN_EN
+#ifdef CSD_GEN_PREMIX
+    /* Mixer build: the mixer thread voted on the RAW host pair before the
+     * tone was summed in, and that verdict is the one the DSP bypass must
+     * honour. Re-voting here would read tone + host, which is how a loud
+     * full-scale sweep latches DoP as an expected event.
+     *
+     * The edge check is not decoration. The post-mixer detector restarts the
+     * engine on every latch transition; adopting a verdict silently would
+     * leave the FIR ring holding samples from before a mid-stream DoP window
+     * and replay them into the PCM that follows. */
+    {
+        unsigned d = csd_gen_mix_dop();
+        if (d != csd_dsp.dop) {
+            csd_dsp.dop = d;
+            csd_dsp_restart();
+        }
+    }
+#elif defined(CSD_GEN_EN)
     if (csd_gen_state_mode() == CSD_GEN_MODE_OFF)
-#endif
     {
         dop_check(s);
     }
+#else
+    {
+        dop_check(s);
+    }
+#endif
 
 unsigned n = csd_dsp.n;
     if (n == 0u || csd_dsp.dsd || csd_dsp.dop || csd_dsp.preset == 0u) return;  // byte-exact bypass
@@ -231,7 +260,15 @@ void csd_dsp_set_rate(unsigned hz)
      * thread that touches the generator's live state -- which is what lets it
      * be lock-free. Placed after the idempotence check so the repeated
      * AudioHwConfig calls during a live stream do not restart the wave. */
+#ifdef CSD_GEN_PREMIX
+    /* The mixer thread owns csd_gen in a mixer build. Leave the rate as a
+     * single word for it to collect at its frame boundary; calling
+     * csd_gen_notify_rate() here would edit the live descriptor from a
+     * thread that does not own it. */
+    csd_gen_mix_set_rate(hz);
+#else
     csd_gen_notify_rate(hz);
+#endif
 #endif
     csd_dsp_clear_state();
     csd_dsp.rateIdx = idx;
@@ -505,7 +542,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 #ifdef CSD_DSP_DIAG_RAW
     sampsFromAudioToUsb[0] = csd_pre0;
 #endif
-#ifdef CSD_GEN_EN
+#if defined(CSD_GEN_EN) && !defined(CSD_GEN_PREMIX)
     /* DSD/DoP suppression -- user requirement: if the stream presents as
      * native DSD or DoP, the generator must not touch the samples.
      *
@@ -552,6 +589,16 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     } else if (armed) {
         csd_gen_note(csd_dsp.dsd ? 1u : 2u);  /* suppressed: DSD vs DoP */
     }
+#endif
+#ifdef CSD_GEN_PREMIX
+    /* Mixer build: NOTHING happens here. The wave was summed upstream, on the
+     * mixer thread, before doMix() -- which is the whole point (the tone rides
+     * the mixer's gain, routing and mapping like real audio). This thread must
+     * not call apply_pending/inject/fill in that mode: two threads advancing
+     * one NCO outputs exactly twice the commanded frequency, and both calling
+     * apply_pending races the cmd/adopted handshake. The counters still
+     * advance, from the mixer thread, so the rig reads the same
+     * emit/sup_dsd/sup_dop triple either way. */
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
 #ifdef CSD_DSP_DIAG_RAW

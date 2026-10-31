@@ -365,6 +365,113 @@ int csd_gen_inject(unsigned *s)
 
 unsigned csd_gen_state_mode(void)     { return (unsigned)csd_gen.mode; }
 
+#ifdef CSD_GEN_PREMIX
+/* ---- pre-mixer injection: mixer builds only --------------------------
+ *
+ * Owner rule for the two csd_gen descriptors: exactly ONE thread may run
+ * apply_pending()/fill() per frame. In a mixer build that thread is mixer1,
+ * in a non-mixer build it is the audio thread; the caller selects at compile
+ * time (CSD_GEN_PREMIX) and never both. Two owners would advance the NCO
+ * twice per frame -- the tone comes out at exactly twice the commanded
+ * frequency, which is the kind of wrong-but-sounding result a rig has to be
+ * built specifically to catch.
+ *
+ * These statics belong to the mixer thread in that mode: only it reads or
+ * writes them, so no handshake is needed. The one exception is
+ * csd_gen_mix_want_fs, written by the audio thread as a single word
+ * (XS3 word stores are atomic) and consumed here at the frame boundary --
+ * scalar across the boundary, matching the rule the rest of the cross-tile
+ * surface follows.
+ */
+/* Mixer-thread-private frame state: only mixer1 touches these, so no
+ * hand-off machinery is needed. The two genuinely cross-thread words (stream
+ * rate in, DoP verdict out) are NOT here -- they live in csd_gen_mailbox.c,
+ * a C TU, because XC's parallel-usage checker will not let two branches of
+ * lib_xua's single audio par share a variable. */
+static unsigned csd_gen_mix_dsd;       /* last dsdMode the mixer recorded  */
+static int      csd_gen_mix_votes;     /* frames toward DoP                */
+static int      csd_gen_mix_leave;     /* frames toward PCM                */
+static unsigned csd_gen_mix_fs;        /* rate this thread last applied    */
+static unsigned csd_gen_mix_armed;     /* mode != OFF for this frame       */
+static unsigned csd_gen_mix_valid;     /* wave holds this frame's samples  */
+static int      csd_gen_mix_wave[2];   /* the frame's wave, L then R       */
+
+void csd_gen_mix_set_rate(unsigned fs_hz)
+{
+    /* Called by the audio thread at stream start. It may NOT call
+     * csd_gen_notify_rate() directly in this mode: that edits csd_gen and
+     * csd_gen_pend, which the mixer thread owns. Leaving a scalar in the
+     * mailbox for the owner to collect keeps the single-writer property. */
+    csd_mb_put_rate(fs_hz);
+}
+
+unsigned csd_gen_mix_dop(void)
+{
+    /* Read by the audio thread; written only by this thread above. */
+    return csd_mb_get_dop();
+}
+
+void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
+{
+    /* Adopt first, then emit -- same boundary rule as csd_gen_inject(), so a
+     * burst's first sample is the first sample of the wave. */
+    csd_gen_apply_pending();
+
+    /* Collect a stream-start rate the audio thread left for us. */
+    unsigned want = csd_mb_get_rate();
+    if (want != csd_gen_mix_fs && want != 0u) {
+        csd_gen_mix_fs = want;
+        csd_gen_notify_rate(want);
+    }
+    csd_gen_mix_dsd = dsd_mode;
+    csd_gen_mix_armed = (csd_gen.mode != (unsigned)CSD_GEN_OFF);
+
+    /* DoP detection on the RAW host pair, BEFORE the sum. Once the tone is
+     * added the marker bytes are gone, and lib_xua's own DoDsdDopCheck runs
+     * downstream of us on that same buffer -- without this the stream would
+     * never enter DoP while the generator is armed, and we would sum a tone
+     * into what is really DSD payload. Detection therefore lives here in a
+     * mixer build; its verdict reaches the DSP bypass via csd_gen_mix_dop().
+     *
+     * Voting, not per-frame truth: PCM carrying marker bytes in both channels
+     * is ~2^-16 per frame, so 4 votes latch and 8 contrary votes release.
+     * Err toward "is DoP": a false latch only bypasses the tone, a missed
+     * latch corrupts DSD. */
+    int match = CSD_GEN_DOP_MARK((unsigned)hostL) &&
+                CSD_GEN_DOP_MARK((unsigned)hostR);
+    if (match) {
+        csd_gen_mix_leave = 0;
+        if (csd_gen_mix_votes < 4 && ++csd_gen_mix_votes >= 4)
+            csd_mb_put_dop(1u);
+    } else {
+        csd_gen_mix_votes = 0;
+        if (csd_mb_get_dop() && ++csd_gen_mix_leave >= 8) {
+            csd_mb_put_dop(0u);
+            csd_gen_mix_leave = 0;
+        }
+    }
+
+    /* The user gate: native DSD or DoP => the generator stays out of the data
+     * path. It stays ARMED (SCPI still reports the wave) and resumes when the
+     * host returns to plain PCM, with no re-arm. */
+    if (!csd_gen_mix_armed) return;
+    if (csd_gen_mix_dsd != 0u) { csd_gen_note(1u); return; }
+    if (csd_mb_get_dop() != 0u) { csd_gen_note(2u); return; }
+
+    csd_gen_fill(csd_gen_mix_wave);           /* advances the NCO exactly once */
+    csd_gen_mix_valid = 1u;
+    csd_gen_note(0u);
+}
+
+int csd_gen_mix_sample(unsigned ch, int host)
+{
+    /* Channels 0 and 1 carry the summed tone; anything else (SPDIF/ADAT host
+     * channels) passes through byte-exact. */
+    if (!csd_gen_mix_valid || ch > 1u) return host;
+    return csd_gen_mix_sum(host, csd_gen_mix_wave[ch]);
+}
+#endif /* CSD_GEN_PREMIX */
+
 /* Gate counters for SCPI (see the block above): the rig takes deltas across
  * a stream segment, so these are never reset and need no consistent triple. */
 unsigned csd_gen_cnt_emit(void)   { return csd_gen_load(&csd_gen_n_emit); }

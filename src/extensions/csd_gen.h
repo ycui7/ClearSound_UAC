@@ -178,6 +178,107 @@ void csd_gen_apply_pending(void);
  * keyword in XC and the compiler rejects it as a parameter name. */
 void csd_gen_fill(int samp[2]);
 
+/* ---- pre-mixer injection (mixer builds only) ---------------------------
+ *
+ * When the USB mixer is compiled in, the wave is SUMMED into the host stream
+ * BEFORE the mixer so a test tone rides the same gain, routing and mapping
+ * path as real audio (user requirement: "generator before the mixer, so
+ * function can be summed to the host audio stream for testing purposes").
+ *
+ * Where the generator injects is decided from the same -DMIXER that builds
+ * the mixer (xua_conf_default.h:1332 maps MIXER -> XUA_MIXER_EN). Derived,
+ * not configured: if the two could be set independently, both the mixer
+ * thread and the audio thread would advance the NCO and every tone would
+ * measure at exactly twice its commanded frequency. mixer.xc repeats this
+ * condition literally -- it cannot include this header, being library code.
+ */
+#if defined(CSD_GEN_EN) && defined(MIXER) && (MIXER)
+#define CSD_GEN_PREMIX 1
+#endif
+
+/* DoP marker test on one 32-bit channel word: DoP16-in-S32LE carries the
+ * marker in bytes 0 and 2, alternating 0x05 / 0xFA per frame. Single
+ * definition: csd_dsp.xc (post-mixer detector) and csd_gen.xc (pre-mixer
+ * detector) must agree exactly or the two latches disagree about what DoP
+ * is. The probability PCM fools it is ~2^-16 per frame, which is why
+ * detection votes (4 in, 8 out) rather than trusting one frame. */
+#define CSD_GEN_DOP_MARK(s) ( ((s) & 0xffu) == (((s) >> 16) & 0xffu) && \
+                              (((s) & 0xffu) == 0x05u || ((s) & 0xffu) == 0xFAu) )
+
+/* ONE call per frame from the mixer thread at the frame boundary, then one
+ * scalar query per output channel. Deliberately scalar in, scalar out -- no
+ * array or pointer crosses into lib_xua, because mixer.xc lives in the
+ * library and an array parameter is a pointer in disguise: correct today by
+ * accident of tile placement, silently wrong the day the mixer moves. The
+ * audiohub hook takes scalars for the same reason.
+ *
+ * begin() owns the frame boundary: adopt any pending command, pick up a
+ * stream-start rate the audio thread left behind, vote the DoP signature on
+ * the RAW host pair (before the sum can mask the markers) and advance the NCO
+ * exactly once. Doing the advance here rather than in the per-channel query
+ * is what guarantees one step per frame -- advancing per channel would
+ * double the frequency, and would be invisible to anything but a rig built to
+ * catch exactly that.
+ *
+ * The tone is summed into the I2S pair (channels 0 and 1) only. Other host
+ * channels (SPDIF/ADAT) ask, get their own sample back untouched, and so
+ * cannot sprout a tone nobody asked for.
+ *
+ * `dsd_mode` is lib_xua's own value at AUDIO_START: 0 off, 1 DoP, 2 native
+ * (xua_audiohub.xc:586-588). Any non-zero value shuts the sum off.
+ */
+#ifdef CSD_GEN_PREMIX
+void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode);
+int  csd_gen_mix_sample(unsigned ch, int host);
+#endif
+
+/* Post-mixer bypass input. The mixer thread owns DoP detection in a mixer
+ * build (it is the only thread that sees the host frame before the tone is
+ * summed in), so the audio thread must read its verdict rather than rely
+ * solely on its own detector, whose input is already tone + host.
+ * Single word, single writer: atomic read on XS3. */
+#ifdef CSD_GEN_PREMIX
+unsigned csd_gen_mix_dop(void);
+#endif
+
+/* Stream-start hand-off from the audio thread (csd_dsp_set_rate runs there)
+ * to the mixer thread, which owns csd_gen in a mixer build. Leaves a single
+ * word; the owner collects it at its next frame boundary and calls
+ * csd_gen_notify_rate() itself.
+ *
+ * The two cross-thread words live in csd_gen_mailbox.c, a C translation
+ * unit, NOT as statics here. That is not style: lib_xua puts mixer1 and
+ * XUA_AudioHub in the same par block, and XC's parallel-usage checker
+ * refuses to link when two branches of one par touch the same variable --
+ * `unsafe` does not exempt it, because the checker attributes the reference
+ * at the `&` in the caller rather than the deref inside the helper. Measured:
+ * "use of `usage.anon.37' violates parallel usage rules". lib_xua uses C TUs
+ * for its own cross-boundary hooks (xua_buffman_default.c) for the same
+ * reason. Each word still has exactly one writer and one reader, and is a
+ * single aligned unsigned, so a read cannot tear -- see that file for the
+ * discipline, which nothing now enforces automatically. */
+#ifdef CSD_GEN_PREMIX
+void csd_gen_mix_set_rate(unsigned fs_hz);
+#endif
+
+/* ---- cross-thread mailbox (defined in csd_gen_mailbox.c, a C TU) --------
+ *
+ * One word each, one writer and one reader per word, never both read and
+ * written from the same thread. Deliberately NOT exposed as shared statics:
+ * see the note above on XC's parallel-usage checker. A caller that needs two
+ * words to agree must not read two of these -- that needs a channel. */
+void     csd_mb_put_rate(unsigned fs_hz);   /* writer: audio thread   */
+unsigned csd_mb_get_rate(void);             /* reader: mixer thread   */
+void     csd_mb_put_dop(unsigned dop);      /* writer: mixer thread   */
+unsigned csd_mb_get_dop(void);              /* reader: audio thread   */
+
+/* Mixer volume-command trace (see csd_gen_mailbox.c): writer is the mixer
+ * thread's SET_MIX_OUT_VOL handler, reader is the diagnostic thread. */
+void     csd_mb_note_vol(unsigned index, unsigned val);
+unsigned csd_mb_get_vol_cmds(void);
+unsigned csd_mb_get_vol_index(void);
+unsigned csd_mb_get_vol_val(void);
+
 /* Firmware-facing wrapper: write the wave into a USB->DAC frame, or touch
  * nothing.
  *
