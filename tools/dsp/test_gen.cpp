@@ -851,6 +851,31 @@ static void t7_off_and_validation(void)
         ok(same, "channels differ -- a test source must be mono-identical");
     }
 
+    /* ---- T8: pre-mixer mix-sum must saturate, never wrap -------------
+     * The generator is summed into the host stream BEFORE the mixer so a
+     * test tone rides the same path as real audio (user requirement). A
+     * plain add overflows when host peak + wave exceed full scale, and a
+     * wrap injects a full-scale discontinuity -- a click the rig can never
+     * see, because the tone still reads "present". Saturate instead.
+     * This is the first behaviour the pre-mixer move needs and it does not
+     * exist yet, so T8 is the failing test for that change. */
+    printf("T8 mix-sum saturation (pre-mixer sum cannot wrap)\n");
+    {
+        const int32_t maxp = 2147483647;
+        const int32_t maxn = -2147483647 - 1;
+        ok(csd_gen_mix_sum(0, 0) == 0, "sum zero");
+        ok(csd_gen_mix_sum(1000, -1000) == 0, "sum cancels");
+        ok(csd_gen_mix_sum(1000000, 2000000) == 3000000, "ordinary sum exact");
+        ok(csd_gen_mix_sum(maxp, 1) == maxp, "positive overflow clamps to max");
+        ok(csd_gen_mix_sum(maxp, maxp) == maxp, "double max clamps");
+        ok(csd_gen_mix_sum(maxn, -1) == maxn, "negative overflow clamps to min");
+        ok(csd_gen_mix_sum(maxn, maxn) == maxn, "double min clamps");
+        /* Just under the edge stays exact: the clamp must not be a blanket
+         * abs-max that quietly eats legitimate near-full-scale peaks. */
+        ok(csd_gen_mix_sum(maxp - 1, 1) == maxp, "positive edge sum exact");
+        ok(csd_gen_mix_sum(maxn + 1, -1) == maxn, "negative edge sum exact");
+    }
+
     struct { const char *what; unsigned fs, mode, dom; double fa, fb;
              uint64_t pms; int want_ok; } cases[] = {
         {"fs=0",                  0u,     CSD_GEN_SINE,    CSD_GEN_LIN, 1000, 1000, 0, 0},

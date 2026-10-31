@@ -136,6 +136,33 @@ static int32_t csd_gen_sat64(int64_t v)
     return (int32_t)v;
 }
 
+/* Sum a test tone into a live host sample for the PRE-MIXER injection point.
+ *
+ * Saturation is mandatory, not cosmetic. A plain add wraps when host peak +
+ * tone exceed full scale, and a wrap is a full-scale step -- a click. The rig
+ * cannot catch it: the tone still measures present at the expected frequency,
+ * because the wrap only disturbs the few frames where the host happens to be
+ * near peak. A silent, rare, audible defect is exactly the class this gate
+ * exists for (see the naive-square canary), so the clamp is tested directly
+ * rather than assumed -- T8 in tools/dsp/test_gen.cpp.
+ *
+ * Reuses csd_gen_sat64() rather than open-coding a clamp: it is the
+ * already-tested saturator, and duplicating the limits invites the two
+ * copies to drift. The int64 add is deliberate, not accidental sloppiness --
+ * it is what makes the add itself incapable of wrapping, and a 32+32+carry
+ * pair is cheap on XS3 where a divide is not.
+ *
+ * A pre-clamp on the operands (limit each to +-3/4 full scale) was the first
+ * attempt and is wrong: it clips a legitimate near-full-scale host sample
+ * even when the tone is silent, silently costing a dB of real audio. The
+ * full-scale-plus-zero pass-through case is asserted in T8 to keep that
+ * regression from coming back.
+ */
+static int32_t csd_gen_mix_sum(int32_t host, int32_t tone)
+{
+    return csd_gen_sat64((int64_t)host + (int64_t)tone);
+}
+
 /* Interpolated sine; phase wraps at 2^32 == 1.0. */
 static int32_t csd_gen_sine(uint32_t phase)
 {
