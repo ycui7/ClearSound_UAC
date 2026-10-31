@@ -1030,6 +1030,61 @@ static SCPI_FPTR_CMD scpi_result_t gen_volume_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* MIXer:GAIN:HOST <w_q15> | MIXer:GAIN:GENerator <w_q15>
+ * MIXer:GAIN? -> w_host,w_gen
+ *
+ * Individual volume control for the two pre-mixer sources, INSIDE the
+ * mixer graph (user requirement: not the codec register, not the single
+ * UAC output multiplier that moves both together). Q15, 32768 = unity;
+ * range 0..2^16-1 allows a 6 dB boost before the saturator in
+ * csd_gen_mix_scale takes over (T9-verified, host gate).
+ *
+ * Each setter reads the packed word, swaps its half, and writes it back --
+ * read-modify-write from the single writer thread (diagnostic), so the
+ * mixer thread's single read per frame never sees a torn pair. Outside a
+ * mixer build the mailbox word still exists but nothing reads it; the
+ * commands still round-trip, which is what the native harness checks.
+ */
+static SCPI_FPTR_CMD scpi_result_t mixer_gain_set(scpi_t *context, unsigned which_gen)
+{
+    const char *why = "argument";
+    uint32_t w;
+    if (!gen_u32(context, "gain_q15", &w, 0u, 65535u, &why)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    unsigned packed = csd_mb_get_gains();
+    packed = which_gen ? ((w << 16) | (packed & 0xFFFFu))
+                       : ((packed & 0xFFFF0000u) | w);
+    csd_mb_put_gains(packed);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t mixer_gain_host(scpi_t *context)
+{ return mixer_gain_set(context, 0u); }
+
+static SCPI_FPTR_CMD scpi_result_t mixer_gain_gen(scpi_t *context)
+{ return mixer_gain_set(context, 1u); }
+
+static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
+{
+    char buf[2 * 5 + 1];
+    unsigned packed = csd_mb_get_gains();
+    const unsigned v[2] = { packed & 0xFFFFu, packed >> 16 };
+    unsigned len = 0;
+    for (unsigned i = 0; i < 2u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 /* GENerator:DOPpRObe? -> frames,matches,lastL,lastR
  *
  * Why the 4-vote DoP latch takes 27 509 frames on the MIXER artifact where
@@ -1143,6 +1198,9 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
     { .pattern = "GENerator:VOLume?",       .callback = gen_volume_q },
     { .pattern = "GENerator:DOPpRObe?",     .callback = gen_dop_probe_q },
+    { .pattern = "MIXer:GAIN:HOST",         .callback = mixer_gain_host },
+    { .pattern = "MIXer:GAIN:GENerator",    .callback = mixer_gain_gen  },
+    { .pattern = "MIXer:GAIN?",             .callback = mixer_gain_q    },
     { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
 
     SCPI_CMD_LIST_END

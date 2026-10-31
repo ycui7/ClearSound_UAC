@@ -395,6 +395,10 @@ static unsigned csd_gen_mix_fs;        /* rate this thread last applied    */
 static unsigned csd_gen_mix_armed;     /* mode != OFF for this frame       */
 static unsigned csd_gen_mix_valid;     /* wave holds this frame's samples  */
 static int      csd_gen_mix_wave[2];   /* the frame's wave, L then R       */
+/* Per-source Q15 gains for this frame (32768 = unity), copied from the
+ * packed mailbox word in csd_gen_mix_begin -- mixer thread reads only. */
+static unsigned csd_gen_mix_w_host = CSD_GEN_Q15_UNITY;
+static unsigned csd_gen_mix_w_gen  = CSD_GEN_Q15_UNITY;
 
 void csd_gen_mix_set_rate(unsigned fs_hz)
 {
@@ -425,6 +429,13 @@ void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
     }
     csd_gen_mix_dsd = dsd_mode;
     csd_gen_mix_armed = (csd_gen.mode != (unsigned)CSD_GEN_OFF);
+
+    /* Per-source gains, read ONCE per frame into frame state so every
+     * channel in this frame sees the same pair (the word is packed precisely
+     * so the pair cannot split across the frame). */
+    unsigned packed = csd_mb_get_gains();
+    csd_gen_mix_w_host = (packed & 0xFFFFu);
+    csd_gen_mix_w_gen  = (packed >> 16);
 
     /* DoP detection on the RAW host pair, BEFORE the sum. Once the tone is
      * added the marker bytes are gone, and lib_xua's own DoDsdDopCheck runs
@@ -476,10 +487,26 @@ void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
 
 int csd_gen_mix_sample(unsigned ch, int host)
 {
-    /* Channels 0 and 1 carry the summed tone; anything else (SPDIF/ADAT host
-     * channels) passes through byte-exact. */
-    if (!csd_gen_mix_valid || ch > 1u) return host;
-    return csd_gen_mix_sum(host, csd_gen_mix_wave[ch]);
+    /* Channels 0 and 1 get the per-source gain + summed tone; anything else
+     * (SPDIF/ADAT host channels) passes through byte-exact. */
+    if (ch > 1u) return host;
+
+    /* DSD payload is NEVER scaled -- DoP markers live in these very bytes
+     * and a MAC destroys them (the same hazard mixer.xc's own "we need all
+     * 32bits for Native DSD" comment flags on the volume stage). Byte-exact
+     * here is a data-integrity requirement, not a convenience: the host
+     * stream under DoP IS the DSD bitstream. */
+    if (csd_gen_mix_dsd != 0u || csd_mb_get_dop() != 0u) return host;
+
+    if (!csd_gen_mix_valid) {
+        /* Generator out of the path this frame; the host stream still gets
+         * its individual gain, which is what makes the two controls
+         * independent. Both-unity falls through to a byte-exact return. */
+        if (csd_gen_mix_w_host == CSD_GEN_Q15_UNITY) return host;
+        return csd_gen_mix_scale(host, csd_gen_mix_w_host);
+    }
+    return csd_gen_mix_gain_sum(host, csd_gen_mix_wave[ch],
+                                csd_gen_mix_w_host, csd_gen_mix_w_gen);
 }
 #endif /* CSD_GEN_PREMIX */
 

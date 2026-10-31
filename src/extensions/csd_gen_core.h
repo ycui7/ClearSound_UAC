@@ -163,6 +163,43 @@ static int32_t csd_gen_mix_sum(int32_t host, int32_t tone)
     return csd_gen_sat64((int64_t)host + (int64_t)tone);
 }
 
+/* Per-source gain for the pre-mixer injection point (Q15: 32768 = unity).
+ *
+ * The user requirement: host stream and generator get INDIVIDUAL volume
+ * control in the mixer graph, not through the codec register, so each
+ * source is scaled by its own weight before the sum. Two constraints the
+ * XS3 imposes, both verified in T9 rather than argued:
+ *   - no FPU: one int64 multiply and one shift per sample, no divide;
+ *   - unity must be BYTE-EXACT. (x * 32768) >> 15 is exactly x for every
+ *     x, including INT32_MIN, so the default state costs zero bits of the
+ *     host stream -- a (x >> 15) << 15 shortcut would silently eat the low
+ *     15 bits and nobody would hear it until a null test did.
+ * Rounding is +0.5-biased then floored, so negative odd magnitudes round
+ * toward zero -- asserted, not accidental, so a future "cleanup" cannot
+ * change audible behaviour unnoticed.
+ * w above 32768 is legal (a test source may be boosted) and saturates like
+ * the sum: a wrap here is the same click class T8 was written for. */
+static int32_t csd_gen_mix_scale(int32_t x, unsigned w_q15)
+{
+    return csd_gen_sat64(((int64_t)x * (int64_t)w_q15 + 16384) >> 15);
+}
+
+/* Scale both pre-mixer sources by their own weights, then sum. This is
+ * the whole per-source volume control: w_host moves the host stream,
+ * w_gen moves the generator, independently, upstream of doMix. Byte-exact
+ * when both weights are unity, which is the state the mixer starts in --
+ * verified in T9, because 'default state must not touch the audio' is the
+ * claim most likely to be silently false. */
+static int32_t csd_gen_mix_gain_sum(int32_t host, int32_t tone,
+                                    unsigned w_host, unsigned w_gen)
+{
+    if (w_host == 32768u && w_gen == 32768u) {
+        return csd_gen_mix_sum(host, tone);   /* the proven hot path */
+    }
+    return csd_gen_mix_sum(csd_gen_mix_scale(host, w_host),
+                           csd_gen_mix_scale(tone, w_gen));
+}
+
 /* Interpolated sine; phase wraps at 2^32 == 1.0. */
 static int32_t csd_gen_sine(uint32_t phase)
 {

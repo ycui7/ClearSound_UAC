@@ -284,6 +284,13 @@ unsigned csd_mb_get_vol_val(void);
  * words the mixer votes on still carry DoP markers, which is what the
  * 27 509-frame late latch on the mixer artifact needs attributed. Reads are
  * independent monotones, never a coherent snapshot. */
+/* Per-source gains (Q15, 32768 = unity), packed (w_gen<<16)|w_host in one
+ * word so both move together. Writer: diagnostic thread. Reader: mixer
+ * thread at its frame boundary. See csd_gen_mailbox.c. */
+#define CSD_GEN_Q15_UNITY 32768u
+void     csd_mb_put_gains(unsigned packed);
+unsigned csd_mb_get_gains(void);
+
 void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r);
 void csd_mb_get_dopvote(unsigned *frames, unsigned *match,
                         unsigned *lastL, unsigned *lastR);

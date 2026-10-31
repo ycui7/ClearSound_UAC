@@ -111,6 +111,19 @@ static volatile unsigned csd_mb_dop_match;    /* frames where MARK passed    */
 static volatile unsigned csd_mb_dop_lastL;    /* last raw hostL voted        */
 static volatile unsigned csd_mb_dop_lastR;    /* last raw hostR voted        */
 
+/* Per-source pre-mixer gains, packed as (w_gen << 16) | w_host, each Q15
+ * with 32768 = unity. Packed INTO ONE WORD on purpose: a set wants both
+ * values to arrive together (two words would let the mixer apply a new
+ * host weight with the old generator weight for a frame or two -- audible,
+ * and exactly what the file header forbids). Writer: diagnostic thread
+ * (SCPI MIXer:GAIN:*). Reader: mixer thread, once per frame. Initialised
+ * to unity/unity so the boot state is byte-exact passthrough even before
+ * the host ever writes. */
+static volatile unsigned csd_mb_gains = (32768u << 16) | 32768u;
+
+void     csd_mb_put_gains(unsigned packed) { csd_mb_gains = packed; }
+unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
+
 void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r)
 {
     csd_mb_dop_frames++;

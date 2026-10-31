@@ -953,6 +953,82 @@ static void t7_off_and_validation(void)
     }
 }
 
+/* T9: per-source gain for the pre-mixer injection point.
+ *
+ * The user requirement: host stream and generator get INDIVIDUAL volume
+ * control inside the mixer graph, not through the codec register. Both
+ * weights are Q15 (32768 = unity) and live on the mixer thread beside
+ * doMix. csd_gen_mix_scale must be pure integer (XS3 has no FPU), exact
+ * at unity (a "unity" gain that rounds is a dB error nobody asked for),
+ * and saturating above unity like the sum.
+ *
+ * Written before the function exists -- same red-first precedent as T8. */
+static void t9_mix_scale(void)
+{
+    printf("T9 per-source mix gain (Q15, exact at unity, saturating)\n");
+    const int32_t maxp = 2147483647;
+    const int32_t maxn = -2147483648;
+    const unsigned UNI = 32768u, HALF = 16384u;
+
+    /* Unity must be BYTE-EXACT, not "exact to within rounding": this is
+     * the one setting every user starts at, and a >>15 round trip would
+     * silently eat LSBs of real audio. */
+    ok(csd_gen_mix_scale(0, UNI) == 0, "unity zero");
+    ok(csd_gen_mix_scale(1, UNI) == 1, "unity keeps LSB");
+    ok(csd_gen_mix_scale(-1, UNI) == -1, "unity keeps negative LSB");
+    ok(csd_gen_mix_scale(maxp, UNI) == maxp, "unity keeps INT32_MAX");
+    ok(csd_gen_mix_scale(maxn, UNI) == maxn, "unity keeps INT32_MIN");
+    ok(csd_gen_mix_scale(123456789, UNI) == 123456789, "unity keeps odd value");
+
+    ok(csd_gen_mix_scale(maxp, 0u) == 0, "zero weight silences max");
+    ok(csd_gen_mix_scale(maxn, 0u) == 0, "zero weight silences min");
+
+    ok(csd_gen_mix_scale(1000000, HALF) == 500000, "half exact");
+    ok(csd_gen_mix_scale(-1000000, HALF) == -500000, "half exact negative");
+    /* Rounding is +0.5-biased then floored: document the asymmetry once,
+     * so a later reader does not 'fix' it into a different rounding. */
+    ok(csd_gen_mix_scale(1000001, HALF) == 500001, "half rounds odd up");
+    ok(csd_gen_mix_scale(-1000001, HALF) == -500000, "half: -odd rounds to -even");
+
+    /* Above unity: legitimate (a tone source can be boosted), must
+     * saturate rather than wrap -- the same click class T8 exists for. */
+    ok(csd_gen_mix_scale(1000000, 2u * UNI) == 2000000, "2x exact");
+    ok(csd_gen_mix_scale(maxp, 2u * UNI) == maxp, "2x saturates positive");
+    ok(csd_gen_mix_scale(maxn, 2u * UNI) == maxn, "2x saturates negative");
+    ok(csd_gen_mix_scale(maxp / 2, 2u * UNI) == maxp - 1,
+       "2x one below edge is exact");
+    ok(csd_gen_mix_scale(maxp / 2 + 1, 2u * UNI) == maxp,
+       "2x at the edge saturates to max (not a wrap)");
+
+    /* Minimum weight: maps full scale to ~65536, no wrap, no divide. */
+    ok(csd_gen_mix_scale(maxp, 1u) == 65536, "w=1 of max maps to 65536");
+    ok(csd_gen_mix_scale(0, 1u) == 0, "w=1 of zero");
+
+    /* The composed path actually used at the injection point. Unity/unity
+     * must equal the PROVEN mix_sum exactly -- that branch is the boot
+     * state and the DSD/DoP-critical default; if it merely approximated,
+     * every null test downstream would inherit a phantom delta. */
+    ok(csd_gen_mix_gain_sum(1000000, -400000, UNI, UNI) ==
+       csd_gen_mix_sum(1000000, -400000), "unity/unity == plain sum");
+    ok(csd_gen_mix_gain_sum(maxp, maxp, UNI, UNI) == maxp,
+       "unity/unity saturates like sum");
+    /* maxp through HALF: (2^31-1)*2^14 rounds to exactly 2^30 -- the
+     * first version of this check asserted maxp, which confused 'no
+     * pre-clamp on the operands' with 'gain does nothing'. */
+    ok(csd_gen_mix_gain_sum(maxp, 0, HALF, UNI) == 1073741824,
+       "half host + silent tone: peak scales, no clamp, no wrap");
+    ok(csd_gen_mix_gain_sum(1000000, 1000000, UNI, HALF) == 1500000,
+       "half generator, full host: 1.5M exact");
+    ok(csd_gen_mix_gain_sum(2000000, 2000000, HALF, HALF) == 2000000,
+       "half/half sums after scaling, not before");
+    ok(csd_gen_mix_gain_sum(maxp, maxp, HALF, HALF) == maxp,
+       "half/half at double max saturates");
+    ok(csd_gen_mix_gain_sum(1000000, 1000000, 0u, UNI) == 500000,
+       "host muted leaves generator only");
+    ok(csd_gen_mix_gain_sum(1000000, 1000000, UNI, 0u) == 1000000,
+       "generator muted leaves host only");
+}
+
 int main(void)
 {
     printf("=== csd_gen host gate ===\n");
@@ -963,6 +1039,7 @@ int main(void)
     t5_multitone();
     t6_noise();
     t7_off_and_validation();
+    t9_mix_scale();
     printf("\n%d checks, %d failures\n", checks, fails);
     printf(fails ? "GEN HOST GATE: FAIL\n" : "GEN HOST GATE: PASS\n");
     return fails ? 1 : 0;
