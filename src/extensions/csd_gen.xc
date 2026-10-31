@@ -439,6 +439,10 @@ void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
      * latch corrupts DSD. */
     int match = CSD_GEN_DOP_MARK((unsigned)hostL) &&
                 CSD_GEN_DOP_MARK((unsigned)hostR);
+    /* Telemetry for the late-latch investigation (see csd_gen_mailbox.c).
+     * Cheap: two increments and two stores per frame on a thread whose frame
+     * work is a MAC per channel. Remove once attributed. */
+    csd_mb_note_dopvote((unsigned)match, (unsigned)hostL, (unsigned)hostR);
     if (match) {
         csd_gen_mix_leave = 0;
         if (csd_gen_mix_votes < 4 && ++csd_gen_mix_votes >= 4)

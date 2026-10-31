@@ -91,3 +91,36 @@ void csd_mb_note_vol(unsigned index, unsigned val)
 unsigned csd_mb_get_vol_cmds(void)  { return csd_mb_vol_cmds; }
 unsigned csd_mb_get_vol_index(void) { return csd_mb_vol_index; }
 unsigned csd_mb_get_vol_val(void)   { return csd_mb_vol_val; }
+
+/* ---- DoP vote probe (mixer builds only) ----------------------------------
+ *
+ * WHY: on the mixer artifact the 4-vote DoP latch took 27 509 frames where
+ * the production artifact latched in 238, and the loopback witness of the
+ * DoP payload dropped 20 dB (peak 0.026 vs 0.244). Two candidate causes --
+ * the mixer thread sees different words than the production vote point
+ * (negotiated sample format, half-frame exchange above 96 kHz), or the
+ * words are fine and the vote is starved. Only the raw words answer that,
+ * and the mixer thread will not print. Counters + a last-observed word pair
+ * go out through SCPI, the one transport proven on this board.
+ *
+ * Writer: mixer thread (csd_gen_mix_begin). Reader: diagnostic thread via
+ * GENerator:DOPpRObe?. Independent monotones; not a coherent snapshot.
+ */
+static volatile unsigned csd_mb_dop_frames;   /* votes cast                  */
+static volatile unsigned csd_mb_dop_match;    /* frames where MARK passed    */
+static volatile unsigned csd_mb_dop_lastL;    /* last raw hostL voted        */
+static volatile unsigned csd_mb_dop_lastR;    /* last raw hostR voted        */
+
+void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r)
+{
+    csd_mb_dop_frames++;
+    if (match) { csd_mb_dop_match++; }
+    csd_mb_dop_lastL = l;
+    csd_mb_dop_lastR = r;
+}
+
+void csd_mb_get_dopvote(unsigned *f, unsigned *m, unsigned *l, unsigned *r)
+{
+    *f = csd_mb_dop_frames; *m = csd_mb_dop_match;
+    *l = csd_mb_dop_lastL;  *r = csd_mb_dop_lastR;
+}

@@ -279,6 +279,15 @@ unsigned csd_mb_get_vol_cmds(void);
 unsigned csd_mb_get_vol_index(void);
 unsigned csd_mb_get_vol_val(void);
 
+/* DoP vote probe (mixer builds; writer is the mixer thread inside
+ * csd_gen_mix_begin, reader is the diagnostic thread). Tells whether the
+ * words the mixer votes on still carry DoP markers, which is what the
+ * 27 509-frame late latch on the mixer artifact needs attributed. Reads are
+ * independent monotones, never a coherent snapshot. */
+void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r);
+void csd_mb_get_dopvote(unsigned *frames, unsigned *match,
+                        unsigned *lastL, unsigned *lastR);
+
 /* Firmware-facing wrapper: write the wave into a USB->DAC frame, or touch
  * nothing.
  *

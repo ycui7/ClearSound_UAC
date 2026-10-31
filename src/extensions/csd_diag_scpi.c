@@ -1030,6 +1030,42 @@ static SCPI_FPTR_CMD scpi_result_t gen_volume_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* GENerator:DOPpRObe? -> frames,matches,lastL,lastR
+ *
+ * Why the 4-vote DoP latch takes 27 509 frames on the MIXER artifact where
+ * the production artifact latches in 238, and why the loopback witness of
+ * the DoP payload is 20 dB quieter there (peak 0.026 vs 0.244). Candidates:
+ * the mixer thread votes on different words than the production vote point
+ * (negotiated sample format -- the rig streams S32_LE and plughw may
+ * convert, or the >96 kHz half-frame exchange in mixer1), so MARK fails on
+ * most frames; or the words are intact and something else starves the vote.
+ * frames==0 means the hook never ran. matches==0 with frames>0 means the
+ * mixer thread is not looking at marker bytes at all, which relocates the
+ * bug. lastL/lastR show the actual words for hand-decoding.
+ *
+ * Diagnostic-only; the counters are monotones read individually.
+ */
+static SCPI_FPTR_CMD scpi_result_t gen_dop_probe_q(scpi_t *context)
+{
+    char buf[4 * 10 + 4];
+    unsigned f = 0, m = 0, l = 0, rr = 0;
+    unsigned len = 0;
+
+    csd_mb_get_dopvote(&f, &m, &l, &rr);
+    const unsigned v[4] = { f, m, l, rr };
+    for (unsigned i = 0; i < 4u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 /* GENerator:STATe:REJect? -> last_reject_code,reject_count */
 static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
 {
@@ -1106,6 +1142,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
     { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
     { .pattern = "GENerator:VOLume?",       .callback = gen_volume_q },
+    { .pattern = "GENerator:DOPpRObe?",     .callback = gen_dop_probe_q },
     { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
 
     SCPI_CMD_LIST_END
