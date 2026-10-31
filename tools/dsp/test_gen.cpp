@@ -1023,7 +1023,13 @@ static void t9_mix_scale(void)
        "half/half sums after scaling, not before");
     ok(csd_gen_mix_gain_sum(maxp, maxp, HALF, HALF) == maxp,
        "half/half at double max saturates");
-    ok(csd_gen_mix_gain_sum(1000000, 1000000, 0u, UNI) == 500000,
+    /* w_host=0 kills the host term; w_gen=UNI passes the tone UNCHANGED,
+     * so the answer is the tone itself -- 1000000. The first draft of this
+     * check said 500000, which is what the test, not the code, got wrong:
+     * nothing halves a unity gain. (Same self-authored-expectation error
+     * class as T9's 2x/2^30 pair -- expectations get derived from the
+     * contract by hand before the assert is trusted.) */
+    ok(csd_gen_mix_gain_sum(1000000, 1000000, 0u, UNI) == 1000000,
        "host muted leaves generator only");
     ok(csd_gen_mix_gain_sum(1000000, 1000000, UNI, 0u) == 1000000,
        "generator muted leaves host only");

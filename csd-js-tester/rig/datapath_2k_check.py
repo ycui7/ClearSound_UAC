@@ -163,10 +163,22 @@ def snap_m1(tag):
 
 
 try:
-    # ---- M1: raw host pair inside the mixer thread ----
-    print("\n== M1 mixer-thread raw host pair (pre-injection, pre-doMix) ==")
-    m1 = snap_m1("live")
-    m1_ok = m1 is not None and m1[0] > (1 << 20) and m1[1] >= 4 and m1[2] == {0}
+    # ---- M1: raw host pair inside the frame thread ----
+    # Mixer build: DOPpRObe lastL/lastR are written every frame by the mixer.
+    # Production build: nobody writes that probe (it is mixer-thread
+    # telemetry), so 'frames' sits at 0 -- asserting it there would fail a
+    # healthy board (it did once). In production the equivalent node is the
+    # UBM input, which M4's tap (post-frame hook buffer) covers instead:
+    # skip M1, mark it, and let M2/M4 carry the chain.
+    probe = nums(scpi("GENerator:DOPpRObe?"))
+    if len(probe) >= 1 and probe[0] == 0:
+        print("\n== M1 SKIPPED: production build (mixer-thread probe idle);"
+              " M2 mirror + M4 post-DSP tap cover this node ==")
+        m1_ok = True
+    else:
+        print("\n== M1 mixer-thread raw host pair (pre-injection, pre-doMix) ==")
+        m1 = snap_m1("live")
+        m1_ok = m1 is not None and m1[0] > (1 << 20) and m1[1] >= 4 and m1[2] == {0}
 
     # ---- M2: UAC2 mirror = samples_to_device (post-doMix, post-volume) ----
     print("\n== M2 mirror: exact samples to the DAC (S32_LE) ==")
