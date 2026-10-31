@@ -105,6 +105,14 @@ void csd_gen_notify_rate(unsigned fs_hz);
  * having it parked. `adopted` advances only on the audio thread, so
  * cmd != adopted means the stream is not running. */
 unsigned csd_gen_state_mode(void);
+
+/* Per-frame gate accounting (audio thread; deltas are the rig's evidence).
+ * csd_gen_note is called by the frame hook ONLY while armed: 0 emitted,
+ * 1 suppressed by DSD/native stream mode, 2 suppressed by the DoP latch. */
+void     csd_gen_note(unsigned why);
+unsigned csd_gen_cnt_emit(void);
+unsigned csd_gen_cnt_sup_dsd(void);
+unsigned csd_gen_cnt_sup_dop(void);
 unsigned csd_gen_state_adopted(void);
 unsigned csd_gen_state_cmd(void);
 unsigned csd_gen_state_rejects(void);

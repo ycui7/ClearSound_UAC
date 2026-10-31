@@ -95,6 +95,19 @@ static unsigned csd_gen_adopted;          /* incremented by the audio thread  */
 static unsigned csd_gen_rejects;
 static unsigned csd_gen_last_reject;      /* a CSD_GEN_REJ_* value            */
 
+/* Per-frame accounting of the DSD/DoP injection gate, counted ONLY while the
+ * generator is armed -- that is the case the rig must see, and it keeps the
+ * OFF path (the product path) free of the extra work. The mic capture path
+ * cannot disprove injection at DoP rates: the EARS codec is S24_3LE at 48 kHz
+ * fixed, so arecord -r 176400 silently resamples (2 s asked, 96000 frames
+ * back) and any spectrum computed against the REQUESTED rate is fiction --
+ * exactly the false FAIL this counter replaces. A count taken on the audio
+ * thread at the decision point is the direct measurement: emitted vs
+ * suppressed-by-dsd vs suppressed-by-dop. */
+static unsigned csd_gen_n_emit;           /* armed: wave written this frame   */
+static unsigned csd_gen_n_sup_dsd;        /* armed: skipped, DSD/native mode  */
+static unsigned csd_gen_n_sup_dop;        /* armed: skipped, DoP latch on     */
+
 static unsigned csd_gen_load(const unsigned *p)
 {
     unsigned x;
@@ -275,6 +288,26 @@ void csd_gen_request_off(void)
 
 /* ---- audio thread ------------------------------------------------------ */
 
+/* The frame hook reports what the gate decided. `why`: 0 = wave emitted,
+ * 1 = suppressed because the stream is DSD/native, 2 = suppressed by the DoP
+ * latch. Plain load/store increments: only the audio thread writes these. The
+ * SCPI reader takes them as three independent monotones, not a consistent
+ * snapshot -- the rig only ever needs each to have advanced. */
+void csd_gen_note(unsigned why)
+{
+    unsigned v;
+    if (why == 0u) {
+        v = csd_gen_load(&csd_gen_n_emit) + 1u;
+        csd_gen_store(&csd_gen_n_emit, v);
+    } else if (why == 1u) {
+        v = csd_gen_load(&csd_gen_n_sup_dsd) + 1u;
+        csd_gen_store(&csd_gen_n_sup_dsd, v);
+    } else {
+        v = csd_gen_load(&csd_gen_n_sup_dop) + 1u;
+        csd_gen_store(&csd_gen_n_sup_dop, v);
+    }
+}
+
 void csd_gen_apply_pending(void)
 {
     unsigned c = csd_gen_load(&csd_gen_cmd);
@@ -331,6 +364,12 @@ int csd_gen_inject(unsigned *s)
  */
 
 unsigned csd_gen_state_mode(void)     { return (unsigned)csd_gen.mode; }
+
+/* Gate counters for SCPI (see the block above): the rig takes deltas across
+ * a stream segment, so these are never reset and need no consistent triple. */
+unsigned csd_gen_cnt_emit(void)   { return csd_gen_load(&csd_gen_n_emit); }
+unsigned csd_gen_cnt_sup_dsd(void){ return csd_gen_load(&csd_gen_n_sup_dsd); }
+unsigned csd_gen_cnt_sup_dop(void){ return csd_gen_load(&csd_gen_n_sup_dop); }
 unsigned csd_gen_state_adopted(void)  { return csd_gen_load(&csd_gen_adopted); }
 unsigned csd_gen_state_cmd(void)      { return csd_gen_load(&csd_gen_cmd); }
 unsigned csd_gen_state_rejects(void)  { return csd_gen_load(&csd_gen_rejects); }

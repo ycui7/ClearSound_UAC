@@ -129,38 +129,32 @@ static void dop_check(unsigned *s)
 #pragma unsafe arrays
 void csd_dsp_frame(unsigned *s)
 {
-    /* DoP guard runs regardless of preset: cheap, and keeps detection warm.
-     *
-     * NOT while the function generator owns the frame. The comment near
+    /* DoP guard: vote on whatever the host sent. Runs regardless of preset
+     * (cheap, keeps detection warm) and regardless of the generator -- but
+     * only on OFF, never on generator samples. The comment near
      * CSD_DSP_DIAG_DOP records that DOP_MARK fires on roughly 1 frame in
-     * 65536 of audio-shaped data and that four votes latch the flag -- and a
-     * generator driving full-scale samples continuously for a 30 s sweep is
-     * precisely a long run of audio-shaped data: ~8.8e5 frames per channel at
-     * 192 kHz, so the false latch is not a tail risk, it is an expected
-     * event. A latched DoP flag makes this function return early in
-     * byte-exact bypass, which would silently replace the sweep with silence
-     * partway through and look exactly like a generator fault.
+     * 65536 of audio-shaped data and that four votes latch the flag: a
+     * generator driving full-scale samples continuously is precisely a long
+     * run of audio-shaped data, so voting on ITS samples would latch DoP as
+     * an expected event, not a tail risk. While the generator is armed the
+     * frame hook votes on the RAW host frame instead -- before injection
+     * overwrites it -- so a genuine DoP stream is detected and the
+     * generator's own wave never votes.
      *
-     * So detection is skipped while armed, and any stale latch is cleared
-     * rather than left to the eight-non-match leave rule, which can take
-     * eight frames to unwind after the generator stops. */
+     * No "armed: clear the latch" branch any more. It existed while
+     * injection could not be gated; now the leave vote (eight non-matching
+     * RAW frames, <=8 frames) unwinds a stale latch while the dop flag
+     * ALREADY suppresses injection, so a false latch cannot corrupt audio --
+     * and keeping the clear would erase the legitimate DoP latch the hook
+     * votes every frame, undoing the suppression this path exists for. */
 #ifdef CSD_GEN_EN
     if (csd_gen_state_mode() == CSD_GEN_MODE_OFF)
 #endif
     {
         dop_check(s);
     }
-#ifdef CSD_GEN_EN
-    else if (csd_dsp.dop || csd_dsp.dopCnt) {
-        /* Armed: skip detection and clear any stale latch rather than leave
-         * it to the eight-non-match leave rule, which needs eight frames to
-         * unwind after the generator stops. */
-        csd_dsp.dop = 0;
-        csd_dsp.dopCnt = 0;
-    }
-#endif
 
-    unsigned n = csd_dsp.n;
+unsigned n = csd_dsp.n;
     if (n == 0u || csd_dsp.dsd || csd_dsp.dop || csd_dsp.preset == 0u) return;  // byte-exact bypass
     unsigned h = csd_dsp.head;
     if (csd_dsp.preset == 1u) {
@@ -249,6 +243,13 @@ void csd_dsp_set_rate(unsigned hz)
 }
 
 void csd_dsp_set_dsd(unsigned dsdMode) { csd_dsp.dsd = dsdMode; }
+
+/* Raw views for GENerator:COUNts?: the rig distinguishes "gate suppressed a
+ * frame because the STREAM is DSD" from "because WE latched DoP", and
+ * distinguishes a stuck latch from a live one. Plain reads of audio-thread
+ * state: informational, never used for control. */
+unsigned csd_dsp_diag_dsd_flag(void)     { return csd_dsp.dsd; }
+unsigned csd_dsp_diag_dop_latched(void)  { return csd_dsp.dop ? 1u : 0u; }
 
 /* Preset requests from the diagnostic thread.
  *
@@ -505,25 +506,52 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     sampsFromAudioToUsb[0] = csd_pre0;
 #endif
 #ifdef CSD_GEN_EN
-    /* The function generator, if armed, OWNS this frame's USB->DAC samples.
+    /* DSD/DoP suppression -- user requirement: if the stream presents as
+     * native DSD or DoP, the generator must not touch the samples.
      *
-     * BEFORE csd_dsp_frame, deliberately: the wave then traverses the same
-     * firmware path as host audio -- delay or bass shelf at presets 1 and 2,
-     * or straight through at preset 0, which is the byte-exact bypass. A
-     * generator injected after the DSP could only ever test the DAC; injected
-     * here it tests the chain the product actually implements, and preset 0
-     * still gives the raw wave when that is what you want.
+     * UserBufferManagement runs in ALL stream modes: the `if (!dsdMode)`
+     * guard in lib_xua's deliver loop closes at xua_audiohub.xc:516 and the
+     * DoSampleTransfer + UBM call sit OUTSIDE it, so an armed generator would
+     * overwrite DSD payload words on the way to p_dsd_dac. (Native DSD needs
+     * all 32 bits untouched -- mixer.xc's own volume path carries the
+     * matching "we need all 32bits for Native DSD" note for exactly this
+     * hazard.)
      *
-     * csd_gen_inject() adopts any pending command itself and returns 0 when
-     * the mode is OFF, touching nothing -- so with the generator never used,
-     * the cost here is one volatile load and a compare, and audio is
-     * byte-identical to the build without this feature.
+     * Ordering matters twice:
+     *  - DoP voting runs on the RAW host frame, BEFORE injection overwrites
+     *    it. Vote after injection and the generator's own samples mask the
+     *    DoP markers -- lib_xua's DoDsdDopCheck (which runs after us, on the
+     *    same buffer) would never latch and the stream would never enter DoP
+     *    at all while the generator was armed.
+     *  - the injection gate reads BOTH flags: csd_dsp.dsd (set by
+     *    csd_dsp_set_dsd from the live dsdMode at every stream start --
+     *    covers native and post-latch DoP) and csd_dsp.dop (our in-band
+     *    latch -- covers the DoP-presented-as-PCM frames before lib_xua
+     *    notices). Either one silences the generator for that frame.
      *
-     * It also runs before the DIAG_LOOP mirror below, which copies these
-     * slots onto the mic path: so an armed generator is audible to the host
-     * capture without any extra instrumentation, and the acoustic gate
-     * measures generator -> DAC -> ADC with no new code. */
-    csd_gen_inject(sampsFromUsbToAudio);
+     * The generator stays ARMED through a DSD stream (SCPI state still shows
+     * the wave) but emits nothing; when the host returns to plain PCM, the
+     * leave vote (eight non-matching raw frames) clears dop and the wave
+     * resumes -- no re-arm needed. */
+    /* Adoption always runs at the frame boundary, even while DSD suppresses
+     * emission: a GENerator:OFF posted during a DSD stream must be adopted
+     * NOW, not resurrected as a live wave eight frames after the host
+     * returns to PCM. Gating only the emission keeps the cmd/adopted
+     * handshake honest while the stream is not the generator's. */
+    csd_gen_apply_pending();
+    /* armed counted per frame: the rig measures emit vs suppressed by the
+     * DELTA of the firmware's own counters across a stream segment -- the
+     * mic capture cannot judge this at DoP rates (48 kHz-fixed codec;
+     * arecord resamples silently and the spectrum was fiction). */
+    unsigned armed = (csd_gen_state_mode() != (unsigned)CSD_GEN_MODE_OFF);
+    if (armed && !csd_dsp.dsd)
+        dop_check(sampsFromUsbToAudio);       /* vote on the RAW frame */
+    if (!csd_dsp.dsd && !csd_dsp.dop) {
+        csd_gen_inject(sampsFromUsbToAudio);
+        if (armed) csd_gen_note(0u);          /* wave owned the frame */
+    } else if (armed) {
+        csd_gen_note(csd_dsp.dsd ? 1u : 2u);  /* suppressed: DSD vs DoP */
+    }
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
 #ifdef CSD_DSP_DIAG_RAW

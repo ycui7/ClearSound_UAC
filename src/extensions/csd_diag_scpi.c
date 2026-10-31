@@ -947,6 +947,40 @@ static SCPI_FPTR_CMD scpi_result_t gen_state_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* GENerator:COUNts? -> emit,sup_dsd,sup_dop
+ *
+ * What the frame hook decided per frame while the generator was armed:
+ * wave emitted / suppressed by DSD-native mode / suppressed by the DoP
+ * latch. These are the rig's proof for the DSD/DoP suppression requirement:
+ * the mic capture path cannot judge it at DoP rates (the EARS codec is
+ * 48 kHz-fixed; arecord resamples silently and the spectrum computed
+ * against the requested rate is fiction -- it produced a false FAIL once),
+ * while the counters are taken on the audio thread at the decision point.
+ * Deltas across a stream segment are the measurement; values never reset. */
+static SCPI_FPTR_CMD scpi_result_t gen_counts_q(scpi_t *context)
+{
+    char buf[5 * 10 + 5];
+    unsigned v[5];
+    unsigned len = 0;
+
+    v[0] = csd_gen_cnt_emit();
+    v[1] = csd_gen_cnt_sup_dsd();
+    v[2] = csd_gen_cnt_sup_dop();
+    v[3] = csd_dsp_diag_dsd_flag();   /* raw stream mode (0/1/2) now        */
+    v[4] = csd_dsp_diag_dop_latched();/* our in-band latch now             */
+    for (unsigned i = 0; i < 5u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 /* GENerator:STATe:REJect? -> last_reject_code,reject_count */
 static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
 {
@@ -1021,6 +1055,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:NOISe",         .callback = gen_noise   },
     { .pattern = "GENerator:OFF",           .callback = gen_off     },
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
+    { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
     { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
 
     SCPI_CMD_LIST_END

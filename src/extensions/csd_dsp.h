@@ -18,6 +18,9 @@ void csd_dsp_set_rate(unsigned hz);
 
 /** Inform the DSP of codec/DSD mode (0 == PCM). Non-zero fully bypasses. */
 void csd_dsp_set_dsd(unsigned dsdMode);
+/* Raw DoP/DSD views for the generator rig (informational only). */
+unsigned csd_dsp_diag_dsd_flag(void);
+unsigned csd_dsp_diag_dop_latched(void);
 
 /** Presets: 0 OFF (byte-exact), 1 DELAY-only (linear-phase group delay, no
  *  boost — A3 structure validation), >=2 FIR shelf (B1). */
