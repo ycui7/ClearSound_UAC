@@ -24,6 +24,11 @@
  * __XC__ -- guarding them left the C translation unit with no prototypes and
  * the calls resolved as implicit declarations. */
 
+/* The identity snapshot type crosses the tile boundary, so both sides need
+ * the same definition. csd_identity.h is written to be includable from C and
+ * XC alike (no XC-only keywords outside __XC__ guards). */
+#include "csd_identity.h"
+
 #ifdef __XC__
 /* MIDI-task replacement (csd_diag_midi.xc), signature-compatible with
  * lib_xua's usb_midi() so main.xc can call either by name. Ports/clock are
@@ -80,6 +85,25 @@ unsigned csd_diag_reg_writes(void);      /* host codec writes through us */
  * bus. Both MAY BLOCK on that core. Return 0 on failure; the caller turns a 0
  * into an SCPI hardware error rather than reporting a stale value. */
 int csd_diag_reg_read(unsigned reg, unsigned *val);
+
+/* Unit identity, forwarded to the tile[0] owner for the same reason register
+ * reads are: the identity statics are per-tile memory (.dp.bss is DP/CP
+ * relative), so this core cannot read them directly. Returns 0 on failure; on
+ * success *snap is fully populated, including a NUL-terminated snap->str.
+ * MAY BLOCK on tile[0].
+ *
+ * The parameter is an unsafe pointer so the C handlers can pass a local
+ * struct's address; `unsafe` is an XC keyword only, hence the guard -- the
+ * same reason csd_identity.h guards its pointer return. */
+/* `unsafe` qualifies the POINTER and goes AFTER the '*', the way lib_xua
+ * declares setSerialStr(char * unsafe serial_str). Putting it before the type
+ * means something else entirely and is rejected outright: "unsafe specified
+ * on type that is not a pointer or resource". */
+#ifdef __XC__
+int csd_diag_identity_snapshot(csd_id_snapshot_t * unsafe snap);
+#else
+int csd_diag_identity_snapshot(csd_id_snapshot_t *snap);
+#endif
 int csd_diag_reg_write(unsigned reg, unsigned val);
 
 #endif /* __csd_diag_h__ */

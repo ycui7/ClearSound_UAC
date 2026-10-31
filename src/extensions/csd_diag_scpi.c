@@ -19,13 +19,14 @@
 #include "csd_diag.h"
 #include "csd_dsp.h"
 #include "csd_version.h"
+#include "csd_identity.h"
 
 #define CSD_IDN_VENDOR   "ClearSound"
 #define CSD_IDN_MODEL    "CSD-22"
-#define CSD_IDN_SERIAL   "00000000"   /* static placeholder: not read from
-                                       * OTP, every board answers the same.
-                                       * Tying it to the chip needs OTP
-                                       * provisioning (xburn) + otp3 read. */
+/* Serial is not a constant any more, so it is not passed through SCPI_Init
+ * at all: q_idn reads it live. See q_idn for why capture-at-init would be
+ * wrong. This macro only fills the now-unused idn3 slot. */
+#define CSD_IDN_SERIAL   ""
 #define CSD_IDN_FIRMWARE CSD_FW_VERSION
 
 /* ---- output plumbing -------------------------------------------------- */
@@ -454,10 +455,160 @@ static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* ---- identity access from this core ------------------------------------
+ * Every handler below runs on the tile-1 diagnostic core; the identity lives
+ * on tile[0]. Reading the csd_identity accessors directly from here returned
+ * tile 1's own never-written copy of those .dp.bss statics -- so every query
+ * answered "nothing read", the serial printed IPENDING and the staged
+ * progress counter sat at 0 no matter what the boot read actually did. A
+ * per-tile static is not a shared variable, and XC does not warn.
+ *
+ * So one fetch from the owner, over the chanend register access already uses
+ * (see csd_diag_regs.xc). No handler touches the accessors.
+ *
+ * Fetching per command rather than caching is deliberate: caching would
+ * reintroduce exactly the staleness this removes, and these are bench queries
+ * issued a few at a time, not a hot path. */
+static int ident_fetch(csd_id_snapshot_t *snap)
+{
+    return csd_diag_identity_snapshot(snap);
+}
+
+/* ---- *IDN? -------------------------------------------------------------
+ * Our own handler rather than libscpi's SCPI_CoreIdnQ, for one reason: that
+ * one prints the four strings captured at SCPI_Init(), and the serial is no
+ * longer a constant. Capturing at init would freeze whatever the boot read
+ * had published by then -- possibly the pending marker, permanently.
+ *
+ * It also cannot call csd_identity_serial_string() directly, for the tile
+ * reason above: the serial has to come from the snapshot. Field order is the
+ * IEEE 488.2 one: vendor, model, serial, firmware. */
+static SCPI_FPTR_CMD scpi_result_t q_idn(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    SCPI_ResultMnemonic(context, CSD_IDN_VENDOR);
+    SCPI_ResultMnemonic(context, CSD_IDN_MODEL);
+    if (ident_fetch(&snap)) {
+        SCPI_ResultMnemonic(context, snap.str);
+    } else {
+        /* Distinguish "could not ask the owner" from "the owner has nothing
+         * yet": the first is a transport fault, the second is normal at boot. */
+        SCPI_ResultMnemonic(context, "UNAVAILABLE");
+    }
+    SCPI_ResultMnemonic(context, CSD_IDN_FIRMWARE);
+    return SCPI_RES_OK;
+}
+
+/* ---- DIAG:IDENTity -----------------------------------------------------
+ * Read-only: the bench must be able to ask "which board is this, and how much
+ * can I trust that answer" without a firmware round trip, and without ever
+ * risking an OTP write.
+ *
+ * Five queries rather than one, because the answers carry different trust
+ * levels and collapsing them would let a DERIVED fingerprint be recorded as if
+ * it were a provisioned serial:
+ *   SERial?  the label the device is wearing (same string as USB iSerial)
+ *   SOURce?  OTP (true unit identity) | DERIVED (board fingerprint, NOT
+ *            unique) | NONE (read did not complete)
+ *   HASH?    the 64-bit FNV-1a over the material, for the bench log
+ *   RAW?     the material words, base64, so the host can recompute the hash
+ *            itself instead of trusting our arithmetic
+ *   STAGe?   how far the staged read got -- the only way to tell a blank OTP
+ *            from a stalled read, since both leave the material all zero */
+static SCPI_FPTR_CMD scpi_result_t q_ident_serial(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
+    size_t n = strlen(snap.str);
+    if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR); return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, snap.str, n);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t q_ident_source(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    const char *s;
+    if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
+    switch ((csd_id_source_t)snap.source) {
+        case CSD_ID_OTP:     s = "OTP";     break;   /* provisioned: trust it  */
+        case CSD_ID_DERIVED: s = "DERIVED"; break;   /* NOT unique: bench only */
+        default:             s = "NONE";    break;   /* read did not complete  */
+    }
+    SCPI_ResultCharacters(context, s, strlen(s));
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t q_ident_hash(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
+
+    /* Fixed-width 16 digits, deliberately NOT built from fmt_u32_hex: that
+     * formatter emits MINIMAL digits, so a zero high word would splice as
+     * "0x0"+"12345678" = 0x012345678 -- the same number 16x too large, and it
+     * would look right. Same class of trap as the numid=5 read-back that lied
+     * to the volume gate: emit on a fixed grid or not at all. */
+    static const char d[] = "0123456789ABCDEF";
+    char out[2 + 16 + 1];
+    out[0] = '0'; out[1] = 'x';
+    for (unsigned i = 0; i < 16; i++) {
+        out[2 + 15 - i] = d[(snap.hash >> (4u * i)) & 0xFu];
+    }
+    out[18] = 0;
+    SCPI_ResultCharacters(context, out, 18);
+    return SCPI_RES_OK;
+}
+
+/* Material words, big-endian, base64 -- same payload convention as
+ * REGister:READ? and the same reason: one opaque token, no dependence on how
+ * many digits a value happens to have, and exactly one quoted string so the
+ * client can always take the last. */
+static SCPI_FPTR_CMD scpi_result_t q_ident_raw(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
+    if (!snap.ready) {
+        /* Distinct from "all zeros": a blank board answers RAW? with 28 zero
+         * bytes. -200 here means the owner has not finished reading, which on
+         * a bench board should instead be visible as a stage count. */
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    unsigned char be[CSD_ID_MATERIAL_WORDS * 4];
+    for (unsigned i = 0; i < CSD_ID_MATERIAL_WORDS; i++) {
+        be[i * 4 + 0] = (unsigned char)(snap.words[i] >> 24);
+        be[i * 4 + 1] = (unsigned char)(snap.words[i] >> 16);
+        be[i * 4 + 2] = (unsigned char)(snap.words[i] >> 8);
+        be[i * 4 + 3] = (unsigned char)(snap.words[i]);
+    }
+    char out[((CSD_ID_MATERIAL_WORDS * 4 + 2) / 3) * 4 + 4];
+    size_t len = b64_encode(be, sizeof be, out, sizeof out);
+    if (len == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR); return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, out, len);
+    return SCPI_RES_OK;
+}
+
+/* How far the staged read got: 0 not started, 1 entered, 2..5 one per id
+ * read, 6 complete. This exists because on a virgin board every material word
+ * is legitimately 0, so RAW? alone cannot distinguish "OTP is blank" from "the
+ * read stalled at the first access" -- and those two demand opposite
+ * responses. */
+static SCPI_FPTR_CMD scpi_result_t q_ident_stage(scpi_t *context)
+{
+    csd_id_snapshot_t snap;
+    if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
+    char buf[8];
+    unsigned n = fmt_u32(snap.stage, buf, sizeof buf - 1u);
+    if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR); return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
 /* ---- command table ---------------------------------------------------- */
 static const scpi_command_t csd_commands[] = {
     /* IEEE 488.2 mandated subset */
-    { .pattern = "*IDN?",  .callback = SCPI_CoreIdnQ },
+    { .pattern = "*IDN?",  .callback = q_idn     },   /* ours, not CoreIdnQ: see q_idn */
     { .pattern = "*CLS",   .callback = SCPI_CoreCls  },
     { .pattern = "*RST",   .callback = SCPI_CoreRst  },
     { .pattern = "*OPC?",  .callback = SCPI_CoreOpcQ },
@@ -478,6 +629,15 @@ static const scpi_command_t csd_commands[] = {
      * saw -113). Parameters are read with SCPI_Param*() inside the callback. */
     { .pattern = "DIAG:DSP:PRESet?", .callback = q_dsp   },
     { .pattern = "DIAG:DSP:PRESet",  .callback = set_dsp },
+
+    /* Unit identity. Queries only -- there is deliberately no setter and no
+     * OTP write path. Patterns carry no parameter placeholders, same rule as
+     * above: libscpi matches the pattern against the command HEADER only. */
+    { .pattern = "DIAG:IDENTity:SERial?", .callback = q_ident_serial },
+    { .pattern = "DIAG:IDENTity:SOURce?", .callback = q_ident_source },
+    { .pattern = "DIAG:IDENTity:HASH?",   .callback = q_ident_hash   },
+    { .pattern = "DIAG:IDENTity:RAW?",    .callback = q_ident_raw    },
+    { .pattern = "DIAG:IDENTity:STAGe?",  .callback = q_ident_stage  },
 
     /* raw codec registers, via the single I2C writer on tile 0. Same rule: no
      * parameter placeholders in the pattern, parameters come from

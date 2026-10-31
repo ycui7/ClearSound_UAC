@@ -58,6 +58,79 @@ int csd_diag_reg_read(unsigned reg, unsigned *val)
     return 1;
 }
 
+/* Unit identity, fetched from the tile[0] owner.
+ *
+ * WHY THIS EXISTS AT ALL. The identity statics live in .dp.bss, i.e. DP/CP
+ * relative and private to one tile. The identity thread runs on tile[0]; the
+ * SCPI handlers run on the tile-1 diagnostic core. When those handlers read the
+ * statics directly they read tile 1's never-written copy, so every query
+ * reported "nothing read" forever -- and the staged progress counter, the very
+ * instrument built to say where a read stalled, reported 0 no matter what
+ * happened. A per-tile static is not a shared variable, and the compiler says
+ * nothing.
+ *
+ * So ask the owner, over the same chanend REGister:READ? uses. Wire order must
+ * match the AUDIOHW_CMD_IDENTITY branch in clearsounddac_board.xc exactly.
+ *
+ * Blocks on tile[0], which is fine here and nowhere else: this core is not the
+ * audio path. It does NOT block on the identity thread, because the server only
+ * reads memory -- a wedged OTP read cannot stall this reply. */
+#ifdef __XC__
+int csd_diag_identity_snapshot(csd_id_snapshot_t * unsafe snap)
+#else
+int csd_diag_identity_snapshot(csd_id_snapshot_t *snap)
+#endif
+{
+    /* Every transfer goes through a plain local. Two reasons, both learned the
+     * hard way here:
+     *   - the parameter cannot be called `out`: that is an XC keyword (the
+     *     out/in/shared annotation), and using it parses as an annotation and
+     *     then "parameter name omitted";
+     *   - the channel operators are used on bare variables everywhere else in
+     *     this file, so struct members and expressions are not attempted here
+     *     either. Receiving into a local and assigning is two instructions and
+     *     removes a class of "does the parser accept this" from the build. */
+    unsigned w[CSD_ID_STR_WORDS];
+    unsigned ready = 0, stage = 0, source = 0, hi = 0, lo = 0;
+    unsigned words[CSD_ID_MATERIAL_WORDS];
+
+    if (snap == 0) return 0;
+
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_IDENTITY;
+        uc_audiohw_diag :> ready;
+        uc_audiohw_diag :> stage;
+        uc_audiohw_diag :> source;
+        uc_audiohw_diag :> hi;
+        uc_audiohw_diag :> lo;
+        for (unsigned k = 0; k < CSD_ID_MATERIAL_WORDS; k++) uc_audiohw_diag :> words[k];
+        for (unsigned k = 0; k < CSD_ID_STR_WORDS; k++)      uc_audiohw_diag :> w[k];
+    }
+
+    /* The fill is inside unsafe{} because XC rejects dereferencing an unsafe
+     * pointer outside one ("cannot dereference unsafe pointer outside of
+     * unsafe region") -- the same region already needed for the chanend.
+     * Filling from the locals rather than receiving straight into the struct
+     * keeps every channel transfer on a bare variable, as elsewhere here. */
+    unsafe {
+        snap->ready = ready;
+        snap->stage = stage;
+        snap->source = source;
+        snap->hash = ((unsigned long long)hi << 32) | (unsigned long long)lo;
+        for (unsigned k = 0; k < CSD_ID_MATERIAL_WORDS; k++) snap->words[k] = words[k];
+
+        /* Unpack 4 chars per word and force termination: a corrupt or truncated
+         * reply must yield a short string, never a read past the buffer. */
+        for (unsigned k = 0; k < CSD_ID_STR_CAP; k++) {
+            unsigned c = (w[k / 4u] >> (8u * (k % 4u))) & 0xFFu;
+            snap->str[k] = (char)c;
+            if (c == 0u) break;
+        }
+        snap->str[CSD_ID_STR_CAP - 1u] = 0;
+    }
+    return 1;
+}
+
 int csd_diag_reg_write(unsigned reg, unsigned val)
 {
     if (reg > 0xFFu || val > 0xFFu) return 0;

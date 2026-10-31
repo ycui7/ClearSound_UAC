@@ -44,7 +44,15 @@ typedef enum
     AUDIOHW_CMD_MUTE_SET,             //host mute intent: {muted}     -> reg7 + LED
     AUDIOHW_CMD_MUTE_RESYNC,          //re-apply reg7 for host_muted  (after AudioHwConfig)
     AUDIOHW_CMD_LED_STATUS,           //bring-over fd9242e: {LED_ST_*} boot status
-    AUDIOHW_CMD_LED_RATE              //{samFreq, dsdMode} rate tier display
+    AUDIOHW_CMD_LED_RATE,             //{samFreq, dsdMode} rate tier display
+    /* Unit identity, for the diagnostic core. Appended, never inserted: this
+     * enum is positional and both sides are compiled from here, so a new
+     * member at the end cannot desynchronise a shipped pair.
+     * Needed because the identity statics are per-tile (.dp.bss): the tile-1
+     * SCPI core reading them directly sees its own zeroed copy and reports
+     * "nothing read" forever. Ask the tile[0] owner instead, exactly as
+     * REGister:READ? does. */
+    AUDIOHW_CMD_IDENTITY
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 

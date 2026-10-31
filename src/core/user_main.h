@@ -38,7 +38,8 @@ extern unsafe chanend uc_audiohw_diag;
 
 #define SC_CLEARSOUND_DAC          1
 
-#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend); 
+#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend); \
+                                            extern void csd_identity_task(void);
 
                                             // on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; \
                                             // on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
@@ -66,6 +67,7 @@ extern unsafe chanend uc_audiohw_diag;
                                                     uc_audiohw3 = (chanend) c_audiohw[2];\
                                                 }\
                                                 AudioHwRemote(c_audiohw);\
+                                                csd_identity_task();\
                                                 process_xscope(xscope_data_in); \
                                             }\
                                         }

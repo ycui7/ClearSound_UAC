@@ -12,6 +12,7 @@ extern "C" {
 #include "es9219q.h"
 #include "clearsounddac_board.h"
 #include "csd_version.h"
+#include "csd_identity.h"     /* AUDIOHW_CMD_IDENTITY server: identity accessors */
 #include "button_debounce.h"
 #include "xua_defs.h"
 #if PCM_DSP_EN
@@ -317,6 +318,54 @@ static void vol_apply_all(client interface i2c_master_if i2c)
                     c[i] :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c[i] <: regVal;
+                }
+                else if (cmd == AUDIOHW_CMD_IDENTITY)
+                {
+                    /* Answers from the exported accessors; this task is on
+                     * tile[0], the tile those statics live on, so they are the
+                     * real values here. Replies a fixed word count whether or
+                     * not the read has run: a not-yet-read board is data, not
+                     * an error, and the client distinguishes the two with the
+                     * ready word.
+                     *
+                     * Reads memory only -- never OTP -- so a wedged OTP read
+                     * cannot stall this reply and take the codec server with
+                     * it. That was not theoretical: an earlier revision ran the
+                     * identity read inline in this task and the whole bench
+                     * went dead.
+                     *
+                     * Plain locals on every send, for the same reason as the
+                     * client: nothing here relies on the channel operators
+                     * accepting an expression or a struct member. */
+                    /* Scalars only from the C half -- see csd_identity.h for
+                     * why nothing here takes a pointer. Reads memory, never
+                     * OTP, so a wedged OTP read cannot stall this reply and
+                     * take the codec server down with it (an earlier revision
+                     * ran the identity read inline here and killed the bench). */
+                    unsigned ready = csd_identity_is_ready();
+                    unsigned stage = csd_identity_get_stage();
+                    unsigned source = (unsigned) csd_identity_source();
+                    unsigned long long h = csd_identity_hash();
+                    unsigned hi = (unsigned)(h >> 32);
+                    unsigned lo = (unsigned) h;
+
+                    c[i] <: ready;
+                    c[i] <: stage;
+                    c[i] <: source;
+                    c[i] <: hi;
+                    c[i] <: lo;
+                    for (unsigned k = 0; k < CSD_ID_MATERIAL_WORDS; k++) {
+                        unsigned v = csd_identity_material_word(k);
+                        c[i] <: v;
+                    }
+                    /* The serial string travels as packed words, never as a
+                     * char*: the OT/DV formatting rule stays in csd_identity.c
+                     * alone, and no pointer crosses the language or tile
+                     * boundary. */
+                    for (unsigned k = 0; k < CSD_ID_STR_WORDS; k++) {
+                        unsigned w = csd_identity_str_word(k);
+                        c[i] <: w;
+                    }
                 }
                 else if (cmd == AUDIOHW_CMD_GPIORD)
                 {
