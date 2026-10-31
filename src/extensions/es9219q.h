@@ -45,6 +45,20 @@
 #define ES9219Q_INPUT_SELECT					(0x01)
 #define ES9219Q_MIXING_N_AUTOMUTE_CONFIG		(0x02)
 #define ES9219Q_ANALOG_VOL_CTRL					(0x03)
+/* Automute (datasheet v1.3 regs 2/4/5 + Table 6): the chip CAN mute its
+ * analog stage when data stays below automute_level for automute_time --
+ * but AUTOMUTE_TIME defaults to 0, which the datasheet states DISABLES the
+ * whole feature. Boot never wrote these regs, so all-zero samples reached
+ * an unmuted modulator and the case-A acoustic control heard the chip's
+ * idle artifacts as a fake tone. Constants live here, values at the boot
+ * writer in clearsounddac_board.xc (one owner per concern). */
+#define ES9219Q_AUTOMUTE_TIME					(0x04)
+#define ES9219Q_AUTOMUTE_LEVEL					(0x05)
+#define ES9219Q_AUTOMUTE_CONFIG_MUTE_ON			(1 << 6)    /* 2'b01: mute on automute */
+#define ES9219Q_ANALOG_AUTOMUTE_HOLD			(0 << 5)    /* DON'T yank reg 3 to -22 dB */
+#define ES9219Q_AUTOMUTE_TIMER_FAST			(1 << 4)    /* no x8 stretch of the time */
+#define ES9219Q_MIX_SEL_DEFAULTS				(0x04)    /* CH2_MIX=01, CH1_MIX=00 (reset) */
+
 #define ES9219Q_DOP_N_VOL_RAMP_RATE				(0x06)
 #define ES9219Q_DOP_N_VOL_RAMP_RATE_VALUE			((7 << 4) | 2)
 #define ES9219Q_DOP_ENABLE							(1 << 3)

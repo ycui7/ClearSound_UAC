@@ -905,6 +905,31 @@ void csd_AudioHwInit(const csd_config_t &config)
 
     DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE) ); 
     DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | (AnalogVolume & 0x1F)));
+
+    /* Automute ON. The mirror probe proved our mixer sends numerically-zero
+     * words for silent input (max 104 LSB of 2^31, 1 kHz bin at -265 dBFS),
+     * yet the acoustic A-control heard ~-46 dBFS at 1 kHz: with AUTOMUTE_TIME
+     * at its reset value 0 -- which the datasheet states DISABLES automute --
+     * the chip's modulator/analog stage sat live on digital silence and its
+     * idle artifacts left the output stage. Between tracks a listener hears
+     * exactly that. This is the codec module of the datapath going "silent in
+     * != sound out"; the fix belongs in the codec config, not the cable.
+     *
+     * reg2 = 2'b01 MUTE on automute | ANALOG_AUTOMUTE=0 so reg 3 is left
+     *        AS PROGRAMMED (its reset default 1 would yank our calibrated
+     *        analog volume to -22 dB on every gap) | TIMER_FAST=1 | mix map
+     *        at reset defaults (0b0100: CH2<2, CH1<1).
+     * reg4 = 128: 2^21/(128 * 64*fs) = 5.3 ms at 48 kHz with TIMER_FAST --
+     *        asserts through any capture settle time the rig uses, releases
+     *        imperceptibly when real data returns.
+     * reg5 = 104 (-104 dB): the datasheet default, PINNED explicitly so a
+     *        future chip/rev reset drift cannot silently change the
+     *        threshold; real program material sits far above it.
+     * Verified live by rig/ears_matrix.py case A (zeros must NOT exceed A0)
+     * and the automute status bits in the boot report above. */
+    DAC_REGWRITE    (ES9219Q_MIXING_N_AUTOMUTE_CONFIG,      (uint8_t)(ES9219Q_AUTOMUTE_CONFIG_MUTE_ON | ES9219Q_ANALOG_AUTOMUTE_HOLD | ES9219Q_AUTOMUTE_TIMER_FAST | ES9219Q_MIX_SEL_DEFAULTS) );
+    DAC_REGWRITE    (ES9219Q_AUTOMUTE_TIME,                 (uint8_t)128);
+    DAC_REGWRITE    (ES9219Q_AUTOMUTE_LEVEL,                (uint8_t)104);
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_HI,                   UserVolummeR ); //GPIO2 CLK out, GPIO1 lock status
