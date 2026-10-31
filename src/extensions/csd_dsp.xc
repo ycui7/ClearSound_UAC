@@ -11,6 +11,13 @@
 #if PCM_DSP_EN
 
 #include "csd_dsp.h"
+#ifdef CSD_GEN_EN
+/* Interface only. csd_gen_core.h -- which carries the ~20 KB generated tables
+ * as file-scope statics -- is included by exactly one translation unit,
+ * csd_gen.xc; including it here as well would emit a second copy into a
+ * tile's 512 KB of reserved memory. See the header comment in csd_gen.h. */
+#include "csd_gen.h"
+#endif
 #include "csd_dsp_coeffs.h"
 #include "csd_dsp_core.h"
 #include <string.h>
@@ -122,8 +129,36 @@ static void dop_check(unsigned *s)
 #pragma unsafe arrays
 void csd_dsp_frame(unsigned *s)
 {
-    /* DoP guard runs regardless of preset: cheap, and keeps detection warm. */
-    dop_check(s);
+    /* DoP guard runs regardless of preset: cheap, and keeps detection warm.
+     *
+     * NOT while the function generator owns the frame. The comment near
+     * CSD_DSP_DIAG_DOP records that DOP_MARK fires on roughly 1 frame in
+     * 65536 of audio-shaped data and that four votes latch the flag -- and a
+     * generator driving full-scale samples continuously for a 30 s sweep is
+     * precisely a long run of audio-shaped data: ~8.8e5 frames per channel at
+     * 192 kHz, so the false latch is not a tail risk, it is an expected
+     * event. A latched DoP flag makes this function return early in
+     * byte-exact bypass, which would silently replace the sweep with silence
+     * partway through and look exactly like a generator fault.
+     *
+     * So detection is skipped while armed, and any stale latch is cleared
+     * rather than left to the eight-non-match leave rule, which can take
+     * eight frames to unwind after the generator stops. */
+#ifdef CSD_GEN_EN
+    if (csd_gen_state_mode() == CSD_GEN_MODE_OFF)
+#endif
+    {
+        dop_check(s);
+    }
+#ifdef CSD_GEN_EN
+    else if (csd_dsp.dop || csd_dsp.dopCnt) {
+        /* Armed: skip detection and clear any stale latch rather than leave
+         * it to the eight-non-match leave rule, which needs eight frames to
+         * unwind after the generator stops. */
+        csd_dsp.dop = 0;
+        csd_dsp.dopCnt = 0;
+    }
+#endif
 
     unsigned n = csd_dsp.n;
     if (n == 0u || csd_dsp.dsd || csd_dsp.dop || csd_dsp.preset == 0u) return;  // byte-exact bypass
@@ -194,6 +229,16 @@ void csd_dsp_set_rate(unsigned hz)
      * rate => keep running state, touch nothing. */
     if (idx >= 0 && idx == csd_dsp.rateIdx && csd_dsp.n == csd_dsp_rates[idx].num_taps)
         return;
+
+#ifdef CSD_GEN_EN
+    /* Rate actually changed: the generator derives its phase steps from fs, so
+     * it has to be told or "1 Hz to 20 kHz in 30 s" silently becomes a 15 s
+     * sweep at 96 kHz. Called here, on the audio thread, which is the only
+     * thread that touches the generator's live state -- which is what lets it
+     * be lock-free. Placed after the idempotence check so the repeated
+     * AudioHwConfig calls during a live stream do not restart the wave. */
+    csd_gen_notify_rate(hz);
+#endif
     csd_dsp_clear_state();
     csd_dsp.rateIdx = idx;
     if (idx >= 0) {
@@ -458,6 +503,27 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     /* Output path only: sampsFromAudioToUsb (ADC->USB) passes through. */
 #ifdef CSD_DSP_DIAG_RAW
     sampsFromAudioToUsb[0] = csd_pre0;
+#endif
+#ifdef CSD_GEN_EN
+    /* The function generator, if armed, OWNS this frame's USB->DAC samples.
+     *
+     * BEFORE csd_dsp_frame, deliberately: the wave then traverses the same
+     * firmware path as host audio -- delay or bass shelf at presets 1 and 2,
+     * or straight through at preset 0, which is the byte-exact bypass. A
+     * generator injected after the DSP could only ever test the DAC; injected
+     * here it tests the chain the product actually implements, and preset 0
+     * still gives the raw wave when that is what you want.
+     *
+     * csd_gen_inject() adopts any pending command itself and returns 0 when
+     * the mode is OFF, touching nothing -- so with the generator never used,
+     * the cost here is one volatile load and a compare, and audio is
+     * byte-identical to the build without this feature.
+     *
+     * It also runs before the DIAG_LOOP mirror below, which copies these
+     * slots onto the mic path: so an armed generator is audible to the host
+     * capture without any extra instrumentation, and the acoustic gate
+     * measures generator -> DAC -> ADC with no new code. */
+    csd_gen_inject(sampsFromUsbToAudio);
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
 #ifdef CSD_DSP_DIAG_RAW

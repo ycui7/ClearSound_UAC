@@ -48,6 +48,124 @@ int csd_diag_reg_write(unsigned reg, unsigned val) { reg_write_calls++; last_reg
  * stubbing them is a duplicate symbol. */
 void csd_diag_note_reg_write(void) { /* no-op: reg_write_calls counts the real call */ }
 
+#include "csd_gen.h"           /* prototypes, so the stubs below are checked */
+
+/* Identity snapshot, needed since csd_diag_scpi.c grew the DIAG:IDENTity:*
+ * queries (commit 5acc597) -- this harness was not rebuilt at the time, which
+ * is why the link only now fails. Filled with the material this board
+ * actually reports, so *IDN? and the identity queries exercise their
+ * formatting against plausible data rather than zeros: a snapshot of all
+ * zeros makes "ready" false, and every query then answers with the
+ * not-ready branch, so the harness would pass while never testing the
+ * formatting at all. */
+int csd_diag_identity_snapshot(csd_id_snapshot_t *snap)
+{
+    if (!snap) return 0;
+    snap->ready = 1u;
+    snap->stage = 6u;
+    snap->source = 0u;
+    snap->hash = 0x00000000201b0d69ull;      /* this board's committed serial */
+    snap->words[0] = 0x8002u;
+    snap->words[1] = 0x8002u;
+    snap->words[2] = 0x6633u;
+    snap->words[3] = 0x6633u;
+    snprintf(snap->str, sizeof snap->str, "%s", "201b0d69");
+    return 1;
+}
+
+/* ---- function generator stubs ------------------------------------------
+ *
+ * csd_gen.h is included (unlike the DSP/codec stubs above, whose headers drag
+ * in xcore types) so the COMPILER checks these stubs against the real
+ * prototypes. A stub whose signature drifted from the header would otherwise
+ * link happily on the host and leave the personality calling something else
+ * entirely -- the device build would then be the first to notice, on target.
+ *
+ * These APPLY what they are given, not merely record it, for the same reason
+ * csd_dsp_set_preset above does: a stub that only records lets
+ * "GENerator:SINe ... then GENerator:STATe? -> 0" sit unnoticed forever.
+ * Readback must come from the state the setter wrote.
+ *
+ * The stub is NOT a model of the waveform code -- the host gate
+ * (tools/dsp/test_gen.cpp) owns that, against the real core. This harness owns
+ * the other half, the half the acoustic rig cannot see: does the SCPI pattern
+ * match, do the parameters parse, does milliHz become the right Q8 value, and
+ * does an out-of-range argument produce an error the host can read.
+ */
+static int gen_arm_calls, gen_tones_calls, gen_off_calls;
+static int gen_fail;                       /* generator cases that disagreed  */
+static unsigned gen_arm_mode, gen_arm_fs, gen_arm_fa, gen_arm_fb;
+static unsigned gen_arm_domain, gen_arm_amp, gen_arm_period;
+static unsigned gen_tones_count, gen_tones_amp, gen_tones_period;
+static unsigned gen_tones_f[4];
+static int gen_force_reject;           /* nonzero -> the next arm is refused  */
+static int gen_last_reject_code;
+static unsigned gen_reject_count;
+
+/* Adopted state: what GENerator:STATe? must report, i.e. written by arm and
+ * read back from here. Mirrors csd_gen.xc, where the getters read the
+ * ADOPTED descriptor rather than the pending one. */
+static unsigned gen_state_mode, gen_state_fs, gen_state_fa, gen_state_fb;
+static unsigned gen_state_amp, gen_state_domain, gen_state_tones;
+static unsigned gen_cmd, gen_adopted;
+
+int csd_gen_request_arm(unsigned mode, unsigned fs, unsigned fa, unsigned fb,
+                        unsigned domain, unsigned amp, unsigned period,
+                        int *why)
+{
+    gen_arm_calls++;
+    gen_arm_mode = mode; gen_arm_fs = fs; gen_arm_fa = fa; gen_arm_fb = fb;
+    gen_arm_domain = domain; gen_arm_amp = amp; gen_arm_period = period;
+    if (gen_force_reject) {
+        if (why) *why = gen_last_reject_code;
+        gen_reject_count++;
+        return -1;
+    }
+    gen_state_mode = mode; gen_state_fs = fs;
+    gen_state_fa = fa; gen_state_fb = fb ? fb : fa;   /* as the core does */
+    gen_state_domain = domain; gen_state_amp = amp;
+    gen_state_tones = 0;
+    gen_cmd++; gen_adopted = gen_cmd;   /* harness has no audio thread */
+    return 0;
+}
+
+int csd_gen_request_tones(unsigned fs, unsigned count, const unsigned *f,
+                          unsigned amp, unsigned period, int *why)
+{
+    gen_tones_calls++;
+    gen_tones_count = count; gen_tones_amp = amp; gen_tones_period = period;
+    for (unsigned i = 0; i < count && i < 4; i++) gen_tones_f[i] = f[i];
+    if (gen_force_reject) {
+        if (why) *why = gen_last_reject_code;
+        gen_reject_count++;
+        return -1;
+    }
+    gen_state_mode = 4u;                 /* CSD_GEN_MODE_MULTITONE */
+    gen_state_fs = fs; gen_state_amp = amp; gen_state_tones = count;
+    gen_state_fa = f[0]; gen_state_fb = f[0];
+    gen_cmd++; gen_adopted = gen_cmd;
+    return 0;
+}
+
+void csd_gen_request_off(void)
+{
+    gen_off_calls++;
+    gen_state_mode = 0u;
+    gen_cmd++; gen_adopted = gen_cmd;
+}
+
+unsigned csd_gen_state_mode(void)   { return gen_state_mode; }
+unsigned csd_gen_state_fs(void)     { return gen_state_fs; }
+unsigned csd_gen_state_f_a_q8(void) { return gen_state_fa; }
+unsigned csd_gen_state_f_b_q8(void) { return gen_state_fb; }
+unsigned csd_gen_state_amp(void)    { return gen_state_amp; }
+unsigned csd_gen_state_domain(void) { return gen_state_domain; }
+unsigned csd_gen_state_tones(void)  { return gen_state_tones; }
+unsigned csd_gen_state_cmd(void)    { return gen_cmd; }
+unsigned csd_gen_state_adopted(void){ return gen_adopted; }
+unsigned csd_gen_state_rejects(void){ return gen_reject_count; }
+int      csd_gen_state_last_reject(void) { return gen_last_reject_code; }
+
 /* ---- drive the personality exactly as the XC transport does ------------- */
 static char out[1024];
 static size_t out_len;
@@ -204,6 +322,158 @@ int main(void)
     show(NULL, "BOGUS:CMD?");
     show(NULL, "SYSTem:ERRor:COUNt?");
 
+    printf("\n== function generator: parse, units, and rejection ==\n");
+    {
+        /* Each case states the argument text and the argument the device must
+         * have received. Comparing reply text alone would not catch a units
+         * bug: "GENerator:SINe 48000,1000000,1073741824" answers OK whether
+         * 1000000 became 1000 Hz or 1000 milliHz, and the difference is an
+         * octave the rig then measures as a DUT fault. So every pass criterion
+         * here is on the value the stub was handed. */
+        static const struct {
+            const char *cmd;
+            int want_calls;             /* csd_gen_request_arm calls        */
+            unsigned want_mode, want_fs, want_fa, want_fb;
+            unsigned want_domain, want_amp, want_period;
+            const char *note;
+        } g[] = {
+            /* 1 Hz .. 20 kHz, and the milliHz->Q8 rounding at both ends.
+             * 256000 = 1000*256/1000 exactly; 5120000 = 20000*256. */
+            {"GENerator:SINe 48000,1000,1073741824", 1, 1, 48000u, 256u, 0u,
+             0u, 1073741824u, 0u, "1 Hz, hold (period absent)"},
+            {"GENerator:SINe 48000,1000000,1073741824", 1, 1, 48000u, 256000u,
+             0u, 0u, 1073741824u, 0u, "1 kHz, hold"},
+            {"GENerator:SINe 48000,20000000,1073741824", 1, 1, 48000u,
+             5120000u, 0u, 0u, 1073741824u, 0u, "20 kHz"},
+            {"GENerator:SQUare 96000,1000000,536870912", 1, 2, 96000u,
+             256000u, 0u, 0u, 536870912u, 0u, "square 1 kHz at 96 kHz"},
+            {"GENerator:SINe 48000,1000000,1073741824,500", 1, 1, 48000u,
+             256000u, 0u, 0u, 1073741824u, 500u, "500 ms burst"},
+            {"GENerator:SWEep 48000,1000,20000000,LOG,1073741824,30000", 1,
+             3, 48000u, 256u, 5120000u, 1u, 1073741824u, 30000u,
+             "log sweep 1 Hz->20 kHz, 30 s"},
+            {"GENerator:SWEep 48000,20000000,1000,LIN,1073741824,500", 1,
+             3, 48000u, 5120000u, 256u, 0u, 1073741824u, 500u,
+             "FALLING sweep: f_start > f_stop is legal, one code path"},
+            {"GENerator:SWEep 48000,1000000,1000000,LOG,1073741824,1000", 1,
+             3, 48000u, 256000u, 256000u, 1u, 1073741824u, 1000u,
+             "STEADY sweep: f_start == f_stop"},
+            {"GENerator:SWEep 48000,1000,20000000,lin,1073741824,500", 1,
+             3, 48000u, 256u, 5120000u, 0u, 1073741824u, 500u,
+             "lower-case LIN (device keyword match is case-insensitive)"},
+            {"GENerator:NOISe 44100,1073741824,1000", 1, 5, 44100u,
+             256u, 0u, 0u, 1073741824u, 1000u,
+             "noise: f_a is a legal placeholder (the core requires >=1 Hz\n              for every mode), ignored by the noise branch"},
+        };
+
+        for (size_t i = 0; i < sizeof g / sizeof g[0]; i++) {
+            gen_arm_calls = 0;
+            gen_arm_mode = gen_arm_fs = gen_arm_fa = gen_arm_fb = 999999u;
+            gen_arm_domain = gen_arm_amp = gen_arm_period = 999999u;
+            int n = run(g[i].cmd);
+            (void)n;
+            int bad = (gen_arm_calls != g[i].want_calls) ||
+                      (g[i].want_calls == 1 &&
+                       (gen_arm_mode != g[i].want_mode ||
+                        gen_arm_fs != g[i].want_fs ||
+                        gen_arm_fa != g[i].want_fa ||
+                        gen_arm_fb != g[i].want_fb ||
+                        gen_arm_domain != g[i].want_domain ||
+                        gen_arm_amp != g[i].want_amp ||
+                        gen_arm_period != g[i].want_period));
+            printf("  %-58s %s  calls=%d m=%u fs=%u fa=%u fb=%u dom=%u amp=%u per=%u\n",
+                   g[i].cmd, bad ? "MISMATCH" : "ok",
+                   gen_arm_calls, gen_arm_mode, gen_arm_fs, gen_arm_fa,
+                   gen_arm_fb, gen_arm_domain, gen_arm_amp, gen_arm_period);
+            if (g[i].note) printf("       %s\n", g[i].note);
+            if (bad) {
+                printf("       EXPECTED m=%u fs=%u fa=%u fb=%u dom=%u amp=%u per=%u\n",
+                       g[i].want_mode, g[i].want_fs, g[i].want_fa,
+                       g[i].want_fb, g[i].want_domain, g[i].want_amp,
+                       g[i].want_period);
+                gen_fail++;
+            }
+        }
+
+        /* Noise passes no frequency, so fa/fb are whatever the caller used;
+         * do not assert them. */
+
+        /* Rejections: the command must NOT reach the device, and must leave an
+         * error the host can read. Both halves matter -- a callback that
+         * returns an error but has already armed the generator plays a wave
+         * while telling the host the command failed. */
+        static const struct { const char *cmd; const char *why; } bad[] = {
+            {"GENerator:SINe 48000,999,1073741824",     "0.999 Hz: below 1 Hz"},
+            {"GENerator:SINe 48000,20001000,1073741824", "20.001 kHz: above spec"},
+            {"GENerator:SINe 48000,1000000,0",           "amplitude zero"},
+            {"GENerator:SINe 48000,1000000,4294967295",  "amplitude above full scale"},
+            {"GENerator:SWEep 48000,1000,20000000,LOG,1073741824,0", "sweep needs a period"},
+            {"GENerator:SWEep 48000,1000,20000000,LOGLINEAR,1073741824,1000", "bad domain"},
+            {"GENerator:TONEs 48000,1073741824,1000,1,1000000", "one tone is not a multitone"},
+            {"GENerator:TONEs 48000,1073741824,1000,5,1000000,2000000,3000000,4000000,5000000", "five tones"},
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            gen_arm_calls = gen_tones_calls = 0;
+            run("SYSTem:ERRor:COUNt?");              /* drain */
+            probe(bad[i].cmd);
+            int reached = gen_arm_calls + gen_tones_calls;
+            char ecmd[64];
+            snprintf(ecmd, sizeof ecmd, "SYSTem:ERRor:NEXT?");
+            show(NULL, ecmd);
+            printf("       %s -> device calls=%d (must be 0)\n",
+                   bad[i].why, reached);
+            if (reached != 0) { printf("       MISMATCH\n"); gen_fail++; }
+        }
+    }
+
+    printf("\n== optional period: absent, present, and MALFORMED ==\n");
+    /* The malformed case is the one that matters. libscpi's SCPI_Parameter
+     * returns FALSE for both "no more input" and a bad separator, so a naive
+     * "if (get optional) parse it" treats a mistyped burst length as "no
+     * burst requested" and arms a steady tone in silence. The personality
+     * distinguishes them with the error-queue delta; this checks it does. */
+    {
+        gen_arm_calls = 0; gen_arm_period = 12345u;
+        probe("GENerator:SINe 48000,1000000,1073741824");
+        printf("       absent -> calls=%d period=%u (must be 0)\n",
+               gen_arm_calls, gen_arm_period);
+        if (gen_arm_calls != 1 || gen_arm_period != 0u) gen_fail++;
+
+        gen_arm_calls = 0; gen_arm_period = 12345u;
+        probe("GENerator:SINe 48000,1000000,1073741824,250");
+        printf("       present -> calls=%d period=%u (must be 250)\n",
+               gen_arm_calls, gen_arm_period);
+        if (gen_arm_calls != 1 || gen_arm_period != 250u) gen_fail++;
+
+        gen_arm_calls = 0; gen_arm_period = 12345u;
+        probe("GENerator:SINe 48000,1000000,1073741824,,");
+        printf("       malformed trailing comma -> calls=%d "
+               "(must be 0: not silently treated as absent)\n", gen_arm_calls);
+        if (gen_arm_calls != 0) {
+            printf("       MISMATCH: a malformed optional argument armed the "
+                   "generator as a steady tone\n");
+            gen_fail++;
+        }
+    }
+
+    printf("\n== GENerator:STATe? reports what was armed ==\n");
+    {
+        probe("GENerator:OFF");
+        probe("GENerator:SWEep 96000,20000,15000000,LOG,536870912,2000");
+        show("mode=3 fs=96000 fa=5120 fb=3840000 dom=1 amp=536870912",
+             "GENerator:STATe?");
+        probe("GENerator:TONEs 48000,805306368,0,3,260000,1040000,4160000");
+        show("mode=4 tones=3 amp=805306368", "GENerator:STATe?");
+    }
+
+    printf("\n== abbreviated mnemonics (libscpi <n> form) ==\n");
+    {
+        gen_arm_calls = 0;
+        probe("GEN2:SIN 48000,1000000,1073741824");
+        printf("       GEN2:SIN -> calls=%d (informational; not required)\n",
+               gen_arm_calls);
+    }
+
     printf("\n== registers (drained per-command: reply + own error) ==\n");
     reg_read_calls = 0;
     probe("REGister:READ? 0x03");
@@ -266,5 +536,10 @@ int main(void)
                    reg_read_calls, reg_write_calls);
         }
     }
-    return 0;
+    /* Nonzero exit when a generator case disagreed, so build_native_scpi.sh
+     * can gate on it. Only generator cases set gen_fail; the exploratory
+     * register/preset output above stays informational. */
+    if (gen_fail) printf("\nGENERATOR SCPI: %d MISMATCH(ES)\n", gen_fail);
+    else          printf("\nGENERATOR SCPI: PASS\n");
+    return gen_fail ? 1 : 0;
 }

@@ -20,6 +20,7 @@
 #include "csd_dsp.h"
 #include "csd_version.h"
 #include "csd_identity.h"
+#include "csd_gen.h"
 
 #define CSD_IDN_VENDOR   "ClearSound"
 #define CSD_IDN_MODEL    "CSD-22"
@@ -606,6 +607,367 @@ static SCPI_FPTR_CMD scpi_result_t q_ident_stage(scpi_t *context)
 }
 
 /* ---- command table ---------------------------------------------------- */
+/* ---- function generator -------------------------------------------------
+ *
+ * Units, all exact integers, because parse_num() here is unsigned-integer
+ * only (decimal, or 0x/0b/h suffixed) and there is no float in the image and
+ * no reason to introduce soft-float for an argument parser:
+ *
+ *   frequency  milliHz    20 kHz = 20000000, 1 Hz = 1000; fits u32 with room
+ *   period     ms         24 h = 86400000; fits u32
+ *   sample rate Hz        one of the advertised altsettings
+ *   amplitude  Q31 peak   0x40000000 = -6 dBFS, the same convention every
+ *                         sample in this codebase uses
+ *
+ * Amplitude is deliberately NOT in dB. Accepting dB would need 10^(x/20) in
+ * fixed point -- a new table, a new quantisation, and a new way to be subtly
+ * wrong -- for a knob whose meaningful precision is one bit of a 31-bit
+ * number. The rig works in dB already (the acoustic gate measures dBFS from
+ * captured samples), so dB is the host's unit and Q31 is the device's.
+ *
+ * Frequencies are echoed back through GENerator:STATe? as the ADOPTED Q8
+ * value, which is the frequency the oscillator actually produces: Q8 is
+ * 1/256 Hz, so a request for 1000.001 Hz becomes 1000.0000 and the query says
+ * so, rather than leaving the host to discover 0.001 Hz by measurement.
+ */
+
+static const unsigned csd_gen_hz_max = 20000000u;   /* 20 kHz in milliHz */
+
+static int gen_mhz(scpi_t *context, uint32_t *out_q8, const char **why)
+{
+    char txt[16];
+    uint32_t mhz;
+    if (!param_text(context, txt, sizeof txt, TRUE)) {
+        *why = "missing frequency";
+        return 0;
+    }
+    if (!parse_num(txt, strlen(txt), &mhz)) {
+        *why = "frequency not a number";
+        return 0;
+    }
+    /* Range asserted in milliHz, before the Q8 conversion, so the limit the
+     * host is told about is the limit the host used. 20 kHz is the spec;
+     * Nyquist is checked separately by the generator, which is the authority
+     * on what fits at the sample rate actually in force. */
+    if (mhz < 1000u || mhz > csd_gen_hz_max) {
+        *why = "frequency outside 1 Hz .. 20 kHz";
+        return 0;
+    }
+    /* milliHz -> Q8 Hz: mhz * 256 / 1000. Rounded, not truncated: truncating
+     * would bias every frequency the host asked for slightly low, which reads
+     * as a measurement problem rather than a rounding choice. */
+    *out_q8 = (uint32_t)(((uint64_t)mhz * (uint64_t)CSD_GEN_HZ_SCALE + 500ull)
+                       / 1000ull);
+    return 1;
+}
+
+static int gen_u32(scpi_t *context, const char *name, uint32_t *out,
+                   uint32_t lo, uint32_t hi, const char **why)
+{
+    char txt[16];
+    if (!param_text(context, txt, sizeof txt, TRUE)) {
+        *why = name;
+        return 0;
+    }
+    if (!parse_num(txt, strlen(txt), out)) {
+        *why = name;
+        return 0;
+    }
+    if (*out < lo || *out > hi) {
+        *why = name;
+        return 0;
+    }
+    return 1;
+}
+
+/* Case-insensitive keyword compare.
+ *
+ * Not strcasecmp(): that is POSIX, and this file includes only <string.h> and
+ * <stdint.h> deliberately (see the note above fmt_u32), so relying on it here
+ * would either fail to link on xcore or silently work on the host and not on
+ * the target -- the worst failure order available. Four characters, and the
+ * keywords are known-length, so there is nothing clever to get wrong. */
+static int eq_ci(const char *a, const char *kw)
+{
+    for (; *kw; a++, kw++) {
+        char c = *a;
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        if (c != *kw) return 0;             /* keywords stored uppercase */
+    }
+    return *a == 0;
+}
+
+/* Shared tail for every arm command: report the rejection reason through the
+ * SCPI error queue rather than answering OK and staying silent. The generator
+ * refuses rather than clamping, so a typo'd argument must be an error the host
+ * can read -- not a waveform that looks plausible.
+ *
+ * Only error codes present in the MINIMAL list are usable: this build has
+ * USE_FULL_ERROR_LIST=0 (scpi_user_config.h), and in libscpi's error.h the
+ * full-list-only entries are marked XE -- SCPI_ERROR_DATA_OUT_OF_RANGE (-222)
+ * is one of them, so naming it would not compile. -224 and -200 are X
+ * entries. The fine-grained reason is not lost: it is readable from
+ * GENerator:STATe:REJect?, which is the same information without needing the
+ * library to carry a bigger string table. */
+static scpi_result_t gen_report(scpi_t *context, int rc, int why)
+{
+    if (rc == 0) return SCPI_RES_OK;
+    switch (why) {
+    case CSD_GEN_REJ_FREQ_RANGE:
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        break;
+    default:
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        break;
+    }
+    return SCPI_RES_ERR;
+}
+
+/* GENerator:SINe <fs>,<freq_mHz>,<amp>[,<period_ms>]
+ * GENerator:SQUare <fs>,<freq_mHz>,<amp>[,<period_ms>]
+ *
+ * period_ms omitted or 0 = hold indefinitely (the tone/square case). Giving
+ * one makes it a finite burst, which is what the acoustic rig wants: a burst
+ * with known endpoints so the capture knows where to look. */
+static scpi_result_t gen_tone(scpi_t *context, unsigned mode)
+{
+    const char *why = "argument";
+    uint32_t fs, fq8, amp, per = 0u;
+    int rwhy = 0;
+
+    if (!gen_u32(context, "sample rate", &fs, 1u, 1000000u, &why)) goto bad;
+    if (!gen_mhz(context, &fq8, &why)) goto bad;
+    if (!gen_u32(context, "amplitude", &amp,
+                 CSD_GEN_AMP_MIN, CSD_GEN_AMP_MAX, &why)) goto bad;
+    /* Optional argument: absent means hold forever.
+     *
+     * Read ONCE, then parsed from the copy. An earlier version peeked with
+     * SCPI_ParamCharacters(mandatory=FALSE) and, if something was there,
+     * called gen_u32() to read it again -- which cannot work: SCPI_Parameter
+     * advances the lexer on every call, so the second read was already at
+     * end-of-input, pushed -109 Missing parameter, and the command failed
+     * with calls=0. The harness caught it (build_native_scpi.sh,
+     * "GENerator:SINe 48000,1000000,1073741824,500"), not the board.
+     *
+     * "Absent" is told from "malformed" by the error-queue delta, because
+     * SCPI_Parameter returns FALSE for BOTH "no more input" (pos past the
+     * buffer) and a bad separator (it pushes -108 and returns FALSE). Skipping
+     * on FALSE alone would read a mistyped burst length as "no burst
+     * requested" and arm a steady tone in silence. The absent case pushes
+     * nothing; the malformed case pushes something; the delta is the test.
+     * Both behaviours read out of libscpi parser.c, not inferred from the
+     * signature, which cannot distinguish them. */
+    {
+        const char *pv;
+        size_t pl = 0;
+        int32_t e_before = SCPI_ErrorCount(context);
+        scpi_bool_t got = SCPI_ParamCharacters(context, &pv, &pl, FALSE);
+        if (SCPI_ErrorCount(context) != e_before) goto bad;   /* malformed */
+        if (got && pl > 0) {
+            char txt[16];
+            uint32_t v;
+            if (pl >= sizeof txt) { why = "period too long"; goto bad; }
+            memcpy(txt, pv, pl);
+            txt[pl] = 0;
+            if (!parse_num(txt, pl, &v)) { why = "period"; goto bad; }
+            if (v > CSD_GEN_MAX_PERIOD_MS) { why = "period"; goto bad; }
+            per = v;
+        }
+    }
+
+    return gen_report(context,
+        csd_gen_request_arm(mode, fs, fq8, 0u, CSD_GEN_DOMAIN_LIN,
+                            amp, per, &rwhy), rwhy);
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
+static SCPI_FPTR_CMD scpi_result_t gen_sine(scpi_t *context)
+{
+    return gen_tone(context, CSD_GEN_MODE_SINE);
+}
+
+static SCPI_FPTR_CMD scpi_result_t gen_square(scpi_t *context)
+{
+    return gen_tone(context, CSD_GEN_MODE_SQUARE);
+}
+
+/* GENerator:SWEep <fs>,<f_start_mHz>,<f_stop_mHz>,<LIN|LOG>,<amp>,<period_ms>
+ *
+ * One continuous function of the frame index, f(n) = f_start *
+ * (f_stop/f_start)^(n/N) -- not a sequence of packets, which was the original
+ * design and was rejected: a stepped sweep has a spectrum of its own and the
+ * DUT gets measured against that instead of against a chirp.
+ *
+ * f_start and f_stop are unconstrained relative to each other, which is the
+ * whole point of the formula: f_start < f_stop rises, f_start > f_stop falls,
+ * f_start == f_stop holds. Three behaviours, one code path, no direction flag
+ * for a caller to get wrong. */
+static SCPI_FPTR_CMD scpi_result_t gen_sweep(scpi_t *context)
+{
+    const char *why = "argument";
+    uint32_t fs, fa, fb, amp, per;
+    uint32_t domain;
+    int rwhy = 0;
+    char dom[8];
+
+    if (!gen_u32(context, "sample rate", &fs, 1u, 1000000u, &why)) goto bad;
+    if (!gen_mhz(context, &fa, &why)) goto bad;
+    if (!gen_mhz(context, &fb, &why)) goto bad;
+    if (!param_text(context, dom, sizeof dom, TRUE)) { why = "domain"; goto bad; }
+    if (eq_ci(dom, "LIN"))      domain = CSD_GEN_DOMAIN_LIN;
+    else if (eq_ci(dom, "LOG")) domain = CSD_GEN_DOMAIN_LOG;
+    else { why = "domain must be LIN or LOG"; goto bad; }
+    if (!gen_u32(context, "amplitude", &amp,
+                 CSD_GEN_AMP_MIN, CSD_GEN_AMP_MAX, &why)) goto bad;
+    /* A sweep without a period has no meaning: the exponent n/N needs N.
+     * Refused rather than defaulted, because a defaulted length would be a
+     * 0.5 s sweep where the operator meant 30 s. */
+    if (!gen_u32(context, "period", &per, 1u, CSD_GEN_MAX_PERIOD_MS, &why))
+        goto bad;
+
+    return gen_report(context,
+        csd_gen_request_arm(CSD_GEN_MODE_SWEEP, fs, fa, fb, domain,
+                            amp, per, &rwhy), rwhy);
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
+/* GENerator:TONEs <fs>,<amp>,<period_ms>,<count>,<f1>,<f2>[,<f3>,<f4>]
+ *
+ * count is 2..4 and exactly that many frequencies must follow. Not clamped:
+ * a 7 would otherwise become an unremarkable 4-tone result and the operator
+ * would measure four tones believing they had asked for seven. */
+static SCPI_FPTR_CMD scpi_result_t gen_tones(scpi_t *context)
+{
+    const char *why = "argument";
+    uint32_t fs, amp, per, count;
+    uint32_t fq[CSD_GEN_MAX_TONES_PUB];
+    int rwhy = 0;
+
+    if (!gen_u32(context, "sample rate", &fs, 1u, 1000000u, &why)) goto bad;
+    if (!gen_u32(context, "amplitude", &amp,
+                 CSD_GEN_AMP_MIN, CSD_GEN_AMP_MAX, &why)) goto bad;
+    if (!gen_u32(context, "period", &per, 0u, CSD_GEN_MAX_PERIOD_MS, &why))
+        goto bad;
+    if (!gen_u32(context, "tone count", &count, 2u, CSD_GEN_MAX_TONES_PUB, &why))
+        goto bad;
+
+    /* Each tone carries 1/count of the full scale inside the generator, so
+     * `amp` is the peak of the SUM: the composite stays at the requested
+     * level as tones are added, which is what makes a 2-tone and a 4-tone
+     * measurement comparable without recomputing levels by hand. */
+    for (uint32_t i = 0; i < count; i++)
+        if (!gen_mhz(context, &fq[i], &why)) goto bad;
+
+    return gen_report(context,
+        csd_gen_request_tones(fs, count, fq, amp, per, &rwhy), rwhy);
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
+/* GENerator:NOISe <fs>,<amp>,<period_ms> */
+static SCPI_FPTR_CMD scpi_result_t gen_noise(scpi_t *context)
+{
+    const char *why = "argument";
+    uint32_t fs, amp, per;
+    int rwhy = 0;
+
+    if (!gen_u32(context, "sample rate", &fs, 1u, 1000000u, &why)) goto bad;
+    if (!gen_u32(context, "amplitude", &amp,
+                 CSD_GEN_AMP_MIN, CSD_GEN_AMP_MAX, &why)) goto bad;
+    if (!gen_u32(context, "period", &per, 0u, CSD_GEN_MAX_PERIOD_MS, &why))
+        goto bad;
+
+    return gen_report(context,
+        csd_gen_request_arm(CSD_GEN_MODE_NOISE, fs, CSD_GEN_HZ_SCALE /* 1 Hz, the
+                                                           noise mode
+                                                           ignores it */,
+                            0u,
+                            CSD_GEN_DOMAIN_LIN, amp, per, &rwhy), rwhy);
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
+/* GENerator:OFF */
+static SCPI_FPTR_CMD scpi_result_t gen_off(scpi_t *context)
+{
+    (void)context;
+    csd_gen_request_off();
+    return SCPI_RES_OK;
+}
+
+/* GENerator:STATe? -> mode,fs,f_a_hz_q8,f_b_hz_q8,amp,domain,tones,cmd,adopted
+ *
+ * Nine integers, host-parseable, no formatting cleverness. The last two are
+ * the point: cmd advances when a command is accepted, adopted advances when
+ * the AUDIO thread picks it up at a frame boundary. cmd != adopted means the
+ * stream is not running, which is the difference between "the generator is
+ * broken" and "there is no stream" -- a distinction that otherwise costs an
+ * afternoon, because both look like silence. */
+static SCPI_FPTR_CMD scpi_result_t gen_state_q(scpi_t *context)
+{
+    /* fmt_u32 + a hand-rolled joiner, not snprintf: this file includes no
+     * <stdio.h> on purpose (see the note above fmt_u32) -- printf drags in
+     * kilobytes of flash and, on audio threads, the xscope backpressure that
+     * cost the silent-DAC week. Nine fields, so the buffer is sized from the
+     * worst case: nine 10-digit values plus eight commas plus NUL. */
+    char buf[9 * 10 + 9];
+    unsigned v[9];
+    unsigned len = 0;
+
+    v[0] = csd_gen_state_mode();
+    v[1] = csd_gen_state_fs();
+    v[2] = csd_gen_state_f_a_q8();
+    v[3] = csd_gen_state_f_b_q8();
+    v[4] = csd_gen_state_amp();
+    v[5] = csd_gen_state_domain();
+    v[6] = csd_gen_state_tones();
+    v[7] = csd_gen_state_cmd();
+    v[8] = csd_gen_state_adopted();
+
+    for (unsigned i = 0; i < 9u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {                       /* would not fit */
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+/* GENerator:STATe:REJect? -> last_reject_code,reject_count */
+static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
+{
+    /* Rejection codes are CSD_GEN_REJ_* (0..7), always non-negative, so
+     * fmt_u32 is enough and the signed round trip through snprintf("%d")
+     * that this replaces was risk with no benefit. */
+    char buf[24];
+    unsigned len = fmt_u32((uint32_t)(csd_gen_state_last_reject() < 0
+                                      ? 0 : csd_gen_state_last_reject()),
+                           buf, sizeof buf);
+    if (len == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                    return SCPI_RES_ERR; }
+    buf[len++] = ',';
+    unsigned n = fmt_u32(csd_gen_state_rejects(), buf + len,
+                         (unsigned)sizeof buf - len);
+    if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                  return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, buf, len + n);
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t csd_commands[] = {
     /* IEEE 488.2 mandated subset */
     { .pattern = "*IDN?",  .callback = q_idn     },   /* ours, not CoreIdnQ: see q_idn */
@@ -644,6 +1006,22 @@ static const scpi_command_t csd_commands[] = {
      * SCPI_Param*() inside the callback. */
     { .pattern = "REGister:READ?",  .callback = reg_read_q },
     { .pattern = "REGister:WRITE",  .callback = reg_write  },
+
+    /* Function generator. Set and query halves are separate entries, and no
+     * pattern carries a parameter placeholder -- both rules established by
+     * DIAG:DSP:PRESet above (libscpi matches the pattern against the command
+     * HEADER only, so a placeholder is compared as a literal keyword and the
+     * callback never runs). The <n>-suffix forms are the library's
+     * abbreviated-mnemonic convention: GEN2:SINE works as well as
+     * GENERATOR:SINE. */
+    { .pattern = "GENerator:SINe",          .callback = gen_sine    },
+    { .pattern = "GENerator:SQUare",        .callback = gen_square  },
+    { .pattern = "GENerator:SWEep",         .callback = gen_sweep   },
+    { .pattern = "GENerator:TONEs",         .callback = gen_tones   },
+    { .pattern = "GENerator:NOISe",         .callback = gen_noise   },
+    { .pattern = "GENerator:OFF",           .callback = gen_off     },
+    { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
+    { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
 
     SCPI_CMD_LIST_END
 };
