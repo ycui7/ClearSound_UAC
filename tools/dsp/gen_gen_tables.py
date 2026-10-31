@@ -72,7 +72,12 @@ def check_core_agreement(core_path):
     if not m:
         return "CSD_GEN_SQ_HARMONICS not found in %s" % core_path
     if int(m.group(1)) != SQ_HARMONICS:
-        return ("%s says %s, this generator says %d"
+        # The constant's NAME belongs in the message, not just the path: a
+        # refusal that only quotes a file and two numbers is indistinguishable
+        # from other refusals (a missing core reads similarly), and the guards
+        # require the reason to be verifiable, not merely present.
+        return ("CSD_GEN_SQ_HARMONICS disagrees: %s says %s, "
+                "this generator says %d"
                 % (core_path, m.group(1), SQ_HARMONICS))
     return None
 

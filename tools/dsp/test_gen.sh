@@ -15,12 +15,20 @@
 # unconditional-remove, status-checked, and the binary is verified present
 # before it is executed.
 set -u
-APP=~/sw-audio-sc/sw_usb_audio/clearsound_uac
+# APP is overridable so tools/dsp/test_guards.sh can point the whole gate at a
+# scratch COPY of the tree. It used to be hard-coded, which left the guards no
+# option but to mutate the real src/extensions/*.h in place -- and an
+# in-place mutation that is interrupted leaves a corrupted generated table in
+# the working tree, one `git add .` from being committed.
+: "${APP:=$HOME/sw-audio-sc/sw_usb_audio/clearsound_uac}"
 SRC=$APP/tools/dsp/test_gen.cpp
 BIN=/tmp/test_gen.$$
 TABLES=$APP/src/extensions/csd_gen_tables.h
 CORE=$APP/src/extensions/csd_gen_core.h
-PY=/home/ycui/.hermes/hermes-agent/venv/bin/python
+: "${PY:=/home/ycui/.hermes/hermes-agent/venv/bin/python}"
+# Per-run build log: two gate runs in flight used to share /tmp/gen_build.log,
+# so a guard could print another run's compiler output as its own.
+BUILD_LOG=/tmp/gen_build.$$
 
 cd "$APP" || exit 1
 fail=0
@@ -42,7 +50,7 @@ if [ -f "$TABLES" ]; then
         sed -n '1,10p' /tmp/gen_tables.log
         fail=1
     fi
-    rm -f /tmp/csd_gen_tables.committed.$$ /tmp/csd_gen_tables.regen.$$
+    rm -f /tmp/csd_gen_tables.committed.$$ /tmp/csd_gen_tables.regen.$$ "$BUILD_LOG"
 else
     echo "T0 FAIL: $TABLES missing -- run tools/dsp/gen_gen_tables.py"
     fail=1
@@ -51,11 +59,11 @@ fi
 # Build. No pipe on the compiler: its exit status must reach us.
 rm -f "$BIN"
 g++ -O2 -std=c++11 -Wall -Wextra -Werror=return-type \
-    -I"$APP/src/extensions" "$SRC" -o "$BIN" >/tmp/gen_build.log 2>&1
+    -I"$APP/src/extensions" "$SRC" -o "$BIN" >"$BUILD_LOG" 2>&1
 rc=$?
 if [ $rc -ne 0 ]; then
     echo "GEN HOST GATE: BUILD FAILED (rc=$rc)"
-    sed -n '1,40p' /tmp/gen_build.log
+    sed -n '1,40p' "$BUILD_LOG"
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
@@ -64,9 +72,9 @@ if [ ! -x "$BIN" ]; then
 fi
 # Compile warnings are information, not failure: -Wall on a DSP test harness
 # would fail on unused-argument noise and get the warnings switched off.
-if [ -s /tmp/gen_build.log ]; then
+if [ -s "$BUILD_LOG" ]; then
     echo "--- compiler warnings ---"
-    sed -n '1,15p' /tmp/gen_build.log
+    sed -n "1,15p" "$BUILD_LOG"
 fi
 
 echo "--- running gate (binary built from source at $(date -r "$CORE" '+%H:%M:%S')) ---"
