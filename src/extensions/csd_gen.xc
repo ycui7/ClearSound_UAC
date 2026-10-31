@@ -454,9 +454,16 @@ void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
     /* The user gate: native DSD or DoP => the generator stays out of the data
      * path. It stays ARMED (SCPI still reports the wave) and resumes when the
      * host returns to plain PCM, with no re-arm. */
-    if (!csd_gen_mix_armed) return;
-    if (csd_gen_mix_dsd != 0u) { csd_gen_note(1u); return; }
-    if (csd_mb_get_dop() != 0u) { csd_gen_note(2u); return; }
+    /* The suppress paths MUST clear valid: csd_gen_mix_sample() sums
+     * csd_gen_mix_wave whenever valid is set, so a stale wave left over from
+     * a pre-latch frame would keep being ADDED to DSD payload even while the
+     * counters report suppression. The rig caught this as emit+sup_dop
+     * equalling the frame count with a long pre-latch window; without the
+     * clear, "suppressed" meant only "the counters stopped", not "the data
+     * path stopped". */
+    if (!csd_gen_mix_armed) { csd_gen_mix_valid = 0u; return; }
+    if (csd_gen_mix_dsd != 0u) { csd_gen_mix_valid = 0u; csd_gen_note(1u); return; }
+    if (csd_mb_get_dop() != 0u) { csd_gen_mix_valid = 0u; csd_gen_note(2u); return; }
 
     csd_gen_fill(csd_gen_mix_wave);           /* advances the NCO exactly once */
     csd_gen_mix_valid = 1u;
