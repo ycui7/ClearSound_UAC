@@ -44,7 +44,14 @@ extern unsafe chanend uc_audiohw_diag;
                                             // on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; \
                                             // on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
 
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[5]; \
+/* Index 4 was never used: AudioHwRemote() forwards the array to
+ * csd_AudioHwRemote(), which references only c[0], c[1], c[2], c[3] (c[2] via
+ * uc_audiohw3 in USER_MAIN_CORES below). An unused chan is not free -- it still
+ * allocates a chanend on each tile. tile[0] is at its 32-chanend ceiling, and
+ * the lib_xua mixer's control path needs one more, which is what pushed it to
+ * 33/32 and failed the xmap constraints check. Sizing the array to actual use
+ * reclaims that chanend. */
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[4]; \
                                             chan xscope_data_in;
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
