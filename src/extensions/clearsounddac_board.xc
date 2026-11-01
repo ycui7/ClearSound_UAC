@@ -441,10 +441,14 @@ static void vol_apply_all(client interface i2c_master_if i2c)
                          * static is tile[1] local and only tile[1] may write
                          * it. Status is a second word so packed==0 (the
                          * reset default) cannot read as a failure. */
-                        unsigned packed = 0u;
-                        int st = csd_trim_boot_load(&packed);
+                        /* Both replies are scalars -- no pointer crosses the
+                         * tile boundary, per csd_identity.h. A C-defined
+                         * unsigned* parameter called from XC does not link at
+                         * all (C pointer vs xC pointer), so this shape is not
+                         * merely tidier, it is the only one that compiles. */
+                        unsigned packed = csd_trim_boot_load();
                         c[i] <: packed;
-                        c[i] <: (unsigned) st;
+                        c[i] <: csd_trim_status_word(1u);   /* load status */
                     }
                     else if (cmd == AUDIOHW_CMD_TRIM_SAVE)
                     {

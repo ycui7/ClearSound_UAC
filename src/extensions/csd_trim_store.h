@@ -55,7 +55,7 @@ void csd_trim_set_clkblk(unsigned clk);
  * the 0 dB / 0 dB reset default when the store holds none. Idempotent and
  * cheap to re-request; the diagnostic task runs it at startup and a rig can
  * re-run it on demand (VOLume:TRIM:LOAD). */
-int csd_trim_boot_load(unsigned *packed_out);
+unsigned csd_trim_boot_load(void);
 
 /* Journal the CURRENT mailbox trim pair. Returns 1 on success, 0 on any
  * flash failure -- which is latched into the status words, never silent. */

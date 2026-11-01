@@ -343,11 +343,11 @@ static unsigned tr_scan(const unsigned char *sec, unsigned len,
  * ever multiplies HOST audio, which cannot arrive until USB has enumerated
  * -- host-side seconds after this load completes. A host cannot hear the
  * difference between "0 dB" and "not loaded yet". */
-int csd_trim_boot_load(unsigned *packed_out)
+unsigned csd_trim_boot_load(void)
 {
     static unsigned char sector[4096];
     unsigned res = 0;
-    *packed_out = 0u;                             /* documented reset default */
+    unsigned packed = 0u;                         /* documented reset default */
 
     unsigned len = sizeof sector;
     if (tr_read_sector(sector, len, &res)) {
@@ -357,7 +357,7 @@ int csd_trim_boot_load(unsigned *packed_out)
         tr_next_slot = fill;
         tr_st_load_n++;
         if (best) {
-            *packed_out = (((unsigned)(uint32_t)best->trim_r_88) << 16)
+            packed = (((unsigned)(uint32_t)best->trim_r_88) << 16)
                         |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
             tr_st_seq    = seq;
             tr_st_loaded = 1u;
@@ -368,9 +368,15 @@ int csd_trim_boot_load(unsigned *packed_out)
         tr_st_loaded = 3u;
         tr_st_err    = res;
     }
-    /* Caller (tile[1]) applies *packed_out to its OWN mailbox. Returning the
-     * load status lets it report what happened without a second round trip. */
-    return (int) tr_st_loaded;
+    /* NO POINTER: the codebase rule is scalars across a tile boundary, and a
+     * C-defined function taking unsigned* and called from XC does not even
+     * link -- "Type of symbol has mismatch ... /* C pointer */ ... /* xC
+     * pointer */"; the compiler's own fix is `unsigned *unsafe` on the
+     * declaration, which the C header cannot express. Returning the value
+     * removes the problem and the rule violation at once. Load status is
+     * already a scalar: csd_trim_status_word(1). Caller (tile[1]) applies the
+     * returned pair to its OWN mailbox. */
+    return packed;
 }
 
 /* Journal the given pair. The value is an ARGUMENT, never read from the
