@@ -20,7 +20,11 @@ Exit code: 0 if any leg produced an IDN, 1 otherwise.
 """
 import glob, re, struct, subprocess, sys, time, fcntl
 
-CSD_SYSEX_ID = 0x43          # matches csd_diag_scpi.c / csd_diag_midi.xc
+CSD_SYSEX_ID = 0x7E          # csd_diag_midi.xc:61 -- NOT 0x43. A wrong
+                             # id is abandoned without a reply
+                             # (csd_diag_midi.xc:121-123), which reads
+                             # as a dead device. Verify constants in
+                             # the firmware before writing a probe.
 IDN = b"*IDN?\r\n"
 
 

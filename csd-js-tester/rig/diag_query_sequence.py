@@ -16,14 +16,23 @@ the reference for the byte form.
 """
 import os, re, select, sys, time
 
-CSD_SYSEX_ID = 0x43
+CSD_SYSEX_ID = 0x7E          # csd_diag_midi.xc:61 -- NOT 0x43. A wrong
+                             # id is abandoned without a reply
+                             # (csd_diag_midi.xc:121-123), which reads
+                             # as a dead device. Verify constants in
+                             # the firmware before writing a probe.
 
 
 def node_path():
     cards = open("/proc/asound/cards").read()
-    m = re.search(r"^\s*(\d+)\s*\[.*\]:.*ClearSound", cards, re.M | re.I)
+    # Accept BOTH product names: 'ClearSound DAC (UAC2.0)' is the RELEASE
+    # string, 'XMOS (UAC2.0)' the debug one (xua_defs.h:131-141). Keying on
+    # 'ClearSound' alone finds no card on the debug build -- which is the only
+    # build that carries CSD_DIAG_TRACE, so it failed on precisely the run that
+    # needed it. Same acceptance set as csd_diag.py:495-496.
+    m = re.search(r"^\s*(\d+)\s*\[.*\]:.*(ClearSound|XMOS)", cards, re.M | re.I)
     if not m:
-        sys.exit("no ClearSound card in /proc/asound/cards")
+        sys.exit("no ClearSound/XMOS card in /proc/asound/cards")
     return f"/dev/snd/midiC{m.group(1)}D0"
 
 
