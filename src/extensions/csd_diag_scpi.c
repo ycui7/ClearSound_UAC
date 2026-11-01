@@ -1092,6 +1092,30 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
  * anything approaching it means a missed I2S deadline -- the same missed
  * deadline that keeps the decouple pre-filling with the token word. Read it
  * either side of a streamed-zero file; compare gen-on vs gen-off builds. */
+/* MIXer:HWCfg? -> count,lastFreq,lastMClk: proof csd_AudioHwConfig ran.
+ * Every "did the bring-up cause it?" conclusion needs this, because ALSA's
+ * plughw silently resamples and a rate-changing leg may never issue a USB
+ * SET_CUR at all. */
+static SCPI_FPTR_CMD scpi_result_t mixer_hwcfg_q(scpi_t *context)
+{
+    char buf[3 * 10 + 3];
+    unsigned len = 0;
+    unsigned cnt = 0, fr = 0, mc = 0;
+    csd_mb_get_hwcfg(&cnt, &fr, &mc);
+    const unsigned v[3] = { cnt, fr, mc };
+    for (unsigned i = 0; i < 3u; i++) {
+        if (len) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t mixer_busy_q(scpi_t *context)
 {
     char buf[10];
@@ -1330,6 +1354,7 @@ static const scpi_command_t csd_commands[] = {
      * csd_gen_mailbox.c). Registers with MIXer:GAIN:* as the mixer group. */
     { .pattern = "MIXer:FRAMES?",           .callback = mixer_frames_q },
     { .pattern = "MIXer:BUSY?",             .callback = mixer_busy_q },
+    { .pattern = "MIXer:HWCfg?",            .callback = mixer_hwcfg_q },
     { .pattern = "MIXer:DACPeak?",          .callback = mixer_dacpeak_q },
     { .pattern = "MIXer:DACPeak:CLEAR",     .callback = mixer_dacpeak_clear },
     { .pattern = "DIAG:I2S?",               .callback = diag_i2s_q },

@@ -55,7 +55,21 @@ def load_wav(path):
     return v.reshape(-1, 2) / EM.FULL, sr
 
 
-def spectrum(x, sr, nper=16384):
+NPER = 16384          # ~2.9 Hz bins at 48 kHz: enough to say 999 vs 1000 Hz
+
+
+def bin_at(db, freq, sr, nper=NPER):
+    """Strongest of the three bins nearest `freq`.
+
+    k = freq * nper / sr -- NOT freq/sr*len(db). len(db) is nper/2+1, so the
+    2x slip made every '1 kHz' reading here actually report ~500 Hz. That
+    produced a completely wrong coherence story on the previous run."""
+    k = int(round(freq * nper / sr))
+    k = max(1, min(len(db) - 2, k))
+    return max(db[k - 1:k + 2])
+
+
+def spectrum(x, sr, nper=NPER):
     """Welch PSD, dBFS. nper 16384 -> ~2.9 Hz bins: enough to say 'exactly
     1000.0' vs 'near but not'."""
     win = np.hanning(nper)
@@ -105,9 +119,7 @@ def coherence(path, freq=1000.0):
     vals = []
     for i in range(3):
         db, fr = spectrum(x[i * seg:(i + 1) * seg, 0], sr)
-        k = int(round(freq / sr * len(db)))
-        k = max(1, min(len(db) - 2, k))
-        vals.append(float(max(db[k - 1:k + 2])))
+        vals.append(float(bin_at(db, freq, sr, NPER)))
     return vals
 
 
@@ -143,9 +155,7 @@ def peak_at(path, freq):
     """dBFS of the strongest bin within +/-15 Hz of `freq`, L channel."""
     x, sr = load_wav(path)
     db, fr = spectrum(x[:, 0], sr)
-    k = int(round(freq / sr * len(db)))
-    k = max(1, min(len(db) - 2, k))
-    return float(max(db[k - 1:k + 2]))
+    return float(bin_at(db, freq, sr))
 
 
 def main():

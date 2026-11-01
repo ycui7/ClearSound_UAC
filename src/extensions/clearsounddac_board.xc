@@ -17,6 +17,9 @@ extern "C" {
 #include "xua_defs.h"
 #if PCM_DSP_EN
 #include "csd_dsp.h"
+#ifdef CSD_GEN_EN
+#include "csd_gen.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
+#endif
 #endif
 
 #include <debug_print.h>
@@ -984,6 +987,14 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
                         unsigned sampRes_DAC, unsigned sampRes_ADC)
 {    
     assert(samFreq >= 22050);
+#ifdef CSD_GEN_EN
+    /* Proof-of-execution for the rig: a leg that claims to have forced a
+     * rate change must show this counter advance (MIXer:HWCfg?). Without it,
+     * "re-config legs are clean" was vacuous -- plughw resamples silently, so
+     * a 44.1k file can reach the endpoint as 48k and AudioHwConfig never
+     * runs. Writer: audiohub core; reader: tile[1] SCPI. */
+    csd_mb_note_hwcfg(samFreq, mClk);
+#endif
     sw_pll_fixed_clock(mClk);   /* lib_sw_pll pinned v2.4.1 (see note in AudioHwInit) */
 
 #if PCM_DSP_EN

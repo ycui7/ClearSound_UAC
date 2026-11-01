@@ -57,13 +57,28 @@ def scpi(cmd, timeout=8):
     return (rr.stdout or "").strip()
 
 
+def hwcfg():
+    c = scpi("MIXer:HWCfg?")
+    try:
+        return tuple(int(x) for x in c.split(","))
+    except Exception:
+        return None
+
+
 def stream(rate, secs):
-    """ffmpeg zeros at `rate` for `secs`, in a Popen we control."""
+    """ffmpeg zeros at `rate` for `secs`, in a Popen we control.
+
+    hw:, NOT plughw:. plughw resamples silently: a 44.1k file can reach the
+    UAC endpoint as 48k, no clock SET_CUR lands, csd_AudioHwConfig never runs
+    -- and the leg that 'proved re-configs are clean' measured nothing at
+    all. The counter below is the second line of defence: every leg must show
+    it advance or the leg is reported VOID, not clean.
+    """
     return subprocess.Popen(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-re",
          "-f", "lavfi", "-i", f"anullsrc=r={rate}:cl=stereo",
          "-t", str(secs), "-c:a", "pcm_s24le", "-f", "alsa",
-         f"plughw:{DAC},0"],
+         "-ar", str(rate), "-ac", "2", f"hw:{DAC},0"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -71,6 +86,7 @@ def leg(tag, rate):
     """Mic capture FIRST (the artifact is the first ~250 ms of the open)."""
     cap = os.path.join(TMP, f"{tag}.wav")
     EM.kill_orphan_arecords()
+    n0 = hwcfg()
     p = subprocess.Popen(
         ["arecord", "-D", f"hw:{EARS},0", "-f", "S24_3LE", "-r", str(RATE),
          "-c", "2", "-d", str(CAP_D), "-t", "wav", cap],
@@ -82,8 +98,13 @@ def leg(tag, rate):
     r = EM.analyse(cap, tones=(EM.TONE_HZ,))
     tone = max(r["L"].tone_db[EM.TONE_HZ], r["R"].tone_db[EM.TONE_HZ])
     floor = min(r["L"].floor, r["R"].floor)
+    n1 = hwcfg()
+    # count advanced? -> AudioHwConfig really ran during this leg
+    ran = "?" if (n0 is None or n1 is None) else (
+        "RUN" if n1[0] > n0[0] else "NO-RUN")
+    seen = "" if n1 is None else f"  [hwcfg {n1[0]}@{n1[1]}]"
     print(f"  {tag:22s} @{rate:6d}  tone {tone:+6.1f}  floor {floor:7.1f}  "
-          f"delta {tone - floor:+5.1f} dB")
+          f"delta {tone - floor:+5.1f} dB  bring-up {ran}{seen}")
     return tone, floor
 
 

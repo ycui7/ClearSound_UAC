@@ -301,6 +301,11 @@ unsigned csd_mb_get_mix_frames(void);
  * the sample exchange (see csd_mb_note_mix_busy). 12500 ticks = one 48 kHz
  * sample period. Clear with MIXer:DACPeak:CLEAR. */
 unsigned csd_mb_get_mix_busy_peak(void);
+/* Proof that the chip bring-up actually ran: csd_AudioHwConfig increments on
+ * the audiohub core. A rig leg that claims to have forced a rate change must
+ * show this counter ADVANCE, or its conclusion is void (plughw resamples). */
+void     csd_mb_note_hwcfg(unsigned sam_freq, unsigned mclk);
+void     csd_mb_get_hwcfg(unsigned *count, unsigned *freq, unsigned *mclk);
 /* Node ids for the peak instrument (csd_mb_note_dac_sample). Shared because
  * nodes 0..4 are written by lib_xua's mixer1 and 5..6 by the audio thread's
  * UserBufferManagement. Keep in sync with CSD_DACNODES in the mailbox. */

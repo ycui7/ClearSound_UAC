@@ -174,6 +174,36 @@ void csd_mb_note_mix_busy(unsigned delta_ticks)
 
 unsigned csd_mb_get_mix_busy_peak(void) { return csd_mb_mix_busy_peak; }
 
+/* ---- AudioHwConfig call counter ----------------------------------------
+ *
+ * Why: rig/rate_change_replay.py concluded "forced re-configs are clean, so
+ * the bring-up sequence is not the case-A trigger" -- but it opened plughw:,
+ * which RESAMPLES silently. A 44.1k file can reach the UAC endpoint as 48k,
+ * no SET_CUR ever lands, AudioHwConfig never runs, and the "clean" leg
+ * measured nothing. This counter makes that leg falsifiable: if the count did
+ * not advance, the leg is void rather than exonerating.
+ *
+ * Writer: audiohub core (csd_AudioHwConfig runs there). Reader: tile[1] SCPI
+ * task. Single aligned word, monotone, never reset -- same discipline as the
+ * frame counter above. */
+static volatile unsigned csd_mb_hwcfg_count;
+static volatile unsigned csd_mb_hwcfg_last_freq;
+static volatile unsigned csd_mb_hwcfg_last_mclk;
+
+void csd_mb_note_hwcfg(unsigned sam_freq, unsigned mclk)
+{
+    csd_mb_hwcfg_last_freq = sam_freq;
+    csd_mb_hwcfg_last_mclk = mclk;
+    csd_mb_hwcfg_count++;
+}
+
+void csd_mb_get_hwcfg(unsigned *count, unsigned *freq, unsigned *mclk)
+{
+    if (count) *count = csd_mb_hwcfg_count;
+    if (freq)  *freq  = csd_mb_hwcfg_last_freq;
+    if (mclk)  *mclk  = csd_mb_hwcfg_last_mclk;
+}
+
 /* I2S-deadline monitor: LRCLK port-timestamp deltas from AudioHub_MainLoop
  * (budget 32 ticks). Called by the audio() task. Counting only -- an
  * ecallf/assert version exists in lib_xua (-DENABLE_I2S_TIMING_CHECK) and
