@@ -1102,6 +1102,7 @@ static SCPI_FPTR_CMD scpi_result_t mixer_hwcfg_q(scpi_t *context)
     unsigned len = 0;
     unsigned cnt = 0, fr = 0, mc = 0;
     csd_mb_get_hwcfg(&cnt, &fr, &mc);
+    /* tail peak rides as a 4th value: same instrument, one round trip */
     const unsigned v[3] = { cnt, fr, mc };
     for (unsigned i = 0; i < 3u; i++) {
         if (len) buf[len++] = ',';
@@ -1113,6 +1114,22 @@ static SCPI_FPTR_CMD scpi_result_t mixer_hwcfg_q(scpi_t *context)
         len += n;
     }
     SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+/* MIXer:TAIL? -- peak ticks mixer1 spent AFTER unblocking audio() (gen
+ * hand-off + DoP vote + instrument). audio()'s next frame cannot start until
+ * mixer1 returns to inuint(c_audio), so the true worst case is max(BUSY,TAIL)
+ * and BUSY+TAIL bounds the whole mixer loop. */
+static SCPI_FPTR_CMD scpi_result_t mixer_tail_q(scpi_t *context)
+{
+    char buf[10];
+    unsigned n = fmt_u32(csd_mb_get_mix_tail_peak(), buf, (unsigned)sizeof buf);
+    if (n == 0) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(context, buf, n);
     return SCPI_RES_OK;
 }
 
@@ -1354,6 +1371,7 @@ static const scpi_command_t csd_commands[] = {
      * csd_gen_mailbox.c). Registers with MIXer:GAIN:* as the mixer group. */
     { .pattern = "MIXer:FRAMES?",           .callback = mixer_frames_q },
     { .pattern = "MIXer:BUSY?",             .callback = mixer_busy_q },
+    { .pattern = "MIXer:TAIL?",             .callback = mixer_tail_q },
     { .pattern = "MIXer:HWCfg?",            .callback = mixer_hwcfg_q },
     { .pattern = "MIXer:DACPeak?",          .callback = mixer_dacpeak_q },
     { .pattern = "MIXer:DACPeak:CLEAR",     .callback = mixer_dacpeak_clear },

@@ -174,6 +174,22 @@ void csd_mb_note_mix_busy(unsigned delta_ticks)
 
 unsigned csd_mb_get_mix_busy_peak(void) { return csd_mb_mix_busy_peak; }
 
+/* Second half of the tile[1] budget: ticks mixer1 spent AFTER unblocking
+ * audio() and BEFORE it could serve the next request -- the generator
+ * hand-off, DoP vote and instrument live here, outside the busy window. A
+ * deadline needs BOTH halves: audio() cannot start its next frame until
+ * mixer1 returns to inuint(c_audio). */
+static volatile unsigned csd_mb_mix_tail_peak;
+
+void csd_mb_note_mix_tail(unsigned delta_ticks)
+{
+    if (delta_ticks > csd_mb_mix_tail_peak) {
+        csd_mb_mix_tail_peak = delta_ticks;
+    }
+}
+
+unsigned csd_mb_get_mix_tail_peak(void) { return csd_mb_mix_tail_peak; }
+
 /* ---- AudioHwConfig call counter ----------------------------------------
  *
  * Why: rig/rate_change_replay.py concluded "forced re-configs are clean, so
