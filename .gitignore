@@ -20,3 +20,4 @@ tools/dsp/_vfd_out/
 
 # xflash byproducts written next to the .xn during flash runs
 /src/extensions/image0*.bin
+/src/extensions/loader.bin
