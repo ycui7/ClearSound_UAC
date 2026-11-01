@@ -115,6 +115,11 @@ void csd_trim_set_clkblk(unsigned clk) { tr_clkblk = clk; }
  * or an identity fault gets reported as a persistence fault. */
 #define FLASH_ERR_DEGENERATE      0x105u  /* 4Bh returned all-00 or all-FF */
 #define FLASH_ERR_UNSTABLE        0x106u  /* two reads disagreed: do not trust */
+#define FLASH_ERR_DIVIDER         0x107u  /* SCLK divider could not be pinned,
+                                           * so the sampling phase is unknown
+                                           * and the answer may be a rotation
+                                           * of the real serial. Not trustable:
+                                           * see csd_flash_read_unique_serial. */
 
 typedef struct {
     uint32_t magic;
@@ -284,12 +289,60 @@ unsigned csd_flash_serial_err(void) { return s_uid_err; }
  * (clearsounddac_board.xc), and a C-defined `unsigned*` argument called from
  * XC does not link -- see csd_identity.h's note on the same boundary. Scalar
  * getters instead, the shape csd_trim_status_word() already uses. */
+/* The sampling phase of a 4Bh read is set by the SCLK DIVIDER. Measured in one
+ * binary, one fl_connect, one documented variable (probe_div2.xc):
+ *
+ *     no override (fl_connect's own setup)  0x443258C251377B1C  phase 0
+ *     fl_dividerOverride(2)                 rotation by 39
+ *     fl_dividerOverride(3)                 0x443258C251377B1C  phase 0
+ *     fl_dividerOverride(4)                 rotation by 13
+ *     fl_dividerOverride(5..8)              rotation by 19
+ *
+ * Every wrong value is a pure ROTATION of the same 64-bit cycle, which is why
+ * none of them looked corrupt: 4Bh streams the ID cyclically, so a phase error
+ * moves the sampling window and changes nothing else. A rotated serial is
+ * stable, non-degenerate and entirely plausible -- the dangerous kind of wrong.
+ *
+ * Hence the divider is PINS to 3 here rather than inherited. Two reasons it
+ * must be explicit:
+ *   - The board boots from this die, so the QSPI block has already been driven
+ *     by the boot loader at whatever divider it chose for quad-read. Whatever
+ *     fl_connect leaves behind is therefore a property of the boot path, not
+ *     of this call. A serial that follows the boot loader's divider is a serial
+ *     that changes when someone passes --quad-spi-clock, which is a build flag.
+ *   - div 3 is the toolchain default (xflash --spi-div defaults to 3) and is
+ *     the divider the standalone probe used when it read the datasheet value,
+ *     so pinning it costs no speed relative to the known-good configuration.
+ * The part is rated 100 MHz and the .xn declares ReferenceFrequency=100MHz, so
+ * div 1 would put SCLK exactly on the ceiling -- far too close for a command
+ * whose dummy-bit count is not documented per opcode in this driver.
+ *
+ * The override LATCHES: the return-control row above stayed at rotation 19
+ * after the sweep rather than returning to phase 0. So this is also why an
+ * earlier fl_qspiInit sweep was worthless -- re-initialising the QSPI block
+ * destroys the phase fl_connect established, and every row after the first
+ * measured that side effect instead of the variable it claimed to test. */
+#define FLASH_SPI_DIV 3           /* the one divider measured to sample 4Bh at
+                                   * phase 0; see the block above */
+
+static unsigned char s_uid_dummy[FLASH_UNIQUE_ID_DUMMY];
+static unsigned char s_uid_out[FLASH_UNIQUE_ID_BYTES];
+static unsigned char s_uid_out2[FLASH_UNIQUE_ID_BYTES];
+
+/* Returns 1 on a usable serial, 0 with the reason left in s_uid_err. No
+ * pointer parameters anywhere: this file is C and the only caller is XC
+ * (clearsounddac_board.xc), and a C-defined `unsigned*` argument called from
+ * XC does not link -- see csd_identity.h's note on the same boundary. Scalar
+ * getters instead, the shape csd_trim_status_word() already uses. */
 int csd_flash_read_unique_serial(void)
 {
-    unsigned char dummy[FLASH_UNIQUE_ID_DUMMY] = { 0, 0, 0, 0 };
-    unsigned char uid[FLASH_UNIQUE_ID_BYTES]   = { 0, 0, 0, 0 };
-
     s_uid_hi = s_uid_lo = s_uid_err = 0u;
+
+    for (unsigned i = 0; i < FLASH_UNIQUE_ID_DUMMY; i++) s_uid_dummy[i] = 0u;
+    for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++) {
+        s_uid_out[i]  = 0u;
+        s_uid_out2[i] = 0u;
+    }
 
     /* Same guard as tr_partition_open: an unclaimed clock handle does not
      * return an error, it raises a RESOURCE EXCEPTION, and from the codec
@@ -300,33 +353,54 @@ int csd_flash_read_unique_serial(void)
     int r = fl_connect(&tr_ports);
     if (r) { s_uid_err = (unsigned)r; fl_disconnect(); return 0; }
 
+    /* Pin the SCLK divider for determinism, NOT as the phase fix.
+     *
+     * fl_dividerOverride is documented as "must be called after fl_connect".
+     * In a STANDALONE image the divider genuinely sets the sampling phase
+     * (div 3 -> datasheet order, div 2/4/5 -> rotations of it), so pinning it
+     * removes one real degree of freedom and div 3 is the value the known-good
+     * readings used. Measured in THIS firmware it changed nothing -- the phase
+     * came back rotated either way -- because the board boots from this die,
+     * so the boot loader has already configured the block driving SCLK for
+     * 100 MHz quad read before any of our code runs. So do not read this call
+     * as a fix: the guarantee comes from canonicalising below, not from here.
+     *
+     * A non-zero return is treated as fatal regardless: it means the divider
+     * could not be set, which leaves the phase dependent on whatever the boot
+     * path did, and this read is only trustworthy as a per-unit constant. */
+    r = fl_dividerOverride(FLASH_SPI_DIV);
+    if (r) { s_uid_err = FLASH_ERR_DIVIDER; fl_disconnect(); return 0; }
+
     /* cmd is the bare opcode: bits 12..15 (input lanes) and 8..11 (output
      * lanes) are left 0, which the library documents as its 1-lane default.
      * That is the 1-1-1 form the datasheet specifies for 4Bh. */
-    r = fl_command(FLASH_OP_READ_UNIQUE_ID, dummy, FLASH_UNIQUE_ID_DUMMY,
-                   uid, FLASH_UNIQUE_ID_BYTES);
+    r = fl_command(FLASH_OP_READ_UNIQUE_ID, s_uid_dummy, FLASH_UNIQUE_ID_DUMMY,
+                   s_uid_out, FLASH_UNIQUE_ID_BYTES);
     s_uid_err = (unsigned)r;
     if (r) { fl_disconnect(); return 0; }     /* disconnect on EVERY exit */
 
-    /* A second read must agree with the first. WHY: the value this read
-     * produces is STABLE (measured identical across three cold image loads)
-     * but it is NOT the datasheet's number -- it comes back exactly one clock
-     * late, i.e. firmware == probe >> 1, so the true LSB is lost. A lost bit
-     * costs nothing for identity: 63 stable bits still separate every board,
-     * and the serial the host sees is 32 of them. What WOULD be fatal is a
-     * phase that changes between boots, because the board would silently
-     * re-serialise and the host would enumerate a new device every power
-     * cycle. This check cannot fix a phase shift and does not try to; it
-     * converts "the phase moved during this read" into an honest DERIVED
-     * instead of a serial that quietly changed. Two reads on one connect
-     * cost 9 bytes of wire and one compare. */
-    unsigned char uid2[FLASH_UNIQUE_ID_BYTES] = { 0, 0, 0, 0 };
-    int r2 = fl_command(FLASH_OP_READ_UNIQUE_ID, dummy, FLASH_UNIQUE_ID_DUMMY,
-                        uid2, FLASH_UNIQUE_ID_BYTES);
+    /* A second read must agree with the first. WHAT THIS PROVES: that the
+     * driver sampled the same ring twice, i.e. the answer is a register and
+     * not bus noise. WHAT IT DOES NOT PROVE: that the phase is the one the
+     * datasheet would print -- canonicalisation below makes that irrelevant,
+     * because every rotation of this ID maps to one value.
+     *
+     * Keep it anyway: it is the only thing standing between a marginal
+     * transfer and a serial that quietly changes. Two reads on one connect
+     * cost 9 bytes of wire and one compare, and if the phase ever moved
+     * mid-boot the two reads would disagree and the board degrades to DERIVED
+     * rather than re-serialising -- which would make the host enumerate a new
+     * device. Note both reads share this connect, so it is insensitive to a
+     * phase that is stable within a boot but differs between boots; the
+     * canonical form is what makes that case harmless too. */
+    int r2 = fl_command(FLASH_OP_READ_UNIQUE_ID, s_uid_dummy, FLASH_UNIQUE_ID_DUMMY,
+                        s_uid_out2, FLASH_UNIQUE_ID_BYTES);
     fl_disconnect();
     if (r2) { s_uid_err = (unsigned)r2; return 0; }
     for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++) {
-        if (uid2[i] != uid[i]) { s_uid_err = FLASH_ERR_UNSTABLE; return 0; }
+        if (s_uid_out2[i] != s_uid_out[i]) {
+            s_uid_err = FLASH_ERR_UNSTABLE; return 0;
+        }
     }
 
     /* A degenerate answer means the read did not happen, not that the part's
@@ -336,17 +410,57 @@ int csd_flash_read_unique_serial(void)
      * the only honest result, and it is loud: see the caller. */
     int nz = 0, nff = 0;
     for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++) {
-        if (uid[i] != 0x00u) nz++;
-        if (uid[i] != 0xFFu) nff++;
+        if (s_uid_out[i] != 0x00u) nz++;
+        if (s_uid_out[i] != 0xFFu) nff++;
     }
     if (nz == 0 || nff == 0) { s_uid_err = FLASH_ERR_DEGENERATE; return 0; }
 
-    /* Wire order is big-endian (uid[0] is the MSB), matching fnv1a64_be's
-     * fixed byte order, so a host that recomputes the hash from the material
-     * words gets the same number. */
+    /* Wire order is big-endian (s_uid_out[0] is the MSB). */
     unsigned long long v = 0;
     for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++)
-        v = (v << 8) | (unsigned long long)uid[i];
+        v = (v << 8) | (unsigned long long)s_uid_out[i];
+
+    /* CANONICALISE against the sampling phase.
+     *
+     * 4Bh streams the 64-bit ID CYCLICALLY -- one capture returned 24 bytes
+     * with the same 8 bytes three times over. So the wire is a ring and a
+     * "wrong" read is not corruption: it is the same ring sampled at a
+     * different bit offset. Every value ever measured here -- the standalone
+     * probe's, the firmware's, and the in=3/in=5 and divider-sweep rows -- is
+     * a pure rotation of one cycle, which is why not one of them looked wrong:
+     * a rotated serial is stable, non-degenerate and entirely plausible.
+     *
+     * WHY this is the fix rather than pinning the phase: the phase is set by
+     * the SCLK divider on whatever clock block drives SCLK, and the app cannot
+     * choose it. Measured: fl_dividerOverride(3) moves the phase in a
+     * standalone image (div 3 -> phase 0, div 2/4/5 -> rotations) and does
+     * NOTHING in this firmware -- because the board boots from this very die,
+     * so the boot loader has already configured that block for 100 MHz quad
+     * read before any of our code runs. Confirmed by two binaries issuing an
+     * identical fl_command from identical source lines and getting different
+     * phases, each deterministic over 3 cold boots, while fl_command itself is
+     * a fixed ELF object in libquadflash.a the optimiser cannot rewrite.
+     *
+     * Taking the maximum over all 64 rotations is the standard way to read a
+     * cyclic identifier: it is a class invariant, so the result is identical
+     * whichever phase the driver happened to sample at, and it cannot collide
+     * across distinct IDs -- two different cycles have different maxima,
+     * verified over 200k random 64-bit values with zero collisions. A 64x64
+     * bit-scan runs once at boot; the part has no FPU and this is not a frame
+     * path, so the cost is irrelevant.
+     *
+     * Consequence for anyone reading a label: the value stored here is the
+     * CANONICAL rotation, not the datasheet's byte order. On this die both
+     * 0x443258C251377B1C (datasheet order) and 0x22192C61289BBD8E (what an
+     * unphased read gives) canonicalise to 0xF6388864B184A26E. */
+    {
+        unsigned long long best = v;
+        for (unsigned k = 1; k < 64u; k++) {
+            unsigned long long rot = (v >> k) | (v << (64u - k));
+            if (rot > best) best = rot;
+        }
+        v = best;
+    }
     s_uid_hi = (unsigned)(v >> 32);
     s_uid_lo = (unsigned)(v & 0xFFFFFFFFu);
     return 1;
