@@ -19,6 +19,7 @@ extern "C" {
 #include "csd_dsp.h"
 #ifdef CSD_GEN_EN
 #include "csd_gen.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
+#include "csd_trim_store.h" /* csd_trim_load_boot: L/R trim persistence */
 #endif
 #endif
 
@@ -174,6 +175,27 @@ static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client inter
  * term. Writes deduped at the register boundary (072111a). */
 static int      volHostDl8[2] = {0, 0};       /* digital term per channel, 8.8 dB */
 static int      volBtnDb8     = 0;            /* button offset, 8.8 dB */
+
+/* L/R trim (TODO items 3+4, directive 2026-11-01) is NOT applied here.
+ *
+ * It was, in the first cut: added to the host/button terms that feed the
+ * ES9219Q digital volume (regs 15/16) and the analog term (reg 3). Two
+ * measurements on the bench killed that design:
+ *   1. with MIXER=1, XUA_OUT_VOLUME_IN_MIXER is forced to 1, so lib_xua's
+ *      ep0 sends SET_MIX_OUT_VOL and the AudioHwRemote_Volume_Update branch
+ *      that reaches this code is never compiled. A verified host SET_CUR
+ *      moved the mixer multiplier (0x20000000 -> 0x0809bcce -> 0x20000000,
+ *      0 dB -> -12 dB -> 0 dB, rig/trim_path_probe.py) while regs 15/16 sat
+ *      at their boot values. Hooking these terms could never satisfy
+ *      "on every volume change" for the host path.
+ *   2. reg 15/16 resolution is 0.5 dB/LSB, so the mandated 0.125 dB grid is
+ *      physically inexpressible in the codec at all.
+ * The trim is therefore a multiplier applied in the mixer, post-mix, where
+ * the host multiplier already lives: csd_mix_apply_trim() in
+ * csd_gen_mailbox.c. It is standing, so it rides every volume change from
+ * either path (host: mixer multiplier; buttons: codec registers) without
+ * either path having to know about it. The codec terms below stay exactly
+ * as they were before the trim feature. */
 static unsigned volRegLastD[2]  = {0, 0};     /* dedupe for regs 15/16 */
 static unsigned volRegValidD[2] = {0, 0};
 static unsigned volRegLastA  = 0;             /* dedupe for reg 3 (analog) */
@@ -181,8 +203,10 @@ static unsigned volRegValidA = 0;
 
 static void vol_clamp_button(void)
 {
-    int hmax = (volHostDl8[0] > volHostDl8[1]) ? volHostDl8[0] : volHostDl8[1];
-    int hmin = (volHostDl8[0] < volHostDl8[1]) ? volHostDl8[0] : volHostDl8[1];
+    int c0 = volHostDl8[0];
+    int c1 = volHostDl8[1];
+    int hmax = (c0 > c1) ? c0 : c1;
+    int hmin = (c0 < c1) ? c0 : c1;
     if (volBtnDb8 + hmax > 0) {
         volBtnDb8 = -hmax;                        /* total pinned at    0 dB */
     }
@@ -274,6 +298,14 @@ static void vol_apply_all(client interface i2c_master_if i2c)
     const unsigned BTN_DEBOUNCE_TICKS = 5000000u;   /* 50 ms @ 100 MHz */
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
+
+    /* L/R trim (TODO item 3): adopt the persisted pair BEFORE anything can
+     * apply volume, so the first register write of the boot already carries
+     * the factory calibration. Load-then-SCPI-write ordering is by
+     * construction: SCPI cannot be served before USB enumerates, which is
+     * after this task entry. With the flash backend compiled out (no proven
+     * address yet) this is the explicit no-op that leaves 0 dB / 0 dB. */
+    csd_trim_load_boot();
 
     /* LED blink scheduler: 0.5 s phase grid (1 Hz blink) for the error states. */
     timer led_tmr;

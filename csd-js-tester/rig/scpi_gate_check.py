@@ -31,7 +31,8 @@ def answers(out):
     """A real reply: not an SCPI error and not a transport timeout."""
     return bool(out) and "-113" not in out and "TIMEOUT" not in out.upper()
 
-PROD = ["*IDN?", "DIAG:DSP:PRESet?", "MIXer:GAIN?", "GENerator:STATe?"]
+PROD = ["*IDN?", "DIAG:DSP:PRESet?", "MIXer:GAIN?", "GENerator:STATe?",
+        "VOLume:TRIM?"]   # trim is production calibration (TODO 3+4)
 DBG  = ["DEBUG:MIXer:FRAMES?", "DEBUG:I2S?", "DEBUG:GENerator:COUNts?"]
 OLD  = ["MIXer:FRAMES?", "DIAG:I2S?", "GENerator:COUNts?"]
 

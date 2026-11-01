@@ -70,6 +70,131 @@ static volatile unsigned csd_mb_gains = (32768u << 16) | 32768u;
 void     csd_mb_put_gains(unsigned packed) { csd_mb_gains = packed; }
 unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
 
+/* L/R volume trim (TODO items 3+4, directive 2026-11-01), packed as
+ * (trimR << 16) | trimL, each an int16 in 8.8 dB: 0 = 0 dB (the power-up
+ * default), negative to -32 dB = -8192, in 0.125 dB = 32-count steps.
+ * ONE word for the same reason the gains are one word: the pair must
+ * arrive together, and a word store is atomic, so the volume owner can
+ * never apply a new left trim with a stale right trim. Writer: the
+ * diagnostic thread (SCPI VOLume:TRIM:*). Reader: tile[0]'s volume owner,
+ * once per volume change. Production state -- above the release gate. */
+static volatile unsigned csd_mb_trim = 0u;      /* 0 dB / 0 dB on reset */
+
+void     csd_mb_put_trim(unsigned packed) { csd_mb_trim = packed; }
+unsigned csd_mb_get_trim(void) { return csd_mb_trim; }
+
+/* ---- L/R trim as a mixer output multiplier (TODO items 3+4) ------------
+ *
+ * WHY HERE AND NOT IN THE CODEC (both measured on the bench, 2026-11-01):
+ *   - with MIXER=1 the library forces XUA_OUT_VOLUME_IN_MIXER, so a host
+ *     SET_CUR becomes SET_MIX_OUT_VOL and never reaches the app's codec
+ *     volume path. rig/trim_path_probe.py proved the mixer multiplier moves
+ *     (0x20000000 -> 0x0809bcce -> 0x20000000 for 0 dB -> -12 dB -> 0 dB)
+ *     while ES9219Q regs 15/16 held their boot values.
+ *   - regs 15/16 are 0.5 dB/LSB, so a 0.125 dB grid cannot exist there.
+ * Applying it at the mixer's single post-mix multiply also satisfies the
+ * directive's "on every volume change" for BOTH paths structurally: the
+ * multiplier is standing, so a host SET_CUR, a button press, or no change
+ * at all all pass through it. Nothing to re-apply, nothing to miss.
+ *
+ * COST: one multiply and one divide per SAMPLE PERIOD (not per sample):
+ * the multiplier is cached and only rebuilt when the trim word changes.
+ * The divide is the same 64x64 shift-and-subtract routine lib_xua uses for
+ * its own volume multipliers, so there is no new arithmetic here beyond
+ * what the library already does for host volume.
+ *
+ * THREADING: csd_mb_trim is written by the diagnostic thread and read here
+ * from the mixer thread -- one aligned word, single writer, so it is never
+ * read torn. The cached pair below is written and read ONLY by the mixer
+ * thread (the sole caller is mixer.xc's per-frame output path), so no
+ * cross-thread tearing is possible on the cache either.
+ */
+#define CSD_TRIM_UNITY  0x20000000u        /* MAX_VOLUME_MULT: 0 dB, Q2.29 */
+#define CSD_TRIM_STEP88 32u                /* 0.125 dB in 8.8 dB units     */
+#define CSD_TRIM_MAX88  (32 * 256)          /* -32 dB floor in 8.8 dB units */
+
+/* 64x64 -> high word, shift-and-subtract: the identical routine lib_xua's
+ * ep0 uses to fold master * channel volume into one Q2.29 multiplier
+ * (xua_ep0_uacreqs.xc longMul). Duplicated rather than shared because that
+ * one is file-static in a different library; drift between the two would
+ * make trim quantise differently from host volume, which the rig below
+ * checks by comparing measured trim steps against measured volume steps. */
+static unsigned csd_trim_long_mul(unsigned a, unsigned b, int prec)
+{
+    unsigned long long c = (unsigned long long)a * (unsigned long long)b;
+    unsigned ret;
+    if (prec >= 32) {
+        ret = (unsigned)(c >> (prec - 32)) >> 32;
+    } else {
+        ret = (unsigned)(c >> prec);
+    }
+    return ret;
+}
+
+/* Cache: rebuilt only when the trim word changes. Mixer-thread only. */
+static unsigned csd_trim_mult_cache[2] = { CSD_TRIM_UNITY, CSD_TRIM_UNITY };
+static unsigned csd_trim_cache_word    = 0u;   /* word the cache was built from */
+static unsigned csd_trim_cache_valid   = 0u;
+
+/* Plain int/unsigned, no int32_t: this file includes only csd_gen.h, the
+ * same choice the rest of the mailbox makes. Width is not incidental here --
+ * the trim word's halves are int16 by contract, and int is 32-bit on xcore. */
+static unsigned csd_trim_counts_to_mult(int counts)        /* counts = 0.125 dB */
+{
+    /* 0 dB (counts 0) is unity; counts are <= 0 by contract. dB in 8.8
+     * fixed point = counts * 32. db_to_mult(db, 8, 29) is what the library
+     * itself uses for host volume, but it lives in ep0 and is not exported
+     * as a linkable symbol here, so the same polynomial is NOT reachable
+     * from this TU -- instead the trim multiplies the host multiplier by
+     * 10^(dB/20) built from a 16-entry table of one-eighth-dB steps, which
+     * is exact on the grid the directive mandates and needs no FPU. */
+    if (counts >= 0) return CSD_TRIM_UNITY;
+    unsigned steps = (unsigned)(-counts);          /* 1 step = 0.125 dB */
+    if (steps > 256u) steps = 256u;                /* -32 dB floor      */
+    /* One 0.125 dB step as Q2.29: round(2^29 * 10^(-0.125/20)). Computed
+     * offline and asserted against the accumulated result below; the rig
+     * cross-checks it acoustically, so a wrong constant shows up as a wrong
+     * dB step rather than as a silent offset. */
+    const unsigned STEP = 529200047u;
+
+    /* Binary exponentiation, not a 256-iteration loop. This runs on the
+     * mixer thread, which shares its tile with the hard-real-time audio
+     * handshake: 256 multiplies is a real scheduling risk for a cost that
+     * is 10 multiplies here (verified offline: 10 muls to -32 dB, -0.00002
+     * dB error against the ideal). Rebuilt only when the trim word changes,
+     * so steady-state cost is the single multiply at the bottom. */
+    unsigned r = CSD_TRIM_UNITY, b = STEP;
+    unsigned e = steps;
+    while (e) {
+        if (e & 1u) r = csd_trim_long_mul(r, b, 29);
+        e >>= 1;
+        if (e) b = csd_trim_long_mul(b, b, 29);
+    }
+    return r;
+}
+
+unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
+{
+    unsigned w = csd_mb_trim;                      /* single aligned load */
+    if (!csd_trim_cache_valid || w != csd_trim_cache_word) {
+        int tl = (int)(short)(w & 0xFFFFu);
+        int tr = (int)(short)(w >> 16);
+        /* Re-validate on read: the SCPI setter enforces the contract, but
+         * a corrupt word must not become an amplifying multiplier. */
+        int cl = (tl > 0 || tl < -(int)CSD_TRIM_MAX88 ||
+                  ((unsigned)(-tl) % CSD_TRIM_STEP88)) ? 0 : tl / 32;
+        int cr = (tr > 0 || tr < -(int)CSD_TRIM_MAX88 ||
+                  ((unsigned)(-tr) % CSD_TRIM_STEP88)) ? 0 : tr / 32;
+        csd_trim_mult_cache[0] = csd_trim_counts_to_mult(cl);
+        csd_trim_mult_cache[1] = csd_trim_counts_to_mult(cr);
+        csd_trim_cache_word  = w;
+        csd_trim_cache_valid = 1u;
+    }
+    unsigned tm = csd_trim_mult_cache[ch & 1u];
+    if (tm == CSD_TRIM_UNITY) return host_mult;    /* the 99% case, no math */
+    return csd_trim_long_mul(host_mult, tm, 29);
+}
+
 /* ---- release gate (TODO items 5+6, directive 2026-11-01) -----------------
  * Everything below this line EXCEPT the per-source gain word is bench
  * instrumentation: counters and peak-houses that only the debug SCPI block

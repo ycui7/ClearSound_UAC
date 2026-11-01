@@ -292,6 +292,24 @@ unsigned csd_mb_get_vol_val(void);
 void     csd_mb_put_gains(unsigned packed);
 unsigned csd_mb_get_gains(void);
 
+/* L/R trim pair (TODO items 3+4): packed (trimR<<16)|trimL, int16 each in
+ * 8.8 dB, 0..-8192 (0 dB .. -32 dB), 32-count (0.125 dB) steps. See
+ * csd_gen_mailbox.c for the single-word rationale. Production, not debug:
+ * this is manufacturing calibration, so it survives the release gate. */
+void     csd_mb_put_trim(unsigned packed);
+unsigned csd_mb_get_trim(void);
+
+/* L/R trim as a mixer output multiplier (TODO items 3+4, 2026-11-01).
+ * Returns the Q2.29 multiplier the mixer must apply to channel ch in
+ * addition to the host's own multOut[] value: 0x20000000 = 0 dB (the
+ * library's MAX_VOLUME_MULT), and the 0.125 dB grid down to -32 dB is
+ * representable here (it is NOT in the ES9219Q digital volume, which is
+ * 0.5 dB/LSB -- the reason trim lives in the mixer and not the codec).
+ * Recomputed only when the trim word changes, never per sample: XS3 has
+ * no FPU, so a per-frame log/exp would be a real cost on the tile that
+ * also runs the hard-real-time audio handshake. Callers: mixer.xc. */
+unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult);
+
 void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r);
 
 /* Mixer-frame proof-of-life: bump from mixer1's sample loop; read from the

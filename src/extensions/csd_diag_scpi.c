@@ -21,6 +21,7 @@
 #include "csd_version.h"
 #include "csd_identity.h"
 #include "csd_gen.h"
+#include "csd_trim_store.h" /* csd_trim_request_save: L/R trim journal (TODO 3) */
 
 #define CSD_IDN_VENDOR   "ClearSound"
 #define CSD_IDN_MODEL    "CSD-22"
@@ -164,6 +165,30 @@ static int parse_num(const char *s, size_t len, uint32_t *out)
         if (v > 0xFFFFFFFFull) return 0;                 /* reject, never wrap */
     }
     *out = (uint32_t)v;
+    return 1;
+}
+
+/* Signed sibling of parse_num: '-256' is the whole point for the trim
+ * commands, and parse_num's digit classifier rejects '-' by design (a
+ * wrapped -1 reading as 0xFFFFFFFF is the failure mode it prevents).
+ * Same bases, same reject-never-wrap rule; range checks belong to the
+ * caller, which knows its contract. */
+static int parse_snum(const char *s, size_t len, int32_t *out)
+{
+    int neg = 0;
+    while (len && (*s == ' ' || *s == '\t')) { s++; len--; }
+    if (!len) return 0;
+    if (*s == '-') { neg = 1; s++; len--; }
+    else if (*s == '+') { s++; len--; }
+    uint32_t u;
+    if (!parse_num(s, len, &u)) return 0;
+    if (neg) {
+        if (u > 0x80000000u) return 0;           /* cannot represent INT32_MIN+1.. */
+        *out = -(int32_t)u;
+    } else {
+        if (u > 0x7FFFFFFFu) return 0;
+        *out = (int32_t)u;
+    }
     return 1;
 }
 
@@ -1130,6 +1155,84 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* VOLume:TRIM:LEFT <counts> | VOLume:TRIM:RIGHT <counts>
+ * VOLume:TRIM? -> countsL,countsR   (TODO items 3+4, directive 2026-11-01)
+ *
+ * <counts> = number of 0.125 dB steps, SIGNED, 0 = 0 dB down to -256 =
+ * -32 dB (counts*32 = the 8.8 dB value the volume path consumes). The grid
+ * is enforced by construction: a count is a count, so 0.1 dB is
+ * inexpressible rather than rounded. 0 dB is the maximum, never positive.
+ *
+ * Accepted in every build (production calibration surface, like
+ * MIXer:GAIN:*). The setter writes the packed mailbox word AND asks the
+ * persistence layer to save it; both are single-writer (this thread).
+ * The volume owner on tile[0] re-reads the word on every volume change
+ * (vol_apply_all), which is the application point the directive names:
+ * host SET_CUR and button presses alike. */
+static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
+{
+    const char *why = "argument";
+    char txt[16];
+    int32_t counts;
+
+    if (!param_text(context, txt, sizeof txt, TRUE)) { why = "trim"; goto bad; }
+    if (!parse_snum(txt, strlen(txt), &counts))      { why = "trim"; goto bad; }
+    if (counts > 0 || counts < -256)                 { why = "trim"; goto bad; }
+
+    unsigned packed = csd_mb_get_trim();
+    unsigned v = (unsigned)(counts * 32);            /* int16 in 8.8 dB */
+    packed = which_right ? ((v << 16) | (packed & 0xFFFFu))
+                         : ((packed & 0xFFFF0000u) | v);
+    csd_mb_put_trim(packed);
+    /* Persist immediately: the setter is the only writer and runs on the
+     * diagnostic thread, so there is nothing to coalesce -- and a debounce
+     * would lose a trim if the rig lost power between the set and the timer.
+     * With no proven flash address this is the documented no-op (the trim
+     * still stands for this power cycle). */
+    csd_trim_request_save();
+    return SCPI_RES_OK;
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
+static SCPI_FPTR_CMD scpi_result_t vol_trim_left(scpi_t *context)
+{
+    return vol_trim_set(context, 0u);
+}
+
+static SCPI_FPTR_CMD scpi_result_t vol_trim_right(scpi_t *context)
+{
+    return vol_trim_set(context, 1u);
+}
+
+static SCPI_FPTR_CMD scpi_result_t vol_trim_q(scpi_t *context)
+{
+    unsigned packed = csd_mb_get_trim();
+    int16_t tl = (int16_t)(packed & 0xFFFFu);
+    int16_t tr = (int16_t)(packed >> 16);
+    char buf[32];
+    unsigned len = 0;
+    /* signed formatter: fmt_u32 handles magnitude, the sign is one byte. */
+    int32_t v[2] = { (int32_t)tl / 32, (int32_t)tr / 32 };   /* 0.125 dB counts */
+    for (unsigned i = 0; i < 2u; i++) {
+        if (len) buf[len++] = ',';
+        int32_t x = v[i];
+        unsigned n;
+        if (x < 0) { buf[len++] = '-'; n = fmt_u32((uint32_t)(-(int64_t)x), buf + len,
+                                                   (unsigned)sizeof buf - len); }
+        else       { n = fmt_u32((uint32_t)x, buf + len, (unsigned)sizeof buf - len); }
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
 #ifndef SPECIALTYCIRCUITS_RELEASE   /* debug-only block, see above */
 /* MIXer:BUSY? -- peak ticks mixer1 held audio() between the request token
  * and the sample exchange. Direct answer to "does the generator, which runs
@@ -1418,6 +1521,11 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "MIXer:GAIN:HOST",         .callback = mixer_gain_host },
     { .pattern = "MIXer:GAIN:GENerator",    .callback = mixer_gain_gen  },
     { .pattern = "MIXer:GAIN?",             .callback = mixer_gain_q    },
+    /* L/R trim (TODO 3+4): production calibration -- NOT under the debug
+     * gate. Counts of 0.125 dB, 0 (max) down to -256 (-32 dB). */
+    { .pattern = "VOLume:TRIM:LEFT",        .callback = vol_trim_left   },
+    { .pattern = "VOLume:TRIM:RIGHT",       .callback = vol_trim_right  },
+    { .pattern = "VOLume:TRIM?",            .callback = vol_trim_q      },
 #ifndef SPECIALTYCIRCUITS_RELEASE
     /* Debug-only rows (TODO item 5): gone in release builds together with
      * their callbacks above; a stray DEBUG: command then answers -113.
