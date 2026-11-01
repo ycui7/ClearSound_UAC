@@ -46,7 +46,7 @@ def scpi(cmd, timeout=8):
 
 
 def parse_dacpeak():
-    s = scpi("MIXer:DACPeak?")
+    s = scpi("DEBUG:MIXer:DACPeak?")
     try:
         v = [int(x) for x in s.split(",")]
     except ValueError:
@@ -60,7 +60,7 @@ def parse_dacpeak():
 
 def hwcfg():
     try:
-        return tuple(int(x) for x in scpi("MIXer:HWCfg?").split(","))
+        return tuple(int(x) for x in scpi("DEBUG:MIXer:HWCfg?").split(","))
     except ValueError:
         return None
 
@@ -81,7 +81,7 @@ def main():
     print(f"bring-up counter at boot: {h_boot}")
 
     # Arm the instrument, then the FIRST stream after this cold load.
-    scpi("MIXer:DACPeak:CLEAR")
+    scpi("DEBUG:MIXer:DACPeak:CLEAR")
     cap = os.path.join(tmp, "first.wav")
     EM.kill_orphan_arecords()
     p = subprocess.Popen(

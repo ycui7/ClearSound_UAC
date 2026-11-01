@@ -82,7 +82,7 @@ print("stream alive: pid", stream.pid)
 
 
 def counts(label):
-    c = scpi("GENerator:COUNts?")
+    c = scpi("DEBUG:GENerator:COUNts?")
     print(f"  counters [{label}]: {c}")
     return [int(x) for x in re.findall(r"-?\d+", c)]
 

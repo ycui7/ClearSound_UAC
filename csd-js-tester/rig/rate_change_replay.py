@@ -53,7 +53,7 @@ def scpi(cmd, timeout=8):
 
 def hwcfg():
     try:
-        return tuple(int(x) for x in scpi("MIXer:HWCfg?").split(","))
+        return tuple(int(x) for x in scpi("DEBUG:MIXer:HWCfg?").split(","))
     except ValueError:
         return None
 

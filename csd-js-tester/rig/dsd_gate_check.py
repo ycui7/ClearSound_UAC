@@ -242,7 +242,7 @@ time.sleep(0.2)
 
 
 def counts():
-    """GENerator:COUNts? -> (emit, sup_dsd, sup_dop, dsd_flag, dop_latched).
+    """DEBUG:GENerator:COUNts? -> (emit, sup_dsd, sup_dop, dsd_flag, dop_latched).
 
     THE PRIMARY INSTRUMENT. The mic path cannot judge injection at DoP
     rates: the EARS codec is S24_3LE at 48 kHz fixed, arecord -r 176400
@@ -253,7 +253,7 @@ def counts():
     scattering). The counters are taken on the audio thread at the gate's
     decision point: emitted / suppressed-by-dsd / suppressed-by-dop frames.
     """
-    t = scpi("GENerator:COUNts?")
+    t = scpi("DEBUG:GENerator:COUNts?")
     parts = t.split(",")
     if len(parts) != 5 or any(not x.isdigit() for x in parts):
         print(f"        COUNts? -> {t!r}")

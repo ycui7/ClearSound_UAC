@@ -155,7 +155,7 @@ print("  ", scpi("*IDN?"))
 g = nums(scpi("MIXer:GAIN?"))
 check(len(g) == 2 and g[0] == UNITY and g[1] == UNITY,
       "both source weights start at Q15 unity", str(g))
-v = (nums(scpi("GENerator:VOLume?")) + [0, 0, 0])[:3]
+v = (nums(scpi("DEBUG:GENerator:VOLume?")) + [0, 0, 0])[:3]
 udb = float("-inf") if v[2] <= 0 else 20 * math.log10(v[2] / float(1 << 29))
 check(abs(udb) < 0.5, "UAC output multiplier unity, untouched",
       f"{udb:.2f} dB")

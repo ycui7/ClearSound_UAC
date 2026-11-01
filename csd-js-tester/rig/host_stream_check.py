@@ -232,10 +232,10 @@ print("  injection path:", _path,
 print("\n== 1. gate: mixer multiplier at unity at boot, touched by nothing ==")
 if os.environ.get("CSD_SKIP_VOL_GATE") == "1":
     print("  SKIPPED via CSD_SKIP_VOL_GATE=1 (build has no "
-          "GENerator:VOLume?; boot state is still untouched by this rig)")
+          "DEBUG:GENerator:VOLume?; boot state is still untouched by this rig)")
     v = None
 else:
-    v = (nums(scpi("GENerator:VOLume?")) + [0, 0, 0])[:3]
+    v = (nums(scpi("DEBUG:GENerator:VOLume?")) + [0, 0, 0])[:3]
 db = 0.0 if v is None else (
     float("-inf") if v[2] <= 0 else 20 * math.log10(v[2] / MULT_UNITY))
 if v is not None:
@@ -319,10 +319,10 @@ try:
         sys.exit(f"arm rejected: {r!r}")
     st = nums(scpi("GENerator:STATe?"))
     check(bool(st) and st[0] == 1, "state shows SINE armed", str(st))
-    e0 = nums(scpi("GENerator:COUNts?"))[0]
+    e0 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
     t0 = time.monotonic()
     time.sleep(2.0)
-    e1 = nums(scpi("GENerator:COUNts?"))[0]
+    e1 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
     eps = (e1 - e0) / max(time.monotonic() - t0, 1e-6)
     check(abs(eps / RATE - 1.0) < 0.05, "emit/s == stream rate", f"{eps:.0f}")
     o2 = capture("sum")

@@ -49,7 +49,7 @@ def scpi(cmd, timeout=8):
 
 
 def nodes():
-    s = scpi("MIXer:DACPeak?")
+    s = scpi("DEBUG:MIXer:DACPeak?")
     try:
         v = [int(x) for x in s.split(",")]
     except ValueError:
@@ -80,7 +80,7 @@ def main():
     T = os.path.join(tmp, "t.wav"); EM.write_tone24(T, 4.0, 0.8, 0.8)
 
     def i2s():
-        s = scpi("DIAG:I2S?")
+        s = scpi("DEBUG:I2S?")
         try:
             v = [int(x) for x in s.split(",")]
             return dict(zip(("frames", "bad", "hi", "lo", "firstbad"), v)) if len(v) == 5 else None
@@ -89,8 +89,8 @@ def main():
 
     def leg(tag, wav, first=False):
         if first:
-            scpi("MIXer:DACPeak:CLEAR")
-            scpi("DIAG:I2S:CLEAR")
+            scpi("DEBUG:MIXer:DACPeak:CLEAR")
+            scpi("DEBUG:I2S:CLEAR")
         cap_wav = os.path.join(tmp, f"{tag}.wav")
         EM.kill_orphan_arecords()
         cap = subprocess.Popen(

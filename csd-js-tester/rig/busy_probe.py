@@ -54,14 +54,14 @@ def stream(wav, secs):
 
 
 def leg(tag, wav, armed):
-    scpi("MIXer:DACPeak:CLEAR")            # clears peaks AND busy peak
-    f0 = int(scpi("MIXer:FRAMES?") or 0)
+    scpi("DEBUG:MIXer:DACPeak:CLEAR")            # clears peaks AND busy peak
+    f0 = int(scpi("DEBUG:MIXer:FRAMES?") or 0)
     ff = stream(wav, SECS)
     time.sleep(SECS)
     ff.terminate(); ff.wait(timeout=10)
     time.sleep(0.3)
-    busy = int(scpi("MIXer:BUSY?") or 0)
-    f1 = int(scpi("MIXer:FRAMES?") or 0)
+    busy = int(scpi("DEBUG:MIXer:BUSY?") or 0)
+    f1 = int(scpi("DEBUG:MIXer:FRAMES?") or 0)
     frames = f1 - f0
     pct = 100.0 * busy / TICKS_PER_FRAME
     print(f"  {tag:26s} busy peak {busy:6d} ticks ({pct:5.1f}% of a frame)"

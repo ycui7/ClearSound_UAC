@@ -148,7 +148,7 @@ def snap_m1(tag):
     """DOPpRObe? lastL/lastR snapshots: alive host data at the mixer."""
     vals = []
     for _ in range(12):
-        q = nums(scpi("GENerator:DOPpRObe?"))
+        q = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
         if len(q) >= 4:
             vals.append((q[0], q[1], q[2], q[3]))
         time.sleep(0.05)
@@ -170,7 +170,7 @@ try:
     # healthy board (it did once). In production the equivalent node is the
     # UBM input, which M4's tap (post-frame hook buffer) covers instead:
     # skip M1, mark it, and let M2/M4 carry the chain.
-    probe = nums(scpi("GENerator:DOPpRObe?"))
+    probe = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
     if len(probe) >= 1 and probe[0] == 0:
         print("\n== M1 SKIPPED: production build (mixer-thread probe idle);"
               " M2 mirror + M4 post-DSP tap cover this node ==")

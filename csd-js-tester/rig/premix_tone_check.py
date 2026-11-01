@@ -108,7 +108,7 @@ if stream.poll() is not None:
 
 
 def vol_state():
-    v = nums(scpi("GENerator:VOLume?"))
+    v = nums(scpi("DEBUG:GENerator:VOLume?"))
     return (v + [0, 0, 0])[:3]
 
 
@@ -187,10 +187,10 @@ if r.upper().startswith("ERROR"):
     sys.exit(f"arm rejected: {r!r}")
 st = nums(scpi("GENerator:STATe?"))
 check(bool(st) and st[0] == 1, "state shows SINE armed", str(st))
-e0 = nums(scpi("GENerator:COUNts?"))[0]
+e0 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
 t0 = time.monotonic()
 time.sleep(3.0)
-e1 = nums(scpi("GENerator:COUNts?"))[0]
+e1 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
 eps = (e1 - e0) / (time.monotonic() - t0)
 check(abs(eps / 48000.0 - 1.0) < 0.05, "emit/s == stream rate", f"{eps:.0f}")
 

@@ -123,9 +123,9 @@ def capture(tag):
 
 
 print("boot:", scpi("GENerator:STATe?"), "| counts",
-      scpi("GENerator:COUNts?"), "| gain", scpi("MIXer:GAIN?"))
+      scpi("DEBUG:GENerator:COUNts?"), "| gain", scpi("MIXer:GAIN?"))
 scpi("GENerator:OFF")
-c0 = nums(scpi("GENerator:COUNts?"))
+c0 = nums(scpi("DEBUG:GENerator:COUNts?"))
 
 print("A0 no-stream baseline:")
 a0 = capture("a0")
@@ -144,7 +144,7 @@ if play.poll() is not None:
 
 print("zeros streaming:")
 ca = capture("zeros")
-c1 = nums(scpi("GENerator:COUNts?"))
+c1 = nums(scpi("DEBUG:GENerator:COUNts?"))
 
 # Decisive discrimination: keep streaming the SAME zeros and mute the codec.
 # Case C proved volume 0 drops the ACOUSTIC path >=30 dB; if the zeros bump

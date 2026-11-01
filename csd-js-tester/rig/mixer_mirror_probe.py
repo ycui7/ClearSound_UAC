@@ -149,7 +149,7 @@ def check(cond, what, extra=""):
 
 
 print("boot:", scpi("*IDN?"))
-print("gen:", scpi("GENerator:STATe?"), "| counts", scpi("GENerator:COUNts?"),
+print("gen:", scpi("GENerator:STATe?"), "| counts", scpi("DEBUG:GENerator:COUNts?"),
       "| gain", scpi("MIXer:GAIN?"))
 scpi("GENerator:OFF")
 
@@ -169,9 +169,9 @@ def play(wav):
 p = play(Z); time.sleep(2.0)
 if p.poll() is not None:
     sys.exit("ffmpeg died (zeros)")
-c0 = nums(scpi("GENerator:COUNts?"))
+c0 = nums(scpi("DEBUG:GENerator:COUNts?"))
 m = mirror("zeros")
-c1 = nums(scpi("GENerator:COUNts?"))
+c1 = nums(scpi("DEBUG:GENerator:COUNts?"))
 p.terminate()
 try:
     p.wait(timeout=10)
@@ -218,9 +218,9 @@ check(loud_db > -26.0,
 p = play(Z); time.sleep(2.0)
 if p.poll() is not None:
     sys.exit("ffmpeg died (zeros 2)")
-c0 = nums(scpi("GENerator:COUNts?"))
+c0 = nums(scpi("DEBUG:GENerator:COUNts?"))
 m = mirror("zeros2")
-c1 = nums(scpi("GENerator:COUNts?"))
+c1 = nums(scpi("DEBUG:GENerator:COUNts?"))
 p.terminate()
 try:
     p.wait(timeout=10)

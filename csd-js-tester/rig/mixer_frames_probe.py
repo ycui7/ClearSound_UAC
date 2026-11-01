@@ -26,7 +26,7 @@ def scpi(cmd, timeout=8):
 
 
 def frames():
-    s = scpi("MIXer:FRAMES?")
+    s = scpi("DEBUG:MIXer:FRAMES?")
     try:
         return int(s)
     except ValueError:
@@ -48,7 +48,7 @@ print(scpi("*IDN?"))
 
 f0 = frames()
 if f0 is None:
-    sys.exit("MIXer:FRAMES? unsupported -- rebuild with the counter")
+    sys.exit("DEBUG:MIXer:FRAMES? unsupported -- rebuild with the counter")
 print(f"frames before stream: {f0}")
 
 Z = os.path.join(os.environ.get("TMPDIR", "/tmp"), "mf_zeros.wav")

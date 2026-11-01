@@ -77,11 +77,11 @@ if r.upper().startswith("ERROR"):
 # number should be honest about what it includes.
 time.sleep(1.0)
 t0 = time.monotonic()
-a = nums(scpi("GENerator:COUNts?"))
+a = nums(scpi("DEBUG:GENerator:COUNts?"))
 t1 = time.monotonic()
 time.sleep(WINDOW)
 t2 = time.monotonic()
-b = nums(scpi("GENerator:COUNts?"))
+b = nums(scpi("DEBUG:GENerator:COUNts?"))
 t3 = time.monotonic()
 
 scpi("GENerator:OFF")

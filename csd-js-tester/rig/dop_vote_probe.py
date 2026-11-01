@@ -126,11 +126,11 @@ if play.poll() is not None:
     sys.exit(f"ffmpeg died rc={play.poll()} before measuring anything; "
              f"said: {txt!r}")
 time.sleep(0.5)
-f0 = nums(scpi("GENerator:DOPpRObe?"))
+f0 = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
 print(f"  probe (gen OFF): frames={f0[0]} matches={f0[1]} "
       f"lastL=0x{f0[2]:08x} lastR=0x{f0[3]:08x}")
 time.sleep(1.0)
-f1 = nums(scpi("GENerator:DOPpRObe?"))
+f1 = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
 rate_m = (f1[1] - f0[1]) / max(f1[0] - f0[0], 1)
 print(f"  delta over 1 s: frames +{f1[0]-f0[0]}, matches +{f1[1]-f0[1]}, "
       f"match rate {rate_m:.3f}")
@@ -140,11 +140,11 @@ r = scpi(f"GENerator:SINe {RATE},1000000,2130706432")
 if r.upper().startswith("ERROR"):
     sys.exit(f"arm rejected: {r!r}")
 time.sleep(0.3)
-g0 = nums(scpi("GENerator:DOPpRObe?"))
-e0 = nums(scpi("GENerator:COUNts?"))[0]
+g0 = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
+e0 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
 time.sleep(1.5)
-g1 = nums(scpi("GENerator:DOPpRObe?"))
-e1 = nums(scpi("GENerator:COUNts?"))[0]
+g1 = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
+e1 = nums(scpi("DEBUG:GENerator:COUNts?"))[0]
 rate_a = (g1[1] - g0[1]) / max(g1[0] - g0[0], 1)
 print(f"  probe (armed): frames +{g1[0]-g0[0]} matches +{g1[1]-g0[1]} "
       f"rate {rate_a:.3f}  lastL=0x{g1[2]:08x} lastR=0x{g1[3]:08x}")
@@ -163,7 +163,7 @@ try:
 except subprocess.TimeoutExpired:
     play.kill()
 time.sleep(1.0)                       # silence long enough to release
-rel = nums(scpi("GENerator:DOPpRObe?"))
+rel = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
 r = scpi(f"GENerator:SINe {RATE},1000000,2130706432")
 if r.upper().startswith("ERROR"):
     sys.exit(f"arm rejected (phase 3): {r!r}")
@@ -180,8 +180,8 @@ burst_emit = 0
 burst_probes = []
 t_end = time.monotonic() + 2.5
 while time.monotonic() < t_end:
-    e = nums(scpi("GENerator:COUNts?"))
-    pb = nums(scpi("GENerator:DOPpRObe?"))
+    e = nums(scpi("DEBUG:GENerator:COUNts?"))
+    pb = nums(scpi("DEBUG:GENerator:DOPpRObe?"))
     burst_probes.append((round(time.monotonic() - t_end, 2), e[0], pb))
     burst_emit = e[0]
     if pb[1] > 0 and e[0] >= burst_emit:      # suppressed and emit settled

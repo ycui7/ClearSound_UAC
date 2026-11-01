@@ -45,7 +45,7 @@ def scpi(cmd, timeout=8):
 
 
 def peak():
-    s = scpi("MIXer:DACPeak?")
+    s = scpi("DEBUG:MIXer:DACPeak?")
     try:
         v = [int(x) for x in s.split(",")]
     except ValueError:
@@ -59,7 +59,7 @@ def peak():
 
 def frames():
     try:
-        return int(scpi("MIXer:FRAMES?"))
+        return int(scpi("DEBUG:MIXer:FRAMES?"))
     except ValueError:
         return None
 
@@ -107,7 +107,7 @@ def main():
         return pr.returncode == 0
 
     def leg(tag, wav):
-        scpi("MIXer:DACPeak:CLEAR")
+        scpi("DEBUG:MIXer:DACPeak:CLEAR")
         f0 = frames()
         ok = play(wav)
         p = peak()

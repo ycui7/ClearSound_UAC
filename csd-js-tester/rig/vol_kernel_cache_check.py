@@ -95,7 +95,7 @@ if not XMOS:
 
 
 def vol_state():
-    v = nums(scpi("GENerator:VOLume?"))
+    v = nums(scpi("DEBUG:GENerator:VOLume?"))
     return (v + [0, 0, 0])[:3]
 
 
