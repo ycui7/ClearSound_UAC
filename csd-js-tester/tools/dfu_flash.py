@@ -65,11 +65,12 @@ def bring_up(vid, dfu_pid, attempts=12):
         dev = usb.core.find(idVendor=vid, idProduct=dfu_pid)
         if dev is None:
             time.sleep(0.5); last = "absent"; continue
-        try:
-            if dev.is_kernel_driver_active(0):
-                dev.detach_kernel_driver(0)
-        except usb.core.USBError:
-            pass                      # may be detached already, or not bound
+        for k in range(8):            # DFU mode exports one interface; detach
+            try:                       # defensively across it, not just intf 0
+                if dev.is_kernel_driver_active(k):
+                    dev.detach_kernel_driver(k)
+            except usb.core.USBError:
+                pass                   # not bound / no such interface
         try:
             dev.set_configuration()
             cfg = dev.get_active_configuration()
@@ -165,37 +166,26 @@ def main():
                 break
         if intf_no is None:
             sys.exit("runtime device exposes no DFU interface")
-        # Put the DFU state machine in a known state BEFORE detaching.
-        # Observed discriminator: when DETACH is accepted (no error) the
-        # device reboots into DFU and d018 appears at t+1.0 s and stays up.
-        # When DETACH returns EIO nothing happens at all -- that is a STALL,
-        # i.e. the SM is sitting in dfuERROR left over from a previous
-        # session, and DFU_DETACH is only handled from appIDLE/appDETACH
-        # (dfu.xc:178, :305, :587). A bus reset on the RUNTIME device clears
-        # it. Note the old recipe DID have the right idea -- lib_dfu arms
-        # FLASH_CONNECT on a bus reset seen in appDETACH (dfu.xc:190-196) --
-        # but it applied the reset to the d018 device AFTER entry, where a
-        # reset instead drops dfuIDLE back toward appIDLE.
+        # Release the DFU interface from the kernel BEFORE the class request.
+        # snd-usb-audio claims every interface of this composite device, and a
+        # class request (DFU_DETACH) to a kernel-owned interface is the EIO
+        # seen on the first attempts. Detaching it explicitly is what the
+        # 'runtime bus reset' hack was accidentally achieving.
         try:
-            rt.reset()
-            print("runtime bus reset issued (DFU SM cleared)")
-            time.sleep(1.0)
-            rt = usb.core.find(idVendor=a.vid, idProduct=a.pid)
-            if rt is None:
-                sys.exit("runtime device did not return after bus reset")
-            intf_no = None
-            for cfg_ in rt:
-                for i in cfg_:
-                    if i.bDescriptorType == 4 and i.bInterfaceClass == 0xFE \
-                       and i.bInterfaceSubClass == 1:
-                        intf_no = i.bInterfaceNumber
-                        break
-                if intf_no is not None:
-                    break
-            if intf_no is None:
-                sys.exit("no DFU interface after bus reset")
+            if rt.is_kernel_driver_active(intf_no):
+                rt.detach_kernel_driver(intf_no)
+                print(f"detached kernel driver from intf {intf_no}")
         except usb.core.USBError as e:
-            print(f"WARN: pre-detach bus reset failed ({e}); trying anyway")
+            print(f"WARN: kernel detach on intf {intf_no}: {e}")
+
+        # NO rt.reset(). A userspace bus reset on a device the audio driver
+        # still owns knocks the card out from under the kernel: after several
+        # such resets the XMOS entry vanished from /proc/asound/cards entirely
+        # while lsusb still listed 20b1:0018. So the 'SCPI died after DFU'
+        # symptom was this tool's doing, not a firmware regression -- the
+        # backtrace had already shown every task parked in its normal select
+        # loop. If the DFU state machine is genuinely wedged, recover it out of
+        # band (xgdb 'monitor reset', or a power cycle) and re-run.
         print(f"detaching runtime intf {intf_no} -> DFU mode")
         # EIO/ENODEV on DETACH is EXPECTED and is treated as SUCCESS. The
         # device reboots into DFU mode in the middle of the control transfer
