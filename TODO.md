@@ -5,23 +5,48 @@ one commit per item, acoustic gate (rig mix + mute) after each.
 
 ## Features (added 2026-11-01)
 
-Status: 1, 5, 6 done (2026-11-01); 2, 3, 4 open.
+Status: 1, 4, 5, 6 done (2026-11-01); 2 done (bench-verified); 3 done except
+persistence, which is written and deliberately compiled out -- see item 3.
 
 1. **DONE (2026-11-01) — Remove automute handling from ES9219Q code.** Do nothing to automute:
    leave the register at the DAC's default condition, whatever that is. No
    writes, no reads used for decisions, no "disable automute" boot writes.
-2. **Add DC as a function-generator output type.** New waveform mode next to
+2. **DONE (2026-11-01) — Add DC as a function-generator output type.** New waveform mode next to
    sine/square/noise/sweep/tone in the `GENerator:` SCPI family.
-3. **L/R channel trim with persistence.** A small volume difference between
+3. **PARTIAL (2026-11-01) — L/R channel trim with persistence.** A small volume difference between
    L and R must be supported and survive reboot:
    - persistent data store for the difference (survives power cycle),
    - two adjustments: `Vol_trim_L`, `Vol_trim_R`,
    - each: max 0 dB, step 0.125 dB, min −32 dB,
    - default both to 0 dB on reset/power-up if no valid persisted record
      found (validity = magic + checksum, not just non-erased flash).
-4. **Trim application point.** Whenever a volume change happens, each
+
+   Done and verified 2026-11-01: the two adjustments, the 0 dB max / 0.125 dB
+   step / -32 dB floor contract (rejected AND reported via the error queue),
+   and the 0 dB / 0 dB power-up default. Surface is production SCPI
+   (`VOLume:TRIM:LEFT|RIGHT|?`), gated into the release command list.
+   `csd_trim_store.c` implements the journal (append-only 32 B slots in one
+   4 KiB sector, magic + version + length + checksum, newest-valid-wins).
+
+   OPEN — persistence is COMPILED OUT. `CSD_TRIM_FLASH_ADDR` is undefined, so
+   nothing writes flash and the load always reports "no valid persistence
+   found", leaving 0 dB / 0 dB. Trim therefore does NOT yet survive a reboot.
+   Reason: an unproven write address in the boot flash is unrecoverable
+   without a jig (the boot ROM scans for XEF blocks). Needs an audited free
+   sector, the quadflash clock block, and a reboot-survival rig leg.
+4. **DONE (2026-11-01) — Trim application point.** Whenever a volume change happens, each
    `Vol_trim_*` is added to its respective L/R channel — the trim rides on
    every volume update, host SET_CUR and button paths alike.
+
+   Applied as a standing Q2.29 multiplier folded into the mixer's
+   output-volume multiplier (`csd_mix_apply_trim`, lib_xua 0c69d009), at both
+   output-volume sites. Standing rather than re-applied is what makes "on
+   every volume change" true by construction: there is no path that bypasses
+   it. Verified: LEFT -8 dB measured -7.99/-8.00 dB with the opposite channel
+   at +0.01/-0.01 (interleaved A/B/A/B), and one 0.125 dB step resolved at
+   -0.117 dB — a step the ES9219Q cannot produce (0.5 dB/LSB), which is also
+   the proof the multiplier is the right site. Not in the codec: with MIXER=1
+   a host SET_CUR never reaches the app's codec volume path.
 5. **DONE (2026-11-01) — Move debug-only SCPI under `DEBUG:` with a compile gate.** Many commands
    were added purely for bench debugging. Group them under a `DEBUG:` prefix
    and put them behind a selective compile flag so release packages do not
