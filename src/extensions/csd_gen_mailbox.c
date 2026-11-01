@@ -124,6 +124,219 @@ static volatile unsigned csd_mb_gains = (32768u << 16) | 32768u;
 void     csd_mb_put_gains(unsigned packed) { csd_mb_gains = packed; }
 unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
 
+/* Mixer-frame proof. The case-A ladder says the artifact grows with our
+ * features (factory +1.0 dB, production +5.8, mixer-no-gen +4..7, mixer+gen
+ * +11.7), but every measurement so far inferred mixer activity from audio.
+ * This counter answers it directly: the mixer thread bumps it once per frame
+ * it produces. Zero while a stream plays means mixer1 never ran, so NOTHING
+ * in the mixer path (injection, gains, doMix, output volume) can be the
+ * source and the search moves elsewhere. Writer: mixer thread. */
+static volatile unsigned csd_mb_mix_frames;
+
+/* How many host-node words were non-zero, and the very first non-zero word
+ * seen. Distinguishes a bounded prefill burst (tens of frames) from a
+ * continuous leak (millions) -- they are different bugs with different
+ * fixes, and the peak alone cannot tell them apart. */
+static volatile unsigned csd_mb_host_nonzero[2];
+static volatile unsigned csd_mb_host_first_word[2];
+static volatile unsigned csd_mb_host_first_seen;   /* frame index, 0 = never */
+
+void csd_mb_note_mix_frame(void)
+{
+    csd_mb_mix_frames++;
+}
+
+/* ---- tile[1] resource utilisation, audio-wait window --------------------
+ *
+ * Question this answers: the generator runs INSIDE mixer1, which shares
+ * tile[1] with the hard-real-time audio() task (main.xc puts both in the one
+ * usb_audio_io par on XUA_AUDIO_IO_TILE_NUM). Does our per-frame work eat
+ * into the audio thread's sample-period budget?
+ *
+ * The window is the one audio() actually blocks in: mixer1 takes t0 right
+ * after inuint(c_audio) (which unblocks audio()) and t1 after
+ * GiveSamplesToDevice/GetSamplesFromDevice. audio()'s I2S port deadline
+ * covers exactly this span -- xua_audiohub.xc:192 says so: "If mixer1 misses
+ * the sample period, this port timestamp..." Overflowing 12500 ticks at
+ * 48 kHz (600 MHz fast mode) is a missed sample period, which is ALSO the
+ * mechanism that keeps the decouple in outUnderflow and re-emits the token
+ * word -- so this instrument tests the tile-contention theory of case A
+ * directly, and it reports the instrument's own cost because it is inside
+ * the guarded block. Peak, not mean: a deadline failure is a max event. */
+static volatile unsigned csd_mb_mix_busy_peak;
+
+void csd_mb_note_mix_busy(unsigned delta_ticks)
+{
+    if (delta_ticks > csd_mb_mix_busy_peak) {
+        csd_mb_mix_busy_peak = delta_ticks;
+    }
+}
+
+unsigned csd_mb_get_mix_busy_peak(void) { return csd_mb_mix_busy_peak; }
+
+/* I2S-deadline monitor: LRCLK port-timestamp deltas from AudioHub_MainLoop
+ * (budget 32 ticks). Called by the audio() task. Counting only -- an
+ * ecallf/assert version exists in lib_xua (-DENABLE_I2S_TIMING_CHECK) and
+ * is fatal, which is useless on a board you still need to measure. */
+static volatile unsigned csd_mb_i2s_frames;
+static volatile unsigned csd_mb_i2s_bad;      /* delta != 32                */
+static volatile unsigned csd_mb_i2s_worst_hi; /* max delta                  */
+static volatile unsigned csd_mb_i2s_worst_lo; /* min delta                  */
+static volatile unsigned csd_mb_i2s_bad_first; /* frame index of first bad  */
+
+void csd_mb_note_i2s_delta(unsigned short delta_ticks)
+{
+    unsigned d = delta_ticks;
+    csd_mb_i2s_frames++;
+    if (d != 32u) {
+        csd_mb_i2s_bad++;
+        if (csd_mb_i2s_bad_first == 0u)
+            csd_mb_i2s_bad_first = csd_mb_i2s_frames;
+    }
+    if (d > csd_mb_i2s_worst_hi) csd_mb_i2s_worst_hi = d;
+    if (csd_mb_i2s_worst_lo == 0u || d < csd_mb_i2s_worst_lo)
+        csd_mb_i2s_worst_lo = d;
+}
+
+void csd_mb_get_i2s(unsigned *frames, unsigned *bad, unsigned *hi,
+                    unsigned *lo, unsigned *first_bad)
+{
+    if (frames)     *frames     = csd_mb_i2s_frames;
+    if (bad)        *bad        = csd_mb_i2s_bad;
+    if (hi)         *hi         = csd_mb_i2s_worst_hi;
+    if (lo)         *lo         = csd_mb_i2s_worst_lo;
+    if (first_bad)  *first_bad  = csd_mb_i2s_bad_first;
+}
+
+void csd_mb_clear_i2s(void)
+{
+    csd_mb_i2s_frames = csd_mb_i2s_bad = csd_mb_i2s_bad_first = 0u;
+    csd_mb_i2s_worst_hi = 0u; csd_mb_i2s_worst_lo = 0u;
+}
+
+void csd_mb_note_host_nonzero(unsigned ch, int sample, unsigned frame)
+{
+    if (ch >= 2u) return;
+    if (sample == 0) return;
+    csd_mb_host_nonzero[ch]++;
+    if (csd_mb_host_first_seen == 0u) {
+        csd_mb_host_first_seen = frame;
+        csd_mb_host_first_word[0] = (unsigned)sample;
+        csd_mb_host_first_word[1] = 0u;   /* filled by the other channel */
+    } else if (csd_mb_host_first_word[1] == 0u) {
+        csd_mb_host_first_word[1] = (unsigned)sample;
+    }
+}
+
+void csd_mb_get_host_nonzero(unsigned ch, unsigned *count, unsigned *first_word)
+{
+    /* Null tolerated for either out-param: readers that only want the count
+     * must not have to invent scratch storage (and must not fault here). */
+    unsigned c = 0u, w = 0u;
+    if (ch < 2u) { c = csd_mb_host_nonzero[ch]; w = csd_mb_host_first_word[ch]; }
+    if (count)      *count      = c;
+    if (first_word) *first_word = w;
+}
+
+/* THE case-A instrument: peak |sample| of the words actually handed to the
+ * DAC, measured at the GiveSamplesToDevice node itself.
+ *
+ * Why here and not via the USB capture mirror: in a mixer build the capture
+ * stream is assembled by mixer1's GiveSamplesToHost, not by
+ * UserBufferManagement, so the DIAG_LOOP mirror that answered this question
+ * on the production build reads pure silence here -- measured: a real 1 kHz
+ * tone streamed gave -144 dBFS at the mirror. This hook has no capture path
+ * and no mic in the loop: it reports the numbers the I2S/DAC path is given,
+ * which is exactly the fork the investigation needs --
+ *   peak ~ 0 while the mic hears -46 dBFS  -> the words are clean; the codec
+ *                                            makes the tone when AudioHwConfig
+ *                                            re-pokes it at stream open;
+ *   peak large on a zeros stream           -> a module upstream is writing
+ *                                            content; follow it back.
+ * Absolute values, saturating unsigned max; clear with MIXer:DACPEAK:CLEAR. */
+/* FOUR nodes on the DAC-bound path, so one measurement localises where a
+ * non-zero word first appears instead of only proving one exists:
+ *   0 HOST    value received from the host (GetSamplesFromHost)
+ *   1 POSTMIX value read out of ptr_samples in do_output_volume_control
+ *   2 VOLUME  after the volume MAC, the value stored to vol_ctld
+ *   3 DAC     the word handed over in GiveSamplesToDevice
+ * A frozen word first visible at node 3 means the DAC node itself; first at
+ * 1 means ptr_samples; first at 0 means the host exchange. */
+/* 4 sample nodes on the path + node 4 = the TRIGGER TOKEN mixer1 receives
+ * from the audio thread. That token is echoed back by the decouple as the
+ * OUT-prefill sample (handle_audio_request: underflowSample = inuint(...)
+ * then outuint underflow), so it is the provenance candidate for the frozen
+ * 0x96969696 (lib_xua's native-DSD underflow word, xua_audiohub.xc:228). */
+/* 7 nodes. The first five are mixer-thread nodes (host receive .. the word
+ * handed to the audio thread). 5 and 6 bracket the DSP on the AUDIO thread:
+ *
+ *   5 PREDSP  sampsFromUsbToAudio as the audio() task received it
+ *   6 POSTDSP the same buffer after csd_dsp_frame() -- i.e. the words that
+ *             actually go out over I2S.
+ *
+ * This was the blind spot: with MIXER enabled the sample chain is
+ *   host -> decouple -> mixer1 (injection, volume) -> audio() -> csd_dsp_frame
+ *       -> I2S
+ * so peaking only inside mixer.xc proves nothing about what the codec is
+ * given -- the FIR runs downstream of every mixer-side node. rig/
+ * first_stream_regdiff.py found ES9219Q reg 0x43 (DPLL_NUM) = 0xFE during
+ * the tone and 0x00 when clean: the chip is correcting an actively moving
+ * input, which is a symptom of real content on the wire, not a silent one.
+ * Writer for 5/6: audio() task. */
+#define CSD_DACNODES 7
+static volatile unsigned csd_mb_dac_peak[2][CSD_DACNODES];
+/* Raw bit pattern of the word that produced each peak. Magnitude alone was
+ * not enough: an instrument bug (abs built from the sign BIT, not the sign
+ * extension) made a frozen NEGATIVE word look like a full-scale pop, and the
+ * pattern is what distinguishes uninitialised RAM (ASCII-looking, e.g.
+ * 0x69696970), a stale buffer, and real signal. */
+static volatile unsigned csd_mb_dac_peak_word[2][CSD_DACNODES];
+
+void csd_mb_note_dac_sample(unsigned ch, unsigned node, int sample)
+{
+    /* |x| without a branch: mask = sign EXTENSION, not the sign BIT -- an
+     * earlier version used 0x80000000 as the mask and reported negative
+     * samples as 2^32-|x|, which made a frozen NEGATIVE word look like a
+     * full-scale pop. Magnitude alone is not evidence; the raw word is. */
+    unsigned mask = (unsigned)sample >> 31;
+    unsigned a = ((unsigned)sample + mask) ^ mask;
+    if (ch < 2u && node < CSD_DACNODES && a > csd_mb_dac_peak[ch][node]) {
+        csd_mb_dac_peak[ch][node] = a;
+        csd_mb_dac_peak_word[ch][node] = (unsigned)sample;
+    }
+}
+
+void csd_mb_clear_dac_peak(void)
+{
+    /* Same arm/disarm window as the peaks: MIXer:DACPeak:CLEAR starts BOTH
+     * the word-peak window and the tile[1] busy window (MIXer:BUSY?), so a
+     * rig leg measures a matched interval on both instruments. */
+    csd_mb_mix_busy_peak = 0u;
+    for (unsigned c = 0; c < 2u; c++) {
+        csd_mb_host_nonzero[c] = 0u;
+        csd_mb_host_first_word[c] = 0u;
+        for (unsigned n = 0; n < CSD_DACNODES; n++) {
+            csd_mb_dac_peak[c][n] = 0u;
+            csd_mb_dac_peak_word[c][n] = 0u;
+        }
+    }
+    csd_mb_host_first_seen = 0u;
+}
+
+unsigned csd_mb_get_host_first_frame(void) { return csd_mb_host_first_seen; }
+
+unsigned csd_mb_get_dac_peak(unsigned ch, unsigned node)
+{
+    return (ch < 2u && node < CSD_DACNODES) ? csd_mb_dac_peak[ch][node] : 0u;
+}
+
+unsigned csd_mb_get_dac_peak_word(unsigned ch, unsigned node)
+{
+    return (ch < 2u && node < CSD_DACNODES) ? csd_mb_dac_peak_word[ch][node] : 0u;
+}
+
+unsigned csd_mb_get_mix_frames(void) { return csd_mb_mix_frames; }
+
 void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r)
 {
     csd_mb_dop_frames++;

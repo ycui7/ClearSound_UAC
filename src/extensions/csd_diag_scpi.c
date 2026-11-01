@@ -1085,6 +1085,136 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* MIXer:BUSY? -- peak ticks mixer1 held audio() between the request token
+ * and the sample exchange. Direct answer to "does the generator, which runs
+ * INSIDE mixer1 on tile[1], steal budget from the hard-real-time audio()
+ * task sharing that tile": 12500 ticks is a whole 48 kHz sample period, so
+ * anything approaching it means a missed I2S deadline -- the same missed
+ * deadline that keeps the decouple pre-filling with the token word. Read it
+ * either side of a streamed-zero file; compare gen-on vs gen-off builds. */
+static SCPI_FPTR_CMD scpi_result_t mixer_busy_q(scpi_t *context)
+{
+    char buf[10];
+    unsigned n = fmt_u32(csd_mb_get_mix_busy_peak(), buf, (unsigned)sizeof buf);
+    if (n == 0) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
+/* MIXer:FRAMES? -- mixer1's sample-loop counter (csd_gen_mailbox.c).
+ * The case-A ladder (factory +1.0 dB, production +5.8, mixer-no-gen +4..7,
+ * mixer+gen +11.7) puts the artifact in our mixer-side work, but nothing so
+ * far has PROVED mixer1 runs during a plain host stream. Read it either side
+ * of a streamed-zero file: a delta of ~48k frames/s proves the loop ran;
+ * zero means every mixer-path theory is void. */
+static SCPI_FPTR_CMD scpi_result_t mixer_frames_q(scpi_t *context)
+{
+    char buf[10];
+    unsigned n = fmt_u32(csd_mb_get_mix_frames(), buf, (unsigned)sizeof buf);
+    if (n == 0) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
+/* MIXer:DACPeak? -> peak|L|,peak|R| over the words handed to the DAC since
+ * the last CLEAR (absolute values of the int32 samples; 2^31 = full scale).
+ * MIXer:DACPeak:CLEAR arms the window. See csd_mb_note_dac_sample for why
+ * this node, and not the USB capture mirror, is the only digital view of the
+ * DAC-bound stream in a mixer build. */
+static SCPI_FPTR_CMD scpi_result_t mixer_dacpeak_q(scpi_t *context)
+{
+    /* -> per node (0 host, 1 post-mix, 2 post-volume, 3 DAC hand-off):
+     *    peakL, peakR, wordL, wordR   => 16 values.
+     * Magnitudes alone are not evidence (an abs bug once made a frozen
+     * negative word look like a pop); the raw word identifies the source:
+     * ASCII-looking patterns = uninitialised static RAM, a stale buffer, or
+     * real signal. */
+    /* 7 nodes x (peakL,peakR,wordL,wordR) then nzL,nzR,firstFrame,wL,wR.
+     * 5/6 bracket the DSP on the audio thread -- the only instrumented view
+     * of the I2S-bound words in a MIXER build (csd_dsp.xc). Keep the count
+     * in sync with CSD_DACNODES in csd_gen_mailbox.c: the rig parses the
+     * fixed 33-value layout. */
+    char buf[33 * 10 + 32];
+    unsigned len = 0;
+    unsigned nzc = 0, nzr = 0, wl = 0, wr = 0, ff = csd_mb_get_host_first_frame();
+    csd_mb_get_host_nonzero(0u, &nzc, &wl);
+    csd_mb_get_host_nonzero(1u, &nzr, &wr);
+    for (unsigned node = 0; node < 7u; node++) {
+        const unsigned v[4] = { csd_mb_get_dac_peak(0u, node),
+                                csd_mb_get_dac_peak(1u, node),
+                                csd_mb_get_dac_peak_word(0u, node),
+                                csd_mb_get_dac_peak_word(1u, node) };
+        for (unsigned i = 0; i < 4u; i++) {
+            if (len) buf[len++] = ',';
+            unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+            if (n == 0) {
+                SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                return SCPI_RES_ERR;
+            }
+            len += n;
+        }
+    }
+    {
+        const unsigned tail[5] = { nzc, nzr, ff, wl, wr };
+        for (unsigned i = 0; i < 5u; i++) {
+            if (len) buf[len++] = ',';
+            unsigned n = fmt_u32(tail[i], buf + len, (unsigned)sizeof buf - len);
+            if (n == 0) {
+                SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                return SCPI_RES_ERR;
+            }
+            len += n;
+        }
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t mixer_dacpeak_clear(scpi_t *context)
+{
+    (void)context;
+    csd_mb_clear_dac_peak();
+    return SCPI_RES_OK;
+}
+
+/* DIAG:I2S? -> frames,bad,worstHi,worstLo,firstBad
+ * LRCLK port-timestamp stats from the audio() task (budget = 32 ticks).
+ * concurrent_fork.py proved the DAC-bound WORDS are silence while the mic
+ * hears +25 dB on the first stream; if the timing delta is also clean, the
+ * digital side of the board is fully exonerated and the case-A tone is
+ * being generated inside the codec at stream open. */
+static SCPI_FPTR_CMD scpi_result_t diag_i2s_q(scpi_t *context)
+{
+    char buf[5 * 10 + 4];
+    unsigned f = 0, b = 0, hi = 0, lo = 0, fb = 0, len = 0;
+    csd_mb_get_i2s(&f, &b, &hi, &lo, &fb);
+    const unsigned v[5] = { f, b, hi, lo, fb };
+    for (unsigned i = 0; i < 5u; i++) {
+        if (i) buf[len++] = ',';
+        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t diag_i2s_clear(scpi_t *context)
+{
+    (void)context;
+    csd_mb_clear_i2s();
+    return SCPI_RES_OK;
+}
+
 /* GENerator:DOPpRObe? -> frames,matches,lastL,lastR
  *
  * Why the 4-vote DoP latch takes 27 509 frames on the MIXER artifact where
@@ -1196,6 +1326,14 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:OFF",           .callback = gen_off     },
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
     { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
+    /* MIXer:FRAMES? -- mixer1 sample-loop counter (proof of life; see
+     * csd_gen_mailbox.c). Registers with MIXer:GAIN:* as the mixer group. */
+    { .pattern = "MIXer:FRAMES?",           .callback = mixer_frames_q },
+    { .pattern = "MIXer:BUSY?",             .callback = mixer_busy_q },
+    { .pattern = "MIXer:DACPeak?",          .callback = mixer_dacpeak_q },
+    { .pattern = "MIXer:DACPeak:CLEAR",     .callback = mixer_dacpeak_clear },
+    { .pattern = "DIAG:I2S?",               .callback = diag_i2s_q },
+    { .pattern = "DIAG:I2S:CLEAR",          .callback = diag_i2s_clear },
     { .pattern = "GENerator:VOLume?",       .callback = gen_volume_q },
     { .pattern = "GENerator:DOPpRObe?",     .callback = gen_dop_probe_q },
     { .pattern = "MIXer:GAIN:HOST",         .callback = mixer_gain_host },

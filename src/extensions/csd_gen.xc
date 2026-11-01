@@ -450,10 +450,12 @@ void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode)
      * latch corrupts DSD. */
     int match = CSD_GEN_DOP_MARK((unsigned)hostL) &&
                 CSD_GEN_DOP_MARK((unsigned)hostR);
-    /* Telemetry for the late-latch investigation (see csd_gen_mailbox.c).
-     * Cheap: two increments and two stores per frame on a thread whose frame
-     * work is a MAC per channel. Remove once attributed. */
-    csd_mb_note_dopvote((unsigned)match, (unsigned)hostL, (unsigned)hostR);
+    /* The late-latch telemetry that used to sit here is REMOVED as attributed
+     * (rig/dop_vote_probe.py: the 27,509-frame burst was ffmpeg startup
+     * latency, match rate 1.000, self-converging). It was four cross-TU
+     * accesses per frame on a hard real-time thread for a question that is
+     * closed -- and the case-A ladder (factory +1.0 -> mixer+gen +11.7) says
+     * per-frame work on this thread is not free. */
     if (match) {
         csd_gen_mix_leave = 0;
         if (csd_gen_mix_votes < 4 && ++csd_gen_mix_votes >= 4)

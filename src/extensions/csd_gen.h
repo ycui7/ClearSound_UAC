@@ -292,6 +292,38 @@ void     csd_mb_put_gains(unsigned packed);
 unsigned csd_mb_get_gains(void);
 
 void csd_mb_note_dopvote(unsigned match, unsigned l, unsigned r);
+
+/* Mixer-frame proof-of-life: bump from mixer1's sample loop; read from the
+ * diagnostic thread. See csd_gen_mailbox.c for why it exists. */
+void     csd_mb_note_mix_frame(void);
+unsigned csd_mb_get_mix_frames(void);
+/* Peak ticks mixer1 held the audio() thread between the request token and
+ * the sample exchange (see csd_mb_note_mix_busy). 12500 ticks = one 48 kHz
+ * sample period. Clear with MIXer:DACPeak:CLEAR. */
+unsigned csd_mb_get_mix_busy_peak(void);
+/* Node ids for the peak instrument (csd_mb_note_dac_sample). Shared because
+ * nodes 0..4 are written by lib_xua's mixer1 and 5..6 by the audio thread's
+ * UserBufferManagement. Keep in sync with CSD_DACNODES in the mailbox. */
+#define CSD_NODE_HOST    0u   /* received from host (GetSamplesFromHost)      */
+#define CSD_NODE_POSTMIX 1u   /* read from ptr_samples post-mix/pre-volume    */
+#define CSD_NODE_VOLUME  2u   /* after the output-volume MAC                  */
+#define CSD_NODE_DAC     3u   /* the word mixer1 handed to the audio thread   */
+#define CSD_NODE_TOKEN   4u   /* trigger token from the audio thread          */
+#define CSD_NODE_PREDSP  5u   /* audio() received, before csd_dsp_frame       */
+#define CSD_NODE_POSTDSP 6u   /* after csd_dsp_frame: the I2S-bound words     */
+
+void     csd_mb_note_dac_sample(unsigned ch, unsigned node, int sample);
+void     csd_mb_note_host_nonzero(unsigned ch, int sample, unsigned frame);
+void     csd_mb_get_host_nonzero(unsigned ch, unsigned *count,
+                                 unsigned *first_word);
+unsigned csd_mb_get_host_first_frame(void);
+void csd_mb_note_i2s_delta(unsigned short delta_ticks);
+void csd_mb_get_i2s(unsigned *frames, unsigned *bad, unsigned *hi,
+                    unsigned *lo, unsigned *first_bad);
+void csd_mb_clear_i2s(void);
+void     csd_mb_clear_dac_peak(void);
+unsigned csd_mb_get_dac_peak(unsigned ch, unsigned node);
+unsigned csd_mb_get_dac_peak_word(unsigned ch, unsigned node);
 void csd_mb_get_dopvote(unsigned *frames, unsigned *match,
                         unsigned *lastL, unsigned *lastR);
 

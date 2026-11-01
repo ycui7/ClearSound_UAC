@@ -600,7 +600,24 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * advance, from the mixer thread, so the rig reads the same
      * emit/sup_dsd/sup_dop triple either way. */
 #endif
+#if defined(CSD_GEN_EN) && defined(CSD_GEN_INSTRUMENT) && defined(MIXER) && (MIXER)
+    /* Node 5: the words as the audio() task RECEIVED them, before the FIR.
+     * Paired with node 6 after csd_dsp_frame(). These two are the only
+     * instrumented view of the I2S-bound words in a MIXER build: the mixer
+     * nodes (0..4) stop upstream of this thread, and the USB capture mirror
+     * (DIAG_LOOP) is dead here because mixer1's GiveSamplesToHost owns the
+     * capture path. rig/first_stream_regdiff.py found ES9219Q reg 0x43
+     * (DPLL_NUM) moving to 0xFE exactly while the case-A tone is audible and
+     * 0x00 when clean -- the chip is correcting an actively moving input, so
+     * whether REAL content reaches I2S has to be measured at the source. */
+    csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
+    csd_mb_note_dac_sample(1u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[1]);
+#endif
     csd_dsp_frame(sampsFromUsbToAudio);
+#ifdef CSD_GEN_EN
+    csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);
+    csd_mb_note_dac_sample(1u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[1]);
+#endif
 #ifdef CSD_DSP_DIAG_RAW
     sampsFromAudioToUsb[1] = sampsFromUsbToAudio[0];
 #endif
@@ -614,5 +631,18 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     sampsFromAudioToUsb[1] = sampsFromUsbToAudio[1];
 #endif
 }
+
+#else /* !PCM_DSP_EN ------------------------------------------------------ */
+
+/* The diagnostic surface must exist in EVERY build, including bisect builds
+ * that compile the engine out: csd_diag_scpi.c references these four
+ * unconditionally, and a link error there costs a full rebuild cycle just to
+ * ask a question. Semantics are honest, not fake: with no engine there is no
+ * preset (0 = OFF, the boot value anyway), no stream mode seen, no DoP latch.
+ * Declared in csd_dsp.h; the guarded half above owns the real state. */
+unsigned csd_dsp_diag_dsd_flag(void)    { return 0u; }
+unsigned csd_dsp_diag_dop_latched(void) { return 0u; }
+unsigned csd_dsp_get_preset(void)       { return 0u; }
+void csd_dsp_set_preset(unsigned p)     { (void) p; }
 
 #endif // PCM_DSP_EN
