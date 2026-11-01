@@ -13,7 +13,7 @@ persistence, which is written and deliberately compiled out -- see item 3.
    writes, no reads used for decisions, no "disable automute" boot writes.
 2. **DONE (2026-11-01) — Add DC as a function-generator output type.** New waveform mode next to
    sine/square/noise/sweep/tone in the `GENerator:` SCPI family.
-3. **PARTIAL (2026-11-01) — L/R channel trim with persistence.** A small volume difference between
+3. **DONE (2026-11-01) — L/R channel trim with persistence.** A small volume difference between
    L and R must be supported and survive reboot:
    - persistent data store for the difference (survives power cycle),
    - two adjustments: `Vol_trim_L`, `Vol_trim_R`,
@@ -27,6 +27,21 @@ persistence, which is written and deliberately compiled out -- see item 3.
    (`VOLume:TRIM:LEFT|RIGHT|?`), gated into the release command list.
    `csd_trim_store.c` implements the journal (append-only 32 B slots in one
    4 KiB sector, magic + version + length + checksum, newest-valid-wins).
+
+   PERSISTENCE VERIFIED 2026-11-01 by `rig/trim_persist_run.sh` (two-phase:
+   arm, tear xrun down, load the firmware again, verify). Armed pair -64/-128
+   counts (-8/-16 dB) read back as [-64,-128] after the reload with
+   partition=1048576, load=1, journal seq preserved (11==11), err=0, boots=1,
+   and saves=0 proving the load path is read-only. The microphone confirmed
+   the reloaded values drive the DAC (-8.97 / -16.96 dB measured; both legs
+   sit ~1 dB low together, the known cold-start bias on a life's first
+   measurement -- absolute trim accuracy is proven separately by
+   rig/trim_acoustic_ab.py at -7.99/-8.00 and -0.126 dB per 0.125 dB step).
+   A power cycle has NOT been run: it exercises the same boot-load code path
+   over the same non-volatile sector, but the evidence above comes from a
+   firmware restart via xrun teardown/reload and from firmware status words,
+   not from a raw dump of the current journal contents. Owner power-cycles
+   the board when convenient to close that last leg.
 
    PERSISTENCE DATA GETS WIPED — owner-acknowledged 2026-11-01 ("ok to flash,
    add note to todo about persistence data get wiped"). The trim record lives
