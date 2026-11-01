@@ -46,10 +46,25 @@ PY = f"{APP}/.venv/bin/python"
 
 POLL_MS = int(sys.argv[1]) if len(sys.argv) > 1 else 25
 CAP_D = 3                       # arecord duration, seconds
-# Watch list: the DPLL word + everything that could plausibly tag a lock.
+# Watch list, keyed to es9219q.h (do NOT trust label memory -- an earlier
+# version of this list called 0x08 the automute status; it is GPIO12_CONFIG):
+#   0x42/0x43/0x44/0x45  DPLL correction words (they CHASE continuously in
+#                        both legs: measured duty 38-59% first vs 41-54%
+#                        steady, i.e. no discriminator -- see the verdict)
+#   0x48  READ_INPUT_SEL_N_AUTOMUTE_STAT  bits 7..4 = OC_R, OC_L,
+#         AUTOMUTE_R, AUTOMUTE_L  (what the csd_AudioHwConfig banner prints)
+#   0x49  READ_LOCK_STATUS  MQA_LOCK / PLL_LOCK / ASRC
+#   0x1B/0x1C/0x1A/0x0E/0x0F  clock/ASRC config, static so far
+#   0x07  filter shape + system mute, 0x48's companion on the mute path
+# The surviving hypothesis is chip-internal generation: seven firmware nodes
+# prove the I2S-bound words are zero, yet the mic hears the artifact, and it
+# is first-stream-only. If the analog stage were swinging hard we would see
+# OC_/AUTOMUTE_ bits in 0x48 -- measured 0x01/0x02 (bits 4..7 clear) on BOTH
+# legs, so no over-current and no automute event.
 # FULL=1 scans the whole readback set from first_stream_regdiff.
 REGS = ([0x43, 0x42, 0x44, 0x45, 0x1B, 0x1C, 0x18, 0x19, 0x1A, 0x0E, 0x07,
-         0x48, 0x49] if not os.environ.get("FULL") else
+         0x48, 0x49]
+        if not os.environ.get("FULL") else
         list(range(0x00, 0x41)) + [0x43, 0x47, 0x48, 0x49, 0x51, 0x53])
 
 

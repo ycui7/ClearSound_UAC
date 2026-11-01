@@ -88,18 +88,26 @@ def peaks(db, freqs, n=8, floor_db=-90.0):
     return [(float(freqs[k]), float(db[k])) for k in idx]
 
 
-def coherence(path, sr_target=48000):
-    """Same-bin amplitude in three consecutive 1 s windows. A coherent tone
-    from a free-running NCO keeps a constant amplitude; random/hash content
-    wanders by several dB. Returns max-min spread over windows at the peak."""
+def coherence(path, freq=1000.0):
+    """Amplitude of ONE specified bin in three consecutive 1 s windows. A
+    coherent tone from a free-running NCO keeps constant amplitude; random
+    or hashed content wanders by several dB.
+
+    The bin MUST be named. An earlier version argmaxed the spectrum -- which
+    locks onto the 29.3 Hz bench line that sits at ~-3 dBFS in EVERY leg
+    (A0, artifact, reference: mic diaphragm / room, not ours). Argmax then
+    'measured the room' and produced a false incoherent verdict for the
+    artifact. Coherence is only meaningful at the artifact's own frequency,
+    which for case A is the rig tone at 1 kHz."""
     x, sr = load_wav(path)
     n = len(x)
     seg = n // 3
     vals = []
     for i in range(3):
         db, fr = spectrum(x[i * seg:(i + 1) * seg, 0], sr)
-        pk = int(np.argmax(db[2:])) + 2
-        vals.append(float(db[pk]))
+        k = int(round(freq / sr * len(db)))
+        k = max(1, min(len(db) - 2, k))
+        vals.append(float(max(db[k - 1:k + 2])))
     return vals
 
 
@@ -129,6 +137,15 @@ def leg(tag, ff_args=None, secs=CAP_D):
         tops = "  ".join(f"{f:8.1f}Hz@{d:+6.1f}" for f, d in pk[:5])
         print(f"    [{nm}] floor {fl:6.1f}  tops: {tops}")
     return cap, out
+
+
+def peak_at(path, freq):
+    """dBFS of the strongest bin within +/-15 Hz of `freq`, L channel."""
+    x, sr = load_wav(path)
+    db, fr = spectrum(x[:, 0], sr)
+    k = int(round(freq / sr * len(db)))
+    k = max(1, min(len(db) - 2, k))
+    return float(max(db[k - 1:k + 2]))
 
 
 def main():
@@ -162,31 +179,51 @@ def main():
     cap3, r3 = leg("ref-tone", zeros)
     scpi("GENerator:OFF")
 
-    print("\n== coherence of the artifact peak (3 x 1s windows, L) ==")
-    for tag, cap in (("first", cap1), ("second", cap2), ("ref-tone", cap3)):
-        v = coherence(cap)
+    print("\n== coherence AT 1 kHz (3 x 1s windows, L) ==")
+    coh = {}
+    for tag, cap in (("a0", cap0), ("first", cap1), ("second", cap2),
+                     ("ref-tone", cap3)):
+        v = coherence(cap, 1000.0)
+        coh[tag] = v
         print(f"  {tag:9s} {v[0]:+6.1f} {v[1]:+6.1f} {v[2]:+6.1f}   "
               f"spread {max(v) - min(v):4.1f} dB")
 
     print("\n== read ==")
-    pk1 = r1["L"][0][0] if r1["L"][0] else None
-    if pk1 is None:
-        print("  no peak above -90 dBFS on the first stream: gate should pass "
-              "this boot")
-        return 0
-    f1, d1 = pk1
-    ref = r3["L"][0][0] if r3["L"][0] else (0.0, 0.0)
-    print(f"  first-stream peak {f1:.2f} Hz @ {d1:+.1f} dBFS   "
-          f"(reference NCO {ref[0]:.2f} Hz @ {ref[1]:+.1f})")
-    if abs(f1 - 1000.0) < 3.0 and (d1 - r1["L"][1]) > 12:
-        print("  -> single line AT the rig tone frequency: treat as ARMED "
-              "generator content; audit the boot path for an arm we missed.")
-    elif abs(f1 - 12000.0) < 60.0 or abs(f1 - 6000.0) < 30.0:
-        print("  -> half/quarter-rate line: periodic bit pattern (DSD word) "
-              "as PCM payload, not a sine.")
+    # Judge the ARTIFACT at the rig tone (1 kHz), not at argmax: the 29.3 Hz
+    # bench line dominates the raw spectrum in every leg and hijacked the
+    # verdict last time. Coherence at 1 kHz is the discriminator that
+    # separates an armed NCO (constant bin, like the reference leg) from
+    # hashed/prefill content (wandering bin).
+    f0a, d0 = (r0["L"][0][0] if r0["L"][0] else (0.0, -200.0))
+    f1, d1 = (r1["L"][0][0] if r1["L"][0] else (0.0, -200.0))
+    v1 = coh["first"]
+    tone1 = peak_at(cap1, 1000.0)
+    tone0 = peak_at(cap0, 1000.0)
+    tone2 = peak_at(cap2, 1000.0)
+    toneref = peak_at(cap3, 1000.0)
+    print(f"  1 kHz bin:  a0 {tone0:+.1f}   first {tone1:+.1f}   "
+          f"second {tone2:+.1f}   ref-NCO {toneref:+.1f} dBFS")
+    print(f"  first-stream coherence at 1 kHz: spread "
+          f"{max(v1) - min(v1):.1f} dB "
+          f"(reference NCO spread {max(coh['ref-tone']) - min(coh['ref-tone']):.1f} dB)")
+    artifact = tone1 - max(tone0, tone2)
+    if artifact < 6.0:
+        print("  -> NO artifact this boot at 1 kHz -- consistent with the "
+              "measured intermittency of case A. Re-run N boots; do not "
+              "attribute a quiet boot.")
+        return 2
+    spread = max(v1) - min(v1)
+    if abs(tone1 - toneref) < 6.0 and spread < 3.0:
+        print("  -> COHERENT line at 1 kHz: an armed NCO-like source. The "
+              "generator boots OFF (mode 0), so hunt a boot-path arm.")
+    elif spread >= 3.0:
+        print("  -> INCOHERENT at its own frequency: prefill/underflow-word "
+              "content or analog transient, not an armed generator. Pair "
+              "with MIXer:DACPeak? at 7 nodes on the same boot.")
     else:
-        print(f"  -> clock-derived peak at {f1:.1f} Hz: PLL/switching domain; "
-              "check ratios of 24.576 MHz / 12.288 MHz / 48k.")
+        print(f"  -> tone-like but level differs from reference by "
+              f"{tone1 - toneref:+.1f} dB: single-shot burst (unmute ramp / "
+              "chip transient).")
     return 0
 
 
