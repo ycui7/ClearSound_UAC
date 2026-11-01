@@ -14,9 +14,13 @@ AGENTS.md release rule.
   `SPECIALTYCIRCUITS_RELEASE`
 - release .xe md5 `c8a210cd51cf1c4216e17849c72dbcd7` (4 788 528 B container)
 - debug   .xe md5 `440784a7e5f3d9c392057ea213fbcb04` (4 864 724 B container)
-- version stamp compiled into both: `2026.11.01.85-346fe14` (read back over
-  SCPI before and after every stage — gates are credited to a stamp, never to
-  a remembered flash event)
+- version stamps differ between the two builds, because `tools/gen_version.sh`
+  runs at **configure** time and the counter advances once per build
+  (`CMakeLists.txt:39-45`): release = `2026.11.01.85-346fe14`, debug =
+  `2026.11.01.86-346fe14`. Read the stamp back over SCPI before crediting any
+  gate to a build -- do not assume both builds share one stamp, and do not
+  trust the tag number as the stamp. The shipped DFU bin comes from the
+  **release** .xe (`.85`).
 - board: revBB, built with `src/ClearSoundDac.xn`, byte-identical to
   `archive_revBB/ClearSoundDac_revBB.xn` (the mvp pin map silences the DAC on
   this rig at ~-87 dBFS while SCPI still answers — AGENTS.md WARN)
