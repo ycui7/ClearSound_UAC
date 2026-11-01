@@ -17,3 +17,6 @@ tools/dsp/_vfd_out/
 # would make every build look dirty and churn the repo on every compile
 /src/extensions/csd_version.h
 /.build_count
+
+# xflash byproducts written next to the .xn during flash runs
+/src/extensions/image0*.bin
