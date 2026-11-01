@@ -437,12 +437,21 @@ static void vol_apply_all(client interface i2c_master_if i2c)
 
                     if (cmd == AUDIOHW_CMD_TRIM_LOAD)
                     {
-                        csd_trim_boot_load();
-                        c[i] <: 1u;               /* ran; status says how */
+                        /* Reply the pair, do not publish it: the mailbox
+                         * static is tile[1] local and only tile[1] may write
+                         * it. Status is a second word so packed==0 (the
+                         * reset default) cannot read as a failure. */
+                        unsigned packed = 0u;
+                        int st = csd_trim_boot_load(&packed);
+                        c[i] <: packed;
+                        c[i] <: (unsigned) st;
                     }
                     else if (cmd == AUDIOHW_CMD_TRIM_SAVE)
                     {
-                        unsigned ok = (unsigned) csd_trim_journal_now();
+                        unsigned packed = 0u;      /* plain local: channel
+                                                    * operators take a variable */
+                        c[i] :> packed;
+                        unsigned ok = (unsigned) csd_trim_journal_now(packed);
                         c[i] <: ok;
                     }
                     else

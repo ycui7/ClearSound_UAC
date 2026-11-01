@@ -46,6 +46,11 @@
 #define NO_INLINE_MIDI_SELECT_HANDLER
 #include "xua_midi.h"
 #include "csd_diag.h"
+#include "csd_gen.h"          /* csd_mb_put_trim: boot applies the loaded pair.
+                               * Prototypes only -- the generator's ~20 KB of
+                               * tables live in csd_gen_core.h, which stays
+                               * exclusive to csd_gen.xc; clearsounddac_board.xc
+                               * and csd_dsp.xc already include this header. */
 
 /* ---- receive: USB-MIDI events -> SCPI bytes ---------------------------- */
 /* Manufacturer id is a single 0x7E (MMA Educational & Research). Deliberately
@@ -264,7 +269,18 @@ void csd_diag_midi(
      * and blocking here is legitimate because this core is not the audio
      * path -- the same argument csd_diag_regs.xc makes for REGister:READ?.
      * No earlier is possible from this core, and no later is safe. */
-    (void) csd_diag_trim_load();
+    /* The loaded pair is applied HERE, on this tile: csd_mb_trim is a
+     * tile[1]-local static and this task runs on tile[1], so this is the one
+     * place with the right to write it. The tile[0] store reads flash and
+     * hands the value back as a scalar (csd_diag_regs.xc). Publishing it on
+     * tile[0] instead was the persistence bug: flash verified good, mixer
+     * still 0 dB. csd_gen_mailbox.c's THREADING note names this task as the
+     * trim's writer -- now literally true. */
+    {
+        unsigned trim_packed = 0u;
+        (void) csd_diag_trim_load(&trim_packed);
+        csd_mb_put_trim(trim_packed);
+    }
 
     while (1) {
         int is_ack = 0;

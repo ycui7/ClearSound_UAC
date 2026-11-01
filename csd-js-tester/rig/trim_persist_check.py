@@ -254,9 +254,14 @@ if st:
     ck(st["seq"] == seq0, f"journal seq survived the reload ({st['seq']} == {seq0})")
     ck(st["err"] == 0, f"no flash error (err={st['err']})")
     ck(st["boots"] >= 1, f"boot load ran on this life (boots={st['boots']})")
-    ck(st["saves"] == saves0,
-       f"save_count did NOT grow across the reload ({st['saves']} == {saves0}) "
-       f"-- the load path must never journal")
+    # saves/boots are RAM counters, NOT journaled -- they reset every boot, so
+    # comparing them to the arm pass (which measured a different life) is
+    # meaningless and failed spuriously (arm 4, reload 0). The invariant that
+    # matters in THIS life: boot adopted from flash and journalled nothing.
+    # A boot that wrote would advance saves past 0 and grow the on-chip seq.
+    ck(st["saves"] == 0,
+       f"boot journaled nothing this life (saves={st['saves']}) -- the load "
+       f"path must be read-only")
 else:
     FAILS.append("no status after reload: cannot tell persistence from default")
 

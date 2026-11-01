@@ -51,21 +51,36 @@ unsigned csd_diag_reg_writes(void)  { return reg_writes; }
  *
  * Plain locals on every send/receive: nothing relies on the channel
  * operators accepting an expression or a struct member. */
-int csd_diag_trim_load(void)
+/* LOAD returns the packed pair rather than applying it. The store runs on
+ * tile[0] and csd_mb_trim is a tile[1]-local static: an earlier revision had
+ * the store call csd_mb_put_trim() itself, which wrote tile[0]'s copy and
+ * left the mixer reading 0 dB forever (measured: flash verified good,
+ * read-back [0,0], mic -0.95 dB instead of -8). The value now travels the
+ * channel and the CALLER on tile[1] applies it, so there is exactly one
+ * writer of the mailbox -- the tile that owns it.
+ *
+ * Two reply words (packed, status) because 0 is a legitimate packed value:
+ * a single word could not tell "adopted the reset default" from "failed". */
+int csd_diag_trim_load(unsigned *packed_out)
 {
-    unsigned ok;
+    unsigned packed = 0u, st = 0u;
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_LOAD;
-        uc_audiohw_diag :> ok;
+        uc_audiohw_diag :> packed;
+        uc_audiohw_diag :> st;
     }
-    return ok ? 1 : 0;
+    if (packed_out) *packed_out = packed;
+    return st ? 1 : 0;
 }
 
-int csd_diag_trim_save(void)
+/* SAVE takes the pair as an argument for the same reason: tile[0] must never
+ * read the tile[1] mailbox to find out what to journal. */
+int csd_diag_trim_save(unsigned packed)
 {
     unsigned ok;
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_SAVE;
+        uc_audiohw_diag <: packed;
         uc_audiohw_diag :> ok;
     }
     return ok ? 1 : 0;

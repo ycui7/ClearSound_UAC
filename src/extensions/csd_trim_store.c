@@ -74,7 +74,8 @@
  */
 #include <stdint.h>
 #include "csd_trim_store.h"
-#include "csd_gen.h"          /* csd_mb_get_trim / csd_mb_put_trim */
+/* deliberately NOT csd_gen.h: this file must not read or write the tile[1]
+ * mailbox statics -- see csd_trim_journal_now / csd_trim_boot_load. */
 
 #include <xs1.h>
 #include <platform.h>         /* PORT_SQI_CS / _SCLK / _SIO from the .xn */
@@ -330,18 +331,23 @@ static unsigned tr_scan(const unsigned char *sec, unsigned len,
  * the proxy, and re-runnable on demand (VOLume:TRIM:LOAD) so a rig can
  * re-read flash without restarting the firmware.
  *
- * Publishes into the same mailbox word the SCPI writer uses, so the mixer
- * reads the persisted pair through the path it already uses -- there is no
- * second route into the volume multiply that persistence could diverge from.
+ * Returns the pair to the CALLER and does not publish it. The mixer reads
+ * only csd_mb_trim, a tile[1]-local static, and this file runs on tile[0]:
+ * an earlier revision had the store call csd_mb_put_trim() itself, which
+ * wrote tile[0]'s private copy, so flash verified good (partition=1048576,
+ * load=1, seq=4, err=0) while the DAC stayed at 0 dB and the mic measured
+ * -0.95 dB instead of -8 dB. tile[1] applies it -- see csd_diag_midi.xc --
+ * so the mixer still has exactly one writer and one route into the multiply.
  *
  * Boot ordering is safe by construction rather than by luck: the mixer only
  * ever multiplies HOST audio, which cannot arrive until USB has enumerated
  * -- host-side seconds after this load completes. A host cannot hear the
  * difference between "0 dB" and "not loaded yet". */
-void csd_trim_boot_load(void)
+int csd_trim_boot_load(unsigned *packed_out)
 {
     static unsigned char sector[4096];
     unsigned res = 0;
+    *packed_out = 0u;                             /* documented reset default */
 
     unsigned len = sizeof sector;
     if (tr_read_sector(sector, len, &res)) {
@@ -351,25 +357,28 @@ void csd_trim_boot_load(void)
         tr_next_slot = fill;
         tr_st_load_n++;
         if (best) {
-            unsigned packed = (((unsigned)(uint32_t)best->trim_r_88) << 16)
-                            |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
-            csd_mb_put_trim(packed);              /* boot adopts the pair */
+            *packed_out = (((unsigned)(uint32_t)best->trim_r_88) << 16)
+                        |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
             tr_st_seq    = seq;
             tr_st_loaded = 1u;
         } else {
-            csd_mb_put_trim(0u);                  /* documented reset default */
             tr_st_loaded = 2u;                    /* connected, nothing valid */
         }
     } else {
-        csd_mb_put_trim(0u);                      /* default on ANY failure */
         tr_st_loaded = 3u;
         tr_st_err    = res;
     }
+    /* Caller (tile[1]) applies *packed_out to its OWN mailbox. Returning the
+     * load status lets it report what happened without a second round trip. */
+    return (int) tr_st_loaded;
 }
 
-/* Journal the current pair. Returns 1 on success and 0 on any flash failure;
- * the failure code is latched either way, so the caller's reply is honest. */
-int csd_trim_journal_now(void)
+/* Journal the given pair. The value is an ARGUMENT, never read from the
+ * mailbox: this runs on tile[0] and the mailbox static is tile[1] local, so
+ * reading it here journalled zeros while seq happily climbed. Returns 1 on
+ * success and 0 on any flash failure; the failure code is latched either way,
+ * so the caller's reply is honest. */
+int csd_trim_journal_now(unsigned packed)
 {
     static unsigned char sector[4096];
     unsigned res = 0;
@@ -402,9 +411,12 @@ int csd_trim_journal_now(void)
         rewrote = 1;
     }
 
-    unsigned packed = csd_mb_get_trim();          /* CURRENT value, which is
-                                                   * what the caller just
-                                                   * wrote -- see the header */
+    /* packed arrives as an ARGUMENT (see header). Reading the mailbox here
+     * was the bug: csd_mb_trim is a plain tile-local static and this function
+     * runs on tile[0], so it read tile[0]'s never-written copy and journalled
+     * 0,0 forever -- seq climbed, the value did not. Measured 2026-11-01:
+     * flash wrote and read correctly (partition=1048576, load=1, seq=4,
+     * err=0) while the DAC stayed at 0 dB. */
     /* Newest seq FROM THE SECTOR, not from our cached idea of it. If the
      * boot load failed (or never ran) tr_st_seq is 0 while the sector may
      * hold seq 7 -- starting at 1 would write a record that tr_scan later

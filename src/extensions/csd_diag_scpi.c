@@ -1198,7 +1198,7 @@ static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
      * A rejected journal is NOT silently swallowed -- the trim still stands
      * for this power cycle, and the error queue reports that it did not
      * persist, so "set but not saved" can never look like "saved". */
-    if (!csd_diag_trim_save()) {
+    if (!csd_diag_trim_save(packed)) {
         /* libscpi has no hardware-failure code; EXECUTION_ERROR is what this
          * file already uses for an operation that did not happen. The rig
          * reads SYST:ERR? to tell "saved" from "set but not journalled". */
@@ -1291,10 +1291,15 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_status_q(scpi_t *context)
  * only thing that proves survival across a boot. */
 static SCPI_FPTR_CMD scpi_result_t vol_trim_load(scpi_t *context)
 {
-    if (!csd_diag_trim_load()) {
+    unsigned packed = 0u;
+    if (!csd_diag_trim_load(&packed)) {
         SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
         return SCPI_RES_ERR;
     }
+    /* Applied HERE, on tile[1] -- the tile whose local static csd_mb_trim
+     * actually is. The store on tile[0] cannot publish this; see
+     * csd_diag_regs.xc. Same writer as the SCPI set path above. */
+    csd_mb_put_trim(packed);
     return SCPI_RES_OK;
 }
 

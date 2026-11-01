@@ -89,8 +89,10 @@ int csd_diag_reg_read(unsigned reg, unsigned *val);
 /* L/R trim persistence proxy (csd_diag_regs.xc): forwards to the tile[0]
  * codec server, which is the only task allowed to drive PORT_SQI_*. See
  * csd_trim_store.h for why they cannot be called directly from this core. */
-int csd_diag_trim_load(void);
-int csd_diag_trim_save(void);
+/* Value travels as a scalar; the CALLER (tile[1]) applies it to the mailbox.
+ * See csd_diag_regs.xc for why the store must not publish it itself. */
+int csd_diag_trim_load(unsigned *packed_out);
+int csd_diag_trim_save(unsigned packed);
 unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..6, see csd_trim_store.h */
 
 /* Unit identity, forwarded to the tile[0] owner for the same reason register
