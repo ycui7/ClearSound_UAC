@@ -6,8 +6,16 @@ AGENTS.md release rule.
 
 ## Build
 
-- sources: app `346fe14`, clean tree at configure (`git status --porcelain`
-  empty, verified before both builds)
+- sources: app `346fe14` (clean tree at configure — `git status --porcelain`
+  empty, verified before both builds), linked against the sandbox trees at
+  **lib_xua `0c69d009`** and **sw_usb_audio `c4397ab`**. The build compiles
+  from `$XMOS_SANDBOX_DIR` working trees, so those SHAs are part of what was
+  gated; the previous release note recorded lib_xua for the same reason. All
+  three were clean at build time.
+- Not pinned here, deliberately: the parent repo (`usb_audio_sc`) still
+  records gitlink lib_xua `820fab5` (pre-existing drift, 7 mixer commits) and
+  app at an older commit than the release. Bumping fleet submodule pointers is
+  the owner's call, not a release side effect.
 - flags (both builds): `PCM_DSP_EN=1 CSD_DIAG_MIDI=1 CSD_DSP_PRESET_DEFAULT=2
   CSD_GEN_EN=1 CSD_GEN_INSTRUMENT MIXER=1 MAX_MIX_COUNT=2`
   (`XUA_MIX_INPUTS` = library default 18); release adds
