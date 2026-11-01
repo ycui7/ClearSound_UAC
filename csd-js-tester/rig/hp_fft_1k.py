@@ -302,26 +302,40 @@ def main():
         return 2
 
     fig, ax = plt.subplots(2, 2, figsize=(13, 7.5))
+    FMIN = 20.0                        # below this the mic/DAC 1/f wall dominates
     for j, ch in enumerate(("L", "R")):
         x = sig[ch]
         fr, psd = welch(x)
-        # y limits FIRST: an axvline added while a log axis still autoscales
-        # warns 'Data has no positive values' and drops the line, which would
-        # silently remove the 1 kHz marker -- the point of the chart.
-        ax[0, j].set_ylim(1e-14, 1e-2)
-        ax[0, j].semilogy(fr, psd, lw=0.8, color="tab:blue")
+        # The DC bin has freq 0 and cannot go on a log axis: matplotlib drops
+        # non-positive x silently, so a f[0]=0 row would just be missing and
+        # look intentional. Drop it explicitly and say so in the axis label.
+        m = fr >= FMIN
+        f_l, p_l = fr[m], psd[m]
+        # x and y limits FIRST: an axvline added while a log axis is still
+        # autoscaling warns 'Data has no positive values' and is DROPPED, which
+        # silently deletes the 1 kHz marker -- the one thing to look for.
+        ax[0, j].set_xlim(FMIN, 20000); ax[0, j].set_ylim(1e-14, 1e-2)
+        ax[0, j].loglog(f_l, p_l, lw=0.8, color="tab:blue")
         ax[0, j].axvline(TONE_HZ, color="red", ls="--", lw=1, ymin=0.0, ymax=1.0,
                          label="1 kHz")
-        ax[0, j].set_xlim(0, 20000)
-        ax[0, j].set_xlabel("Hz"); ax[0, j].set_ylabel("PSD  (FS²/Hz)")
-        ax[0, j].set_title(f"{ch}: 0–20 kHz   1 kHz = {lvl[ch]:+.1f} dBFS")
-        ax[0, j].grid(True, which="both", alpha=0.3); ax[0, j].legend(fontsize=8)
+        for h in (2, 3):               # harmonic search positions, log-spaced
+            ax[0, j].axvline(h * TONE_HZ, color="orange", ls=":", lw=0.8,
+                             label=f"{h}× 1 kHz")
+        ax[0, j].set_xscale("log")
+        ax[0, j].set_xticks([20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000])
+        ax[0, j].set_xticklabels(["20", "50", "100", "200", "500", "1k", "2k",
+                                  "5k", "10k", "20k"], fontsize=8)
+        ax[0, j].set_xlabel("Hz (log)"); ax[0, j].set_ylabel("PSD  (FS²/Hz)")
+        ax[0, j].set_title(f"{ch}: 20 Hz–20 kHz, log f   1 kHz = {lvl[ch]:+.1f} dBFS")
+        ax[0, j].grid(True, which="both", alpha=0.3); ax[0, j].legend(fontsize=7)
 
-        ax[1, j].set_ylim(1e-14, 1e-2)
+        # Zoom stays LINEAR: its job is the tone's shape and the window
+        # sidelobes either side of 1 kHz, which a log x would compress into
+        # invisibility. Full-band decade view is the top row's job.
+        ax[1, j].set_xlim(600, 1500); ax[1, j].set_ylim(1e-14, 1e-2)
         ax[1, j].semilogy(fr, psd, lw=1.0, color="tab:blue")
         ax[1, j].axvline(TONE_HZ, color="red", ls="--", lw=1, ymin=0.0, ymax=1.0)
-        ax[1, j].set_xlim(600, 1500)
-        ax[1, j].set_xlabel("Hz"); ax[1, j].set_ylabel("PSD  (FS²/Hz)")
+        ax[1, j].set_xlabel("Hz (linear zoom)"); ax[1, j].set_ylabel("PSD  (FS²/Hz)")
         ax[1, j].set_title(f"{ch}: 1 kHz zoom (600–1500 Hz)")
         ax[1, j].grid(True, which="both", alpha=0.3)
     fig.suptitle(f"ClearSound DAC — 1 kHz unmuted, host sine @ "
