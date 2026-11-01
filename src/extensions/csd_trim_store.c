@@ -99,6 +99,8 @@
  * csd_trim_last_error() is unambiguous about which step failed. */
 #define TRIM_ERR_NO_PARTITION  0x100u   /* board flashed without --data */
 #define TRIM_ERR_SCRATCH_SMALL 0x101u
+#define TRIM_ERR_BEYOND_PARTITION 0x102u  /* cursor past the partition end */
+#define TRIM_ERR_PARTITION_SMALL  0x103u  /* < one 4 KiB sector: unusable */
 
 typedef struct {
     uint32_t magic;
@@ -196,6 +198,20 @@ static int tr_partition_open(unsigned *res, unsigned *psz, unsigned *need)
     tr_st_partition = sz;
     *psz = sz;
 
+    /* The partition must be at least one whole sector. The rewrite path
+     * erases a sector and writes a sector regardless (erase is sector-
+     * granular, so it reaches past a smaller partition), and tr_scan indexes
+     * 128 slots. A partition smaller than a sector is therefore not usable
+     * here at all -- and continuing would put an ERASE outside the region the
+     * tools assigned us, which is the one failure this design cannot take
+     * back. Refuse with a code the rig can see. (Seed the journal with a full
+     * 4 KiB file: see flash_persist.sh.) */
+    if (sz < TRIM_SECTOR_BYTES) {
+        fl_disconnect();
+        *res = TRIM_ERR_PARTITION_SMALL;
+        return 0;
+    }
+
     unsigned n = fl_getWriteScratchSize(0u, TRIM_SECTOR_BYTES);
     if (n > sizeof tr_scratch) {        /* our static is too small to be safe */
         fl_disconnect();
@@ -211,6 +227,12 @@ static int tr_read_sector(unsigned char *sec, unsigned len, unsigned *res)
     unsigned psz = 0, need = 0;
     if (!tr_partition_open(res, &psz, &need)) return 0;
     if (len > psz) len = psz;
+    /* Preset before the capped read. If the partition is smaller than the
+     * buffer, the tail would otherwise hold stale bytes from a previous call
+     * and tr_scan would parse them as slots -- stale data being read as a
+     * record is exactly the failure this store must not have. 0xFF is also
+     * the honest value: past the partition there is nothing of ours. */
+    for (unsigned i = len; i < TRIM_SECTOR_BYTES; i++) sec[i] = 0xFFu;
     int r = fl_readData(0u, len, sec);
     *res = (unsigned)r;
     fl_disconnect();
@@ -230,6 +252,18 @@ static int tr_append_slot(unsigned slot, const unsigned char *sec, unsigned *res
     unsigned psz = 0, need = 0;
     if (!tr_partition_open(res, &psz, &need)) return 0;
     unsigned off = slot * TRIM_SLOT_BYTES;
+
+    /* Hard bound. The cursor came from tr_scan over a buffer that was capped
+     * to psz, so on a full 4 KiB partition this cannot trigger -- but it is
+     * the ONE place this file could land outside the tool-owned partition,
+     * and outside the partition is the only place it could damage something
+     * that is not our own record. Fail loudly rather than find out. */
+    if (off + TRIM_SLOT_BYTES > psz) {
+        fl_disconnect();
+        *res = TRIM_ERR_BEYOND_PARTITION;
+        return 0;
+    }
+
     int r = fl_writeData(off, TRIM_SLOT_BYTES, sec + off, tr_scratch);
     *res = (unsigned)r;
     fl_disconnect();
