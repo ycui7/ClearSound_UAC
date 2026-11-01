@@ -106,14 +106,60 @@ def capture_1k(tag, host_wav):
 
 
 print("\n== legs (one boot) ==")
+# The generator tone sits at GEN_HZ, NOT at the host tone frequency. Two
+# independent 1 kHz sources sum with a random relative phase at the mic
+# (free-running NCO vs stream start): anti-phase cancels, and a same-bin
+# 'both' leg failed on a good board by 5.6 dB purely from phase. Different
+# bins make each source independently visible -- no phase can hide either.
+GEN_HZ = 2000.0
+GEN_TOK = f"{RATE},{int(GEN_HZ*1000)},{GEN_AMP}"
+
+def capture(tag, host_wav):
+    subprocess.run(["pkill", "-x", "arecord"], capture_output=True)
+    time.sleep(0.3)
+    raw = f"{TMP}/mix2_{tag}.raw"
+    cap = subprocess.Popen(
+        ["arecord", "-q", "-D", f"hw:{MIC},0", "-f", "S24_3LE", "-r",
+         str(RATE), "-c", "2", "-d", str(SECS), "-t", "raw", raw],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.7)
+    ff = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error",
+                           "-t", str(SECS - 0.5), "-i", host_wav, "-f", "alsa",
+                           "-ac", "2", f"plughw:{XMOS},0"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cap.wait(timeout=SECS + 8); ff.wait(timeout=8)
+    return raw
+
+
+def fft_bin(raw, hz):
+    b = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8)
+    b = b[:(b.size // 3) * 3].reshape(-1, 3)
+    v = (b[:, 0].astype(np.int32) | (b[:, 1].astype(np.int32) << 8) |
+         (b[:, 2].astype(np.int32) << 16))
+    v = np.where(v & 0x800000, v - (1 << 24), v)
+    best = -999.0
+    for s in (v[0::2], v[1::2]):
+        x = s.astype(np.float64)
+        spec = np.abs(np.fft.rfft(x - x.mean())) * 2.0 / x.size
+        k = int(round(hz * x.size / RATE))
+        best = max(best, 20 * math.log10(
+            max(float(np.max(spec[k-3:k+4])), 1e-12) / 2**23))
+    return best
+
+
 scpi("GENerator:OFF")
-p1 = capture_1k("none", Z);  print(f"  host zeros + gen off  : {p1:+6.1f} dBFS")
-scpi(f"GENerator:SINe {RATE},1000000,{GEN_AMP}")
-p2 = capture_1k("gen", Z);   print(f"  host zeros + gen tone : {p2:+6.1f} dBFS")
+r = capture("none", Z); p1 = fft_bin(r, TONE_HZ)
+print(f"  host zeros + gen off  : {p1:+6.1f} dBFS @1k")
+scpi(f"GENerator:SINe {GEN_TOK}")
+r = capture("gen", Z); p2 = fft_bin(r, GEN_HZ)
+print(f"  host zeros + gen tone : {p2:+6.1f} dBFS @2k")
 scpi("GENerator:OFF")
-p3 = capture_1k("host", T);  print(f"  host tone  + gen off  : {p3:+6.1f} dBFS")
-scpi(f"GENerator:SINe {RATE},1000000,{GEN_AMP}")
-p4 = capture_1k("both", T);  print(f"  host tone  + gen tone : {p4:+6.1f} dBFS")
+r = capture("host", T); p3 = fft_bin(r, TONE_HZ)
+print(f"  host tone  + gen off  : {p3:+6.1f} dBFS @1k")
+scpi(f"GENerator:SINe {GEN_TOK}")
+r = capture("both", T)
+p4h = fft_bin(r, TONE_HZ); p4g = fft_bin(r, GEN_HZ)
+print(f"  host tone  + gen tone : {p4h:+6.1f} @1k   {p4g:+6.1f} @2k")
 scpi("GENerator:OFF")
 
 print("\n== verdict ==")
@@ -125,7 +171,9 @@ def need(cond, msg):
 need(p1 < PEAK, f"baseline silent ({p1:+.1f})")
 need(p2 >= PEAK and p2 - p1 >= 30, f"generator rides the mix ({p2:+.1f})")
 need(p3 >= PEAK and p3 - p1 >= 30, f"host rides the mix ({p3:+.1f})")
-need(p4 >= PEAK and p4 >= max(p2, p3) - 1.0,
-     f"both summed, neither clobbers the other ({p4:+.1f} vs max {max(p2, p3):+.1f})")
+need(p4h >= PEAK and p4h >= p3 - 1.0,
+     f"host bin survives while gen runs ({p4h:+.1f} vs {p3:+.1f})")
+need(p4g >= PEAK and p4g >= p2 - 1.0,
+     f"gen bin survives while host runs ({p4g:+.1f} vs {p2:+.1f})")
 print("  4->2 mix: PASS" if ok else "  4->2 mix: FAIL")
 sys.exit(0 if ok else 1)
