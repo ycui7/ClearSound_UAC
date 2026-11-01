@@ -488,7 +488,14 @@ class RawMidiTransport:
     def __init__(self, needle: str = "XMOS", timeout: float = 4.0):
         import glob
         self._fd = None
-        node = self._find(needle)
+        # SPECIALTYCIRCUITS_RELEASE renames the USB product to "ClearSound
+        # DAC (UAC2.0)" -- the old needle "XMOS" no longer matches. Accept
+        # either identity; the vendor string is release-gated, the card is
+        # the same device (20b1:0018).
+        if needle.lower() in ("xmos", "csd"):
+            node = self._find(needle) or self._find("clearsound")
+        else:
+            node = self._find(needle)
         if node is None:
             raise DiagError(
                 "no raw MIDI node for %r (looked in /dev/snd/midiC*D*; check "

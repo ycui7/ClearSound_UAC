@@ -80,7 +80,7 @@ def main():
     if "ClearSound" not in idn:
         print(f"ABORT: firmware is not ours ({idn!r})"); return 1
     print(f"LIVE BUILD: {idn}")
-    xm = card("xmos")
+    xm = card("xmos", "clearsound")
     if not xm:
         sys.exit("XMOS card not found")
 

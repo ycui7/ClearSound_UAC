@@ -103,7 +103,7 @@ def asound_card(*patterns):
     return ""
 
 
-XMOS_CARD = XMOS_CARD or asound_card("xmos")
+XMOS_CARD = XMOS_CARD or asound_card("xmos", "clearsound")
 MIC_CARD = MIC_CARD or asound_card("e36db", "e.a.r.s", "ears")
 print(f"== rig: playback={XMOS_CARD or '??'} capture={MIC_CARD or '??'} ==")
 

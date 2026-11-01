@@ -41,7 +41,7 @@ def card(*pats):
     return None
 
 
-XMOS = card("xmos")
+XMOS = card("xmos", "clearsound")
 if not XMOS:
     sys.exit("XMOS card not found")
 print(scpi("*IDN?"))

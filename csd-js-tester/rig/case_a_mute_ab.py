@@ -65,7 +65,7 @@ def card(*pats):
     sys.exit("cards missing")
 
 
-XMOS, MIC = card("xmos"), card("e36db", "e.a.r.s", "36db")
+XMOS, MIC = card("xmos", "clearsound"), card("e36db", "e.a.r.s", "36db")
 print(scpi("*IDN?"))
 
 # Proven switch/volume helpers from the acoustic gate: a hand-rolled amixer

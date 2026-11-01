@@ -281,7 +281,7 @@ def measure_capture(tag, mic_card):
 
 
 # ---------------------------------------------------------------------------
-XMOS_CARD = os.environ.get("CSD_XMOS_CARD") or asound_card("xmos")
+XMOS_CARD = os.environ.get("CSD_XMOS_CARD") or asound_card("xmos", "clearsound")
 MIC_CARD = os.environ.get("CSD_MIC_CARD") or asound_card("e36db", "e.a.r.s",
                                                           "ears")
 print(f"== 0. rig: XMOS playback card={XMOS_CARD or '??'}  "
