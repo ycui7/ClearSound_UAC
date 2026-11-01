@@ -34,6 +34,62 @@ STATES = {0:"appIDLE",1:"appDETACH",2:"dfuIDLE",3:"dfuDNLOAD-SYNC",
           10:"dfuERROR",11:"dfuDETACHED"}
 
 
+def wait_stable(vid, pid, polls=8, gap=0.5):
+    """Wait until the device stops re-enumerating: same USB address on
+    consecutive finds. Acting on a device that is still settling is what
+    produced 'No such device' at claim time -- the handle dies under us the
+    moment the device re-attaches with a new address."""
+    last = None
+    same = 0
+    for _ in range(polls * 4):
+        d = usb.core.find(idVendor=vid, idProduct=pid)
+        if d is None:
+            time.sleep(gap); last = None; same = 0
+            continue
+        if last is not None and d.address == last:
+            same += 1
+            if same >= 3:
+                return d
+        else:
+            same = 0
+        last = d.address
+        time.sleep(gap)
+    return usb.core.find(idVendor=vid, idProduct=pid)
+
+
+def bring_up(vid, dfu_pid, attempts=12):
+    """Claim the DFU interface, re-finding the device on every failure: a
+    detach or bus reset can land AT ANY POINT of this sequence."""
+    last = "never found"
+    for _ in range(attempts):
+        dev = usb.core.find(idVendor=vid, idProduct=dfu_pid)
+        if dev is None:
+            time.sleep(0.5); last = "absent"; continue
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+        except usb.core.USBError:
+            pass                      # may be detached already, or not bound
+        try:
+            dev.set_configuration()
+            cfg = dev.get_active_configuration()
+        except usb.core.USBError as e:
+            last = f"config: {e}"; time.sleep(0.7); continue
+        intf = None
+        for i in cfg:
+            if i.bInterfaceClass == 0xFE and i.bInterfaceSubClass == 1:
+                intf = i.bInterfaceNumber
+                break
+        if intf is None:
+            last = "no DFU interface in config"; time.sleep(0.5); continue
+        try:
+            dev.set_interface_altsetting(interface=intf, alternate_setting=0)
+        except usb.core.USBError as e:
+            last = f"altsetting: {e}"; time.sleep(0.7); continue
+        return dev, cfg, intf
+    sys.exit(f"could not claim the DFU interface ({last})")
+
+
 def getstatus(dev, intf):
     d = dev.ctrl_transfer(BM_IN, REQ_GETSTATUS, 0, intf, 6, timeout=10_000)
     poll = d[1] | (d[2] << 8) | (d[3] << 16)
@@ -109,8 +165,55 @@ def main():
                 break
         if intf_no is None:
             sys.exit("runtime device exposes no DFU interface")
+        # Put the DFU state machine in a known state BEFORE detaching.
+        # Observed discriminator: when DETACH is accepted (no error) the
+        # device reboots into DFU and d018 appears at t+1.0 s and stays up.
+        # When DETACH returns EIO nothing happens at all -- that is a STALL,
+        # i.e. the SM is sitting in dfuERROR left over from a previous
+        # session, and DFU_DETACH is only handled from appIDLE/appDETACH
+        # (dfu.xc:178, :305, :587). A bus reset on the RUNTIME device clears
+        # it. Note the old recipe DID have the right idea -- lib_dfu arms
+        # FLASH_CONNECT on a bus reset seen in appDETACH (dfu.xc:190-196) --
+        # but it applied the reset to the d018 device AFTER entry, where a
+        # reset instead drops dfuIDLE back toward appIDLE.
+        try:
+            rt.reset()
+            print("runtime bus reset issued (DFU SM cleared)")
+            time.sleep(1.0)
+            rt = usb.core.find(idVendor=a.vid, idProduct=a.pid)
+            if rt is None:
+                sys.exit("runtime device did not return after bus reset")
+            intf_no = None
+            for cfg_ in rt:
+                for i in cfg_:
+                    if i.bDescriptorType == 4 and i.bInterfaceClass == 0xFE \
+                       and i.bInterfaceSubClass == 1:
+                        intf_no = i.bInterfaceNumber
+                        break
+                if intf_no is not None:
+                    break
+            if intf_no is None:
+                sys.exit("no DFU interface after bus reset")
+        except usb.core.USBError as e:
+            print(f"WARN: pre-detach bus reset failed ({e}); trying anyway")
         print(f"detaching runtime intf {intf_no} -> DFU mode")
-        rt.ctrl_transfer(BM_OUT, REQ_DETACH, 250, intf_no, b"", timeout=10_000)
+        # EIO/ENODEV on DETACH is EXPECTED and is treated as SUCCESS. The
+        # device reboots into DFU mode in the middle of the control transfer
+        # (deferred REBOOT_TO_DFU), so the runtime device is gone before the
+        # host finishes the transaction and libusb reports a broken pipe.
+        # Observed: DETACH accepted -> 0018 gone at t+0.83 s -> d018 at
+        # t+1.04 s (tools/dfu_detach_watch.py). Aborting on this error is what
+        # made a healthy detach look like a failure.
+        try:
+            rt.ctrl_transfer(BM_OUT, REQ_DETACH, 250, intf_no, b"", timeout=10_000)
+            print("DETACH accepted")
+        except usb.core.USBError as e:
+            # ENOENT(2)/EIO(5)/ENODEV(19): the device vanished mid-transfer,
+            # which is the reboot-into-DFU signature, not a failure.
+            if e.errno in (2, 5, 19):
+                print(f"DETACH ended the runtime device ({e}) -- expected")
+            else:
+                raise
         for _ in range(60):
             time.sleep(0.5)
             dev = usb.core.find(idVendor=a.vid, idProduct=a.dfu_pid)
@@ -118,35 +221,21 @@ def main():
                 break
         if dev is None:
             sys.exit("device did not re-appear with DFU PID after detach")
-    time.sleep(1.0)
-    if dev.is_kernel_driver_active(0):
-        dev.detach_kernel_driver(0)
-    dev.set_configuration()
-    # The vendor DFU connects its QSPI flash via the deferred FLASH_CONNECT
-    # that fires on a BUS RESET seen in appDETACH (dfu.xc:192-195). A plain
-    # DETACH from runtime mode never produced that reset, and the device then
-    # parked in dfuDNBUSY with poll=0 (observed). Force the reset ourselves.
-    try:
-        dev.reset()
-        time.sleep(1.0)
-        dev = usb.core.find(idVendor=a.vid, idProduct=a.dfu_pid)
-        if dev is None:
-            sys.exit("device vanished after bus reset")
-        if dev.is_kernel_driver_active(0):
-            dev.detach_kernel_driver(0)
-        dev.set_configuration()
-        print("bus reset issued (flash-connect path armed)")
-    except usb.core.USBError as e:
-        print(f"WARN: bus reset failed ({e}); continuing")
-    cfg = dev.get_active_configuration()
-    intf = None
-    for i in cfg:
-        if i.bInterfaceClass == 0xFE and i.bInterfaceSubClass == 1:
-            intf = i.bInterfaceNumber
-            break
-    if intf is None:
-        sys.exit("DFU-mode device exposes no DFU interface")
-    dev.set_interface_altsetting(interface=intf, alternate_setting=0)
+    # Wait out the detach re-enumeration BEFORE touching the device.
+    # NO explicit dev.reset() here, and this was the whole bug: with OUR
+    # firmware, DETACH alone reboots into DFU -- state_app_idle's DFU_DETACH
+    # sets deferred=REBOOT_TO_DFU (dfu.xc:178-181, not gated), the reboot is
+    # itself a bus re-attach, and state_detach's XMOS_DFU_BUS_RESET path then
+    # lands us in dfuIDLE with FLASH_CONNECT armed (dfu.xc:190-196). The old
+    # "detach never produced the reset" note belonged to the BROKEN VENDOR
+    # firmware, which never reaches this code. Observed: detach -> d018 at
+    # t+1.0 s and stable 18 s (tools/dfu_detach_watch.py); adding dev.reset()
+    # made d018 vanish permanently (a reset in dfuIDLE is 'no other requests
+    # expected' -> back toward appIDLE, dfu.xc:198-201).
+    dev = wait_stable(a.vid, a.dfu_pid)
+    if dev is None:
+        sys.exit("DFU device did not settle into DFU mode after detach")
+    dev, cfg, intf = bring_up(a.vid, a.dfu_pid)
 
     # Transfer size comes from the DFU FUNCTIONAL descriptor (type 0x21) that
     # follows the interface descriptor -- parse the raw config bytes, same as
@@ -177,7 +266,9 @@ def main():
 
     st, poll, state = getstatus(dev, intf)
     print(f"entry state {STATES.get(state,state)} status {st}")
-    if state == 5:
+    if state in (5, 10):
+        # 5 = dfuDNLOAD-IDLE, 10 = dfuERROR (what an aborted previous session
+        # leaves behind). CLRSTATUS recovers both without a power cycle.
         dev.ctrl_transfer(BM_OUT, REQ_CLRSTATUS, 0, intf, b"", timeout=10_000)
         wait_idle(dev, intf)
     elif state == 3:
