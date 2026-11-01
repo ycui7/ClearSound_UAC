@@ -29,3 +29,10 @@ csd-js-tester/rig/.trim_dfu_expect
 # xflash byproducts written next to the .xn during flash runs
 /src/extensions/image0*.bin
 /src/extensions/loader.bin
+
+# Analysis artifact, kept on purpose and acted on later (owner directive
+# 2026-11-01: "write the list into a md file, and leave it alone"). Ignored so
+# it does not make every version stamp read -dirty: gen_version.sh counts
+# untracked files deliberately, to catch a new .c under src/, and a root-level
+# markdown does not need that protection.
+SINGLE_CALLER_INVENTORY.md
