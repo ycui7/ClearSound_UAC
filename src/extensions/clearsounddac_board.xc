@@ -90,10 +90,25 @@ on tile[0]: out port p_led_d3g      = PORT_LED_D3G;
  *   free: it read uac_hwresources.h and never lib_xud. SPDIF is compiled out
  *   anyway (XUA_SPDIF_TX_EN = 0).
  *
- * So 6 is the first free block ON THIS TILE. If a future config claims it,
- * xmap names the owner ("previously declared as <symbol>") and the number
- * moves here -- xmap is the check, this comment is the trail. */
-on tile[0]: clock c_trim_qspi = XS1_CLKBLK_6;
+ * Block number, settled by measurement (four builds):
+ *   4, 5 -> duplicate of lib_xud's tx/rx_usb_clk (XUD_Main.xc:72-73, bound on
+ *           USB_TILE = tile[0]).
+ *   6    -> xmap ACCEPTS it and the device then dies in `c_trim_qspi[ctor]`
+ *           with ET_ILLEGAL_RESOURCE. XS1_CLKBLK_6/7 are defined in the
+ *           shared xs2a/xs3a headers (0x606/0x707), so the header does not
+ *           tell you the XU316 per-tile ceiling -- only running it does.
+ *   2    -> also claimed on this tile: main.xc:207 binds CLKBLK_MCLK as
+ *           clk_audio_mclk_usb on XUA_XUD_TILE_NUM. Auditing
+ *           uac_hwresources.h alone misses this.
+ *
+ * So tile[0] owns 2 (MCLK, USB side), 4, 5. 3 is the pick: it is lib_xua's
+ * own convention for the flash library (uac_hwresources.h:
+ * CLKBLK_FLASHLIB = XS1_CLKBLK_3, which is what lib_dfu's runtime writer
+ * uses), and the block that number nominally denotes -- the I2S bit clock --
+ * is bound on the AUDIO IO tile (tile[1]), a different tile, and clock blocks
+ * are per-tile resources. If a future config claims 3 here, xmap names the
+ * owner and the number moves. */
+on tile[0]: clock c_trim_qspi = XS1_CLKBLK_3;
 // on tile[0]: out port p_led_1        = XS1_PORT_8D;
 
 
