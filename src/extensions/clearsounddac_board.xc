@@ -19,7 +19,9 @@ extern "C" {
 #include "csd_dsp.h"
 #ifdef CSD_GEN_EN
 #include "csd_gen.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
-#include "csd_trim_store.h" /* csd_trim_load_boot: L/R trim persistence */
+#include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
+                             * caller -- the SQI ports live on this tile. See
+                             * csd_trim_store.h. */
 #endif
 #endif
 
@@ -299,13 +301,13 @@ static void vol_apply_all(client interface i2c_master_if i2c)
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
 
-    /* L/R trim (TODO item 3): adopt the persisted pair BEFORE anything can
-     * apply volume, so the first register write of the boot already carries
-     * the factory calibration. Load-then-SCPI-write ordering is by
-     * construction: SCPI cannot be served before USB enumerates, which is
-     * after this task entry. With the flash backend compiled out (no proven
-     * address yet) this is the explicit no-op that leaves 0 dB / 0 dB. */
-    csd_trim_load_boot();
+    /* L/R trim (TODO item 3): the persisted pair is adopted by
+     * csd_trim_store_task() on tile[0], NOT here. It used to be loaded from
+     * this task, which is the codec/audio server -- the same mistake
+     * csd_identity.xc documents: a blocking resource call here stalled the
+     * select loop and took the whole diagnostic interface with it. The store
+     * task loads before USB can enumerate, so the mixer still sees the
+     * calibration before any host audio can reach the multiply. */
 
     /* LED blink scheduler: 0.5 s phase grid (1 Hz blink) for the error states. */
     timer led_tmr;
@@ -353,6 +355,50 @@ static void vol_apply_all(client interface i2c_master_if i2c)
                     c[i] :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c[i] <: regVal;
+                }
+                else if (cmd == AUDIOHW_CMD_TRIM_LOAD ||
+                         cmd == AUDIOHW_CMD_TRIM_SAVE ||
+                         cmd == AUDIOHW_CMD_TRIM_STAT)
+                {
+                    /* L/R trim persistence (TODO item 3). This branch exists
+                     * because quadflashlib drives PORT_SQI_* with synchronous
+                     * port I/O and the .xn declares those ports on THIS tile:
+                     * called from the tile[1] diagnostic core they wedge. The
+                     * first design put a dedicated task on tile[0] and xmap
+                     * refused it (8/8 cores, 10/10 timers), so the flash calls
+                     * ride the channel this task already services, exactly as
+                     * csd_diag_regs.xc does for the I2C bus.
+                     *
+                     * Why this does NOT repeat the identity-module death:
+                     * that revision ran a blocking OTP read AHEAD of this
+                     * select loop, so the server never reached select at all.
+                     * Flash work here exists only INSIDE a select case, so the
+                     * server is demonstrably serving before any flash call
+                     * can happen, and a client that never gets a reply has
+                     * its own timeout (csd_diag.py) rather than an infinite
+                     * wait. Every failure the library reports is returned as
+                     * a code; nothing here spins.
+                     *
+                     * Scalars in, scalars out -- nothing crosses the tile
+                     * boundary by pointer, per csd_identity.h. The sector
+                     * buffer is static inside csd_trim_store.c and never
+                     * leaves that translation unit. */
+                    if (cmd == AUDIOHW_CMD_TRIM_LOAD)
+                    {
+                        csd_trim_boot_load();
+                        c[i] <: 1u;               /* ran; status says how */
+                    }
+                    else if (cmd == AUDIOHW_CMD_TRIM_SAVE)
+                    {
+                        unsigned ok = (unsigned) csd_trim_journal_now();
+                        c[i] <: ok;
+                    }
+                    else
+                    {
+                        unsigned idx = 0;
+                        c[i] :> idx;
+                        c[i] <: csd_trim_status_word(idx);
+                    }
                 }
                 else if (cmd == AUDIOHW_CMD_IDENTITY)
                 {

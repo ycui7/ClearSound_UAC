@@ -21,7 +21,9 @@
 #include "csd_version.h"
 #include "csd_identity.h"
 #include "csd_gen.h"
-#include "csd_trim_store.h" /* csd_trim_request_save: L/R trim journal (TODO 3) */
+/* L/R trim persistence (TODO 3) is reached through csd_diag.h's proxy calls,
+ * never by including csd_trim_store.h: that header's entry points drive the
+ * tile[0] SQI ports and may only be called by the tile[0] codec server. */
 
 #define CSD_IDN_VENDOR   "ClearSound"
 #define CSD_IDN_MODEL    "CSD-22"
@@ -1164,11 +1166,16 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
  * inexpressible rather than rounded. 0 dB is the maximum, never positive.
  *
  * Accepted in every build (production calibration surface, like
- * MIXer:GAIN:*). The setter writes the packed mailbox word AND asks the
- * persistence layer to save it; both are single-writer (this thread).
- * The volume owner on tile[0] re-reads the word on every volume change
- * (vol_apply_all), which is the application point the directive names:
- * host SET_CUR and button presses alike. */
+ * MIXer:GAIN:*). The setter writes the packed mailbox word and raises the
+ * persistence request flag; the tile[0] store task journals it within ~50 ms
+ * (csd_trim_store.h -- this thread must not touch flash itself). The mixer
+ * reads the word on every output-volume multiply (csd_mix_apply_trim), the
+ * application point the directive names: host SET_CUR and button paths alike.
+ *
+ * VOLume:TRIM:STATus? reports the persistence layer's view (partition size,
+ * load/save status, sequence, error code, counts) so a rig can tell
+ * "persisted" from "silently never tried" -- the failure modes here are
+ * silent by nature. */
 static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
 {
     const char *why = "argument";
@@ -1184,12 +1191,19 @@ static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
     packed = which_right ? ((v << 16) | (packed & 0xFFFFu))
                          : ((packed & 0xFFFF0000u) | v);
     csd_mb_put_trim(packed);
-    /* Persist immediately: the setter is the only writer and runs on the
-     * diagnostic thread, so there is nothing to coalesce -- and a debounce
-     * would lose a trim if the rig lost power between the set and the timer.
-     * With no proven flash address this is the documented no-op (the trim
-     * still stands for this power cycle). */
-    csd_trim_request_save();
+    /* Journal through the tile[0] server (csd_diag_regs.xc) -- this core
+     * must not touch the SQI ports. Synchronous by design: the reply means
+     * the value is in flash (or the status says why not), so a rig can read
+     * VOLume:TRIM:STATus? immediately after this returns and believe it.
+     * A rejected journal is NOT silently swallowed -- the trim still stands
+     * for this power cycle, and the error queue reports that it did not
+     * persist, so "set but not saved" can never look like "saved". */
+    if (!csd_diag_trim_save()) {
+        /* libscpi has no hardware-failure code; EXECUTION_ERROR is what this
+         * file already uses for an operation that did not happen. The rig
+         * reads SYST:ERR? to tell "saved" from "set but not journalled". */
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+    }
     return SCPI_RES_OK;
 bad:
     SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
@@ -1230,6 +1244,57 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_q(scpi_t *context)
         len += n;
     }
     SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+/* VOLume:TRIM:STATus? -> partition_bytes, load_status, save_status, seq,
+ * last_error, boot_count, save_count        (TODO item 3 rig dependency)
+ *
+ * WHY THIS EXISTS RATHER THAN BEING AN OPTIONAL EXTRA
+ * Every persistence failure in csd_trim_store.c is silent by design: a write
+ * that fails simply means the trim does not persist, and the audio path
+ * cannot tell. So without these seven numbers a rig cannot distinguish
+ * "the record is in flash" from "the board has no data partition" from
+ * "fl_connect() failed on a busy clock block" -- and the reboot-survival leg
+ * would then be measuring the 0 dB / 0 dB reset default while believing it
+ * measured persistence. That is exactly the vacuous-pass shape this project
+ * has been bitten by twice. The rig asserts on these, not on the trim alone.
+ *
+ * Reads C globals written by the tile[0] store task -- the same shared-word
+ * pattern csd_identity.xc uses for its stage counter, and legal for the same
+ * reason: they are C statics in a C translation unit, not XC objects. */
+static SCPI_FPTR_CMD scpi_result_t vol_trim_status_q(scpi_t *context)
+{
+    char buf[96];
+    unsigned len = 0;
+    for (unsigned i = 0; i < 7u; i++) {
+        if (len) buf[len++] = ',';
+        /* One scalar per round trip over the codec-server channel: the
+         * cross-tile rule in this codebase is scalars only, never pointers
+         * (csd_identity.h), so there is no array to hand across. */
+        unsigned n = fmt_u32(csd_diag_trim_status(i), buf + len,
+                             (unsigned)sizeof buf - len);
+        if (n == 0) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+            return SCPI_RES_ERR;
+        }
+        len += n;
+    }
+    SCPI_ResultCharacters(context, buf, len);
+    return SCPI_RES_OK;
+}
+
+/* VOLume:TRIM:LOAD -> re-read the journal into the mailbox.
+ * A rig uses this to test "adopt what is in flash" without restarting the
+ * firmware: journal a pair, set something else, load, and the pair must be
+ * back. Complements the reload leg (rig/trim_persist_run.sh), which is the
+ * only thing that proves survival across a boot. */
+static SCPI_FPTR_CMD scpi_result_t vol_trim_load(scpi_t *context)
+{
+    if (!csd_diag_trim_load()) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
     return SCPI_RES_OK;
 }
 
@@ -1526,6 +1591,8 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "VOLume:TRIM:LEFT",        .callback = vol_trim_left   },
     { .pattern = "VOLume:TRIM:RIGHT",       .callback = vol_trim_right  },
     { .pattern = "VOLume:TRIM?",            .callback = vol_trim_q      },
+    { .pattern = "VOLume:TRIM:STATus?",     .callback = vol_trim_status_q },
+    { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
 #ifndef SPECIALTYCIRCUITS_RELEASE
     /* Debug-only rows (TODO item 5): gone in release builds together with
      * their callbacks above; a stray DEBUG: command then answers -113.

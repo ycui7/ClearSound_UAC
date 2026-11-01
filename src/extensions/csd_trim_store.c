@@ -1,59 +1,104 @@
 /* L/R trim persistence (TODO item 3, directive 2026-11-01).
  *
- * Stores the two-channel trim pair so it survives power cycles, on the
- * board's boot QSPI flash. OTP is OFF LIMITS by standing owner directive:
- * nothing here reads or writes OTP (csd_identity.xc owns OTP reads, and it
- * is read-only by rule).
+ * Stores the two-channel trim pair so it survives power cycles, in the DATA
+ * PARTITION of the board's boot QSPI flash. OTP is OFF LIMITS by standing
+ * owner directive: nothing here reads or writes OTP (csd_identity.xc owns
+ * OTP reads, and it is read-only by rule).
+ *
+ * WHY THE DATA PARTITION AND NOT A HAND-PICKED ADDRESS
+ * The first draft of this file addressed the flash by absolute address. That
+ * is the dangerous shape: the boot ROM scans the boot partition for XEF
+ * blocks, so a wrong address can brick a board with no way back except a
+ * jig. XTC 15.3.0 offers a better API -- fl_readData() / fl_writeData() /
+ * fl_eraseDataSector() address the DATA PARTITION BY OFFSET. The tools own
+ * placement of that partition, so it cannot overlap the bootloader, the
+ * factory image or an upgrade image, and the ROM never scans it for boot
+ * blocks. Verified against target/include/quadflash.h in 15.3.0: the
+ * absolute-address calls the first draft used (fl_read, fl_sectorErase,
+ * fl_pageWrite, and the fl_QuadFlashSpec / fl_res types) DO NOT EXIST in
+ * this toolchain -- it could not have linked.
+ *
+ * WHAT ERASES IT -- accepted by the owner 2026-11-01 ("ok to flash, add note
+ * to todo about persistence data get wiped"), and recorded in TODO.md item 3:
+ * the data partition is NOT preserved by reprogramming the boot partition.
+ * It is rewritten by `xflash --data <file>`, by a full-chip --write-all, and
+ * by any recipe that changes --boot-partition-size (which moves it). A plain
+ * DFU firmware update writes boot images only, so trim SHOULD survive it --
+ * rig/trim_persist_check.py makes that a measured leg, not an assumption.
+ * Manufacturing therefore sets trim LAST, after the final firmware flash.
+ * If the partition is absent (board flashed without --data) every call here
+ * fails safe to 0 dB / 0 dB and reports it, rather than inventing a region.
  *
  * WHY A JOURNAL IN ONE SECTOR
- * The record is 16 bytes and rewritten only when the factory sets a trim,
- * but flash gives no free write: a byte can only go 1->0, so an update
- * needs an erase, and an erase is the whole 4 KiB sector. Power-loss in the
- * middle of an erase-then-write is the only way this can corrupt, so the
- * store never overwrites in place: it APPENDS fixed 32-byte slots through
- * the sector and a load picks the newest VALID slot. A torn slot fails its
- * checksum and the previous complete slot wins -- the same reason a NOR
- * filesystem journals instead of patching. When the sector fills, erase and
- * restart from slot 0 (the newest record is re-written first, so the erase
- * window loses at most a record that was about to be written again).
+ * The record is 32 bytes and rewritten only when a trim is set, but flash
+ * gives no free write: a byte can only go 1->0, so an update needs an erase,
+ * and an erase is the whole sector. Power-loss in the middle of an
+ * erase-then-write is the only way this can corrupt, so the store never
+ * overwrites in place: it APPENDS fixed 32-byte slots through the sector and
+ * a load picks the newest VALID slot. A torn slot fails its checksum and the
+ * previous complete slot wins -- the same reason a NOR filesystem journals
+ * instead of patching. When the sector fills, erase and restart from slot 0.
+ * The tools' own documentation for this API says data-partition writes are
+ * "not fail-safe ... if the operation is interrupted ... the data in the page
+ * or sector is undefined" -- which is exactly the case the journal covers,
+ * so the journal is required by the documented contract, not defensive
+ * decoration.
  *
- * VALIDITY, per the directive: "default both to 0 dB upon reset/power up,
- * if no valid persistence found" -- validity is magic + version + length +
+ * VALIDITY, per the directive: "default both to 0 dB upon reset/power up, if
+ * no valid persistence found" -- validity is magic + version + length +
  * checksum, never "the flash is not erased". An all-0xFF sector is the
- * erased state AND would parse as counts 0xFFFFFF, so an erased-only test
- * is not a validity test.
+ * erased state AND would parse as counts 0xFFFFFF, so an erased-only test is
+ * not a validity test.
  *
- * FLASH ACCESS IS COMPILED OUT UNTIL THE LAYOUT IS PROVEN.
- * Writing an arbitrary address in the boot flash can brick the board (the
- * boot ROM scans for XEF blocks; hitting one by accident, or landing on a
- * partition xflash uses, is unrecoverable without a jig). CSD_TRIM_FLASH_ADDR
- * is therefore not defined in the tree, and stays undefined until the
- * layout audit names an address with evidence. With it undefined:
- *   - the mailbox word still works, so the trim FUNCTION (item 4, applied
- *     on every volume change) is live and testable;
- *   - nothing ever writes flash;
- *   - the load always reports "no valid record" -> 0 dB / 0 dB, exactly
- *     the documented reset default.
- * The backend calls below are the quadflashlib sequence used by lib_dfu's
- * runtime writer (dfu_flashlib_user.c), which is the proven pattern for
- * touching this chip from running firmware.
+ * THREADING -- reached only through the codec server's channel
+ * Every fl_* call drives PORT_SQI_* through quadflashlib's synchronous port
+ * I/O and the .xn declares those ports on tile[0], so they must run on
+ * tile[0]. They are called from AudioHwRemoteTile0's select loop, via
+ * AUDIOHW_CMD_TRIM_LOAD / _SAVE / _STAT -- the proxy csd_diag_regs.xc
+ * already uses for the I2C bus, whose sole owner is that same task. The
+ * first design was a dedicated task on tile[0]; xmap rejected it (tile[0]
+ * is at 8/8 cores and 10/10 timers), and [[combinable]] did not rescue it
+ * because the timer is still reserved. See the header for the measurements.
+ *
+ * csd_identity.xc's lesson -- a blocking resource call ahead of the codec
+ * server's select loop once killed the whole bench -- is respected in a
+ * different way than it was there: flash work runs only INSIDE a select
+ * case, so the server is demonstrably serving before any flash call exists,
+ * and no flash call is ever issued from task startup.
+ *
+ * fl_connect()/fl_disconnect() bracket EACH operation instead of being
+ * hoisted out. Holding the QSPI ports + clock block permanently would sit on
+ * top of lib_dfu's runtime writer (dfu_flashlib_user.c calls fl_connect with
+ * its own port block) and the two must not overlap. The cost is a few ms on a
+ * path that already costs tens.
  */
 #include <stdint.h>
 #include "csd_trim_store.h"
 #include "csd_gen.h"          /* csd_mb_get_trim / csd_mb_put_trim */
 
-#ifdef CSD_TRIM_FLASH_ADDR
-#include <quadflashlib.h>
+#include <xs1.h>
 #include <platform.h>         /* PORT_SQI_CS / _SCLK / _SIO from the .xn */
-#endif
+#include <quadflashlib.h>
 
-#define TRIM_MAGIC    0x43535254u   /* 'TRS' + N: not the XE magic, not the
-                                     * XEF magic -- see the ROM-scan note in
-                                     * the layout audit. Deliberately chosen
-                                     * away from both. */
+#define TRIM_MAGIC    0x43535254u   /* 'TRS' + N: neither the XE magic nor
+                                     * the XEF magic, so a record can never
+                                     * be mistaken for a boot block by
+                                     * anything that scans flash. */
 #define TRIM_VERSION  1u
-#define TRIM_SLOT_BYTES 32u         /* 8 words: hdr(4) + payload(2) + spare(2) */
-#define TRIM_MAX_SLOTS  128u        /* 4 KiB sector / 32 */
+#define TRIM_SLOT_BYTES   32u       /* 8 words: hdr(4) + payload(2) + spare(2) */
+#define TRIM_MAX_SLOTS    128u      /* 4 KiB sector / 32 */
+
+/* Clock block for our own QSPI use. XS1_CLKBLK_1..3 are claimed by the audio
+ * path (uac_hwresources.h: SPDIF 1, MCLK 2, I2S bit clock 3 -- and lib_xua's
+ * CLKBLK_FLASHLIB alias is 3 too). 4 is free in this build; if a future
+ * config claims it, fl_connect() returns non-zero and VOLume:TRIM? reports
+ * the failure instead of corrupting anything. */
+#define TRIM_CLKBLK XS1_CLKBLK_4
+
+/* Our own failure codes, above the quadflashlib range, so a code in
+ * csd_trim_last_error() is unambiguous about which step failed. */
+#define TRIM_ERR_NO_PARTITION  0x100u   /* board flashed without --data */
+#define TRIM_ERR_SCRATCH_SMALL 0x101u
 
 typedef struct {
     uint32_t magic;
@@ -86,134 +131,274 @@ static int slot_valid(const trim_slot_t *s)
     return 1;
 }
 
-#ifdef CSD_TRIM_FLASH_ADDR
+/* ---- status, read over SCPI by the rig ----------------------------------
+ * Every failure in this file is silent by nature (a failed write simply
+ * means the trim does not persist), so each one is latched for inspection.
+ * VOLume:TRIM? reports these; without them a rig cannot tell "persisted"
+ * from "never even tried". */
+static volatile unsigned tr_st_partition = 0;   /* bytes; 0 = none present */
+static volatile unsigned tr_st_loaded    = 0;   /* 0 pend,1 ok,2 no-rec,3 err */
+static volatile unsigned tr_st_saved     = 0;   /* 0 never, 1 ok, 2 err */
+static volatile unsigned tr_st_seq       = 0;   /* newest seq seen/written */
+static volatile unsigned tr_st_err       = 0;   /* last failure code */
+static volatile unsigned tr_st_load_n    = 0;   /* boot loads completed */
+static volatile unsigned tr_st_save_n    = 0;   /* successful saves */
 
-/* Ports: the same three the .xn declares for bootFlash. The clock block is
- * the open question the layout audit answers (lib_dfu uses
- * CLKBLK_DFU_FLASHLIB for its own runtime writer); until then this cannot
- * be enabled anyway -- see CSD_TRIM_FLASH_ADDR above. */
-static fl_QuadFlashSpec fl_trim;
-static unsigned trim_next_slot;       /* append cursor, set by the load */
+/* No per-field accessors on purpose: these statics are read by the tile[0]
+ * server and crossed to tile[1] one word at a time through
+ * csd_trim_status_word() below, which is the scalar-only rule this codebase
+ * follows at every tile boundary (csd_identity.h). Seven exported getters
+ * would be seven ways to get that rule wrong. */
 
-static int trim_flash_read(unsigned addr, void *dst, unsigned len)
+/* No request queue and no poll timer: the tile[1] diagnostic core asks for a
+ * journal synchronously, over the codec server's existing channel (see the
+ * header). A burst of trim sets therefore journals one at a time, in order,
+ * and each VOLume:TRIM:* returns only once its own value is in flash --
+ * which is what lets a rig read VOLume:TRIM:STATus? immediately after a set
+ * and believe it, instead of racing a poll interval. */
+
+/* ---- the flash side, reached only from the tile[0] task ----------------- */
+static fl_QSPIPorts tr_ports = { PORT_SQI_CS, PORT_SQI_SCLK, PORT_SQI_SIO,
+                                 TRIM_CLKBLK };
+static unsigned tr_next_slot;       /* append cursor, set by the load */
+
+/* fl_connect per operation: see the threading note above. *res carries the
+ * failing code (ours or quadflashlib's) on failure. */
+/* Scratch is the page-cache quadflashlib requires for a partial-sector
+ * write; fl_getWriteScratchSize() answers how much, and the tools require at
+ * least a sector's worth. Static on purpose: an allocation that failed at
+ * erase time would be the worst possible moment to discover it. */
+#define TRIM_SECTOR_BYTES 4096u
+static unsigned char tr_scratch[TRIM_SECTOR_BYTES];
+
+/* Every call below addresses sector 0, which IS the partition (one sector),
+ * so offset 0 is the partition start. fl_connect brackets each operation --
+ * see the threading note at the top of the file -- and fl_disconnect runs on
+ * EVERY exit path of every function here, including the error paths. That
+ * matters: a leaked connect would strand the SQI ports and the clock block
+ * on top of lib_dfu's own runtime writer.
+ *
+ * *res carries the failing code on failure -- ours (TRIM_ERR_*) or
+ * quadflashlib's. psz/need may be 0 on failure: only the "did it work"
+ * branch may use them. */
+static int tr_partition_open(unsigned *res, unsigned *psz, unsigned *need)
 {
-    fl_res r = fl_read(&fl_trim, addr, (unsigned char *)dst, len);
-    return (r == FL_RES_OK) ? 0 : -1;
+    int r = fl_connect(&tr_ports);
+    if (r) { *res = (unsigned)r; fl_disconnect(); return 0; }
+
+    unsigned sz = fl_getDataPartitionSize();
+    if (sz == 0u) {                     /* board flashed without --data */
+        tr_st_partition = 0u;
+        fl_disconnect();
+        *res = TRIM_ERR_NO_PARTITION;
+        return 0;
+    }
+    tr_st_partition = sz;
+    *psz = sz;
+
+    unsigned n = fl_getWriteScratchSize(0u, TRIM_SECTOR_BYTES);
+    if (n > sizeof tr_scratch) {        /* our static is too small to be safe */
+        fl_disconnect();
+        *res = TRIM_ERR_SCRATCH_SMALL;
+        return 0;
+    }
+    *need = n;
+    return 1;
 }
 
-static int trim_flash_write_sector(unsigned addr, const unsigned char *buf,
-                                   unsigned len)
+static int tr_read_sector(unsigned char *sec, unsigned len, unsigned *res)
 {
-    if (fl_sectorErase(&fl_trim, addr) != FL_RES_OK) return -1;
-    /* Pages are 256 B; write the sector in page units (the journal fills a
-     * sector linearly, so a whole-sector rewrite is the only path here and
-     * it keeps erase/write/verify to one code path). */
-    for (unsigned off = 0; off < len; off += 256u) {
-        unsigned n = (len - off < 256u) ? (len - off) : 256u;
-        if (fl_pageWrite(&fl_trim, addr + off, buf + off, n) != FL_RES_OK)
-            return -1;
-    }
-    return 0;
+    unsigned psz = 0, need = 0;
+    if (!tr_partition_open(res, &psz, &need)) return 0;
+    if (len > psz) len = psz;
+    int r = fl_readData(0u, len, sec);
+    *res = (unsigned)r;
+    fl_disconnect();
+    return (r == 0);
 }
 
-void csd_trim_load_boot(void)
+/* APPEND one slot. Deliberately does NOT erase: NOR programming turns 1s
+ * into 0s, so writing a 32-byte slot into an erased region needs no erase,
+ * and fl_writeData only needs the scratch page-cache to preserve the REST of
+ * a sector -- there is no other data here to preserve. This is the whole
+ * point of the journal design: the destructive erase happens once per 128
+ * writes (at wrap) instead of once per write, so the power-loss window this
+ * code can lose data in is 128x rarer than an erase-then-write-on-every-save
+ * design. */
+static int tr_append_slot(unsigned slot, const unsigned char *sec, unsigned *res)
 {
-    static unsigned char sector[4096];
+    unsigned psz = 0, need = 0;
+    if (!tr_partition_open(res, &psz, &need)) return 0;
+    unsigned off = slot * TRIM_SLOT_BYTES;
+    int r = fl_writeData(off, TRIM_SLOT_BYTES, sec + off, tr_scratch);
+    *res = (unsigned)r;
+    fl_disconnect();
+    return (r == 0);
+}
 
-    if (fl_connect(&fl_trim) != FL_RES_OK) {
-        csd_mb_put_trim(0u);          /* documented reset default */
-        return;
-    }
-    if (trim_flash_read(CSD_TRIM_FLASH_ADDR, sector, sizeof sector) != 0) {
-        csd_mb_put_trim(0u);
-        return;
-    }
+/* Full rewrite, erase included -- used ONLY when the journal has filled and
+ * is restarting at slot 0. The single destructive path in this file. */
+static int tr_rewrite_sector(const unsigned char *sec, unsigned *res)
+{
+    unsigned psz = 0, need = 0;
+    if (!tr_partition_open(res, &psz, &need)) return 0;
+    int r = fl_eraseDataSector(0u);
+    if (r == 0) r = fl_writeData(0u, sizeof tr_scratch, sec, tr_scratch);
+    *res = (unsigned)r;
+    fl_disconnect();
+    return (r == 0);
+}
 
-    const trim_slot_t *best = 0;
-    uint32_t best_seq = 0;
-    unsigned fill = 0;                /* first free slot for the next append */
-    for (unsigned i = 0; i < TRIM_MAX_SLOTS; i++) {
-        const trim_slot_t *s = (const trim_slot_t *)(sector + i * TRIM_SLOT_BYTES);
-        uint32_t w0 = *(const uint32_t *)s;
-        if (w0 == 0xFFFFFFFFu) { fill = i + 1u; break; }   /* erased: append point */
-        if (!slot_valid(s)) continue;                        /* torn or foreign */
-        if (!best || (int32_t)(s->seq - best_seq) > 0) {     /* wraps correctly */
-            best = s;
-            best_seq = s->seq;
+/* Newest valid slot + the next free slot index. Returns the winning seq. */
+static unsigned tr_scan(const unsigned char *sec, unsigned len,
+                        const trim_slot_t **best, unsigned *fill)
+{
+    const trim_slot_t *b = 0;
+    uint32_t bseq = 0;
+    unsigned f = 0;
+    unsigned nslots = len / TRIM_SLOT_BYTES;
+    if (nslots > TRIM_MAX_SLOTS) nslots = TRIM_MAX_SLOTS;
+    for (unsigned i = 0; i < nslots; i++) {
+        const trim_slot_t *s = (const trim_slot_t *)(sec + i * TRIM_SLOT_BYTES);
+        if (*(const uint32_t *)s == 0xFFFFFFFFu) { f = i; break; }   /* first erased */
+        if (slot_valid(s)) {                      /* torn slots are skipped,
+                                                   * not reused: NOR writes
+                                                   * cannot restore a 1 bit,
+                                                   * so a partially-written
+                                                   * slot stays dirty. */
+            if (!b || (int32_t)(s->seq - bseq) > 0) { /* wraps correctly */
+                b = s; bseq = s->seq;
+            }
         }
-        fill = i + 1u;
+        f = i + 1u;                               /* no erased slot yet: full */
     }
-
-    if (!best) {
-        csd_mb_put_trim(0u);          /* no valid persistence -> 0 dB / 0 dB */
-        trim_next_slot = fill;
-        return;
-    }
-    unsigned packed = (((unsigned)(uint32_t)best->trim_r_88) << 16)
-                    |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
-    csd_mb_put_trim(packed);          /* boot adopts the persisted pair */
-    trim_next_slot = fill;
+    *best = b; *fill = f;
+    return bseq;
 }
 
-void csd_trim_request_save(void)
+/* Adopt the persisted pair. Called by the diagnostic task at startup through
+ * the proxy, and re-runnable on demand (VOLume:TRIM:LOAD) so a rig can
+ * re-read flash without restarting the firmware.
+ *
+ * Publishes into the same mailbox word the SCPI writer uses, so the mixer
+ * reads the persisted pair through the path it already uses -- there is no
+ * second route into the volume multiply that persistence could diverge from.
+ *
+ * Boot ordering is safe by construction rather than by luck: the mixer only
+ * ever multiplies HOST audio, which cannot arrive until USB has enumerated
+ * -- host-side seconds after this load completes. A host cannot hear the
+ * difference between "0 dB" and "not loaded yet". */
+void csd_trim_boot_load(void)
 {
-    /* Called from the SCPI writer thread only (single writer). Build the
-     * whole sector image first, then erase+write: the window in which a
-     * power loss loses data is the erase, and what it loses is the record
-     * being written -- the same value the caller just set, so re-issuing
-     * VOLume:TRIM after a boot recovers it. */
     static unsigned char sector[4096];
+    unsigned res = 0;
 
-    if (fl_connect(&fl_trim) != FL_RES_OK) return;
-    if (trim_flash_read(CSD_TRIM_FLASH_ADDR, sector, sizeof sector) != 0) return;
+    unsigned len = sizeof sector;
+    if (tr_read_sector(sector, len, &res)) {
+        const trim_slot_t *best = 0;
+        unsigned fill = 0;
+        unsigned seq = tr_scan(sector, len, &best, &fill);
+        tr_next_slot = fill;
+        tr_st_load_n++;
+        if (best) {
+            unsigned packed = (((unsigned)(uint32_t)best->trim_r_88) << 16)
+                            |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
+            csd_mb_put_trim(packed);              /* boot adopts the pair */
+            tr_st_seq    = seq;
+            tr_st_loaded = 1u;
+        } else {
+            csd_mb_put_trim(0u);                  /* documented reset default */
+            tr_st_loaded = 2u;                    /* connected, nothing valid */
+        }
+    } else {
+        csd_mb_put_trim(0u);                      /* default on ANY failure */
+        tr_st_loaded = 3u;
+        tr_st_err    = res;
+    }
+}
 
-    if (trim_next_slot >= TRIM_MAX_SLOTS) {
-        /* Sector full: start over. Re-read is unnecessary -- we are about
-         * to erase it all -- but we must place the new record at slot 0 so
-         * a load finds it. */
+/* Journal the current pair. Returns 1 on success and 0 on any flash failure;
+ * the failure code is latched either way, so the caller's reply is honest. */
+int csd_trim_journal_now(void)
+{
+    static unsigned char sector[4096];
+    unsigned res = 0;
+    unsigned l = sizeof sector;
+    if (!tr_read_sector(sector, l, &res)) {
+        tr_st_saved = 2u; tr_st_err = res;
+        return 0;
+    }
+
+    /* Re-scan rather than trust the boot cursor. Two reasons, both learned
+     * the hard way in this project:
+     *  1. A failed boot load leaves tr_next_slot at 0 while the sector may
+     *     already hold slots -- appending there would program over a
+     *     non-erased slot, and a NOR write there produces a slot that is
+     *     neither old nor new. The scan finds the REAL first erased slot,
+     *     so the store self-heals after any failed load.
+     *  2. The cursor is tile[0] state a rig can invalidate by reflashing
+     *     under a running firmware; the sector contents are the truth. */
+    const trim_slot_t *b = 0;
+    unsigned fill = 0;
+    unsigned newest = tr_scan(sector, l, &b, &fill);
+    tr_next_slot = fill;
+
+    int rewrote = 0;
+    if (tr_next_slot >= TRIM_MAX_SLOTS) {
+        /* Journal full: erase and restart at slot 0. This is the one path
+         * that erases, and it happens once every 128 saves. */
         for (unsigned i = 0; i < sizeof sector; i++) sector[i] = 0xFFu;
-        trim_next_slot = 0u;
+        tr_next_slot = 0u;
+        rewrote = 1;
     }
 
-    unsigned packed = csd_mb_get_trim();
-    trim_slot_t *s = (trim_slot_t *)(sector + trim_next_slot * TRIM_SLOT_BYTES);
-    uint32_t prev_seq = 0;
-    {   /* newest existing seq, so the new record is strictly newer */
-        for (unsigned i = 0; i < TRIM_MAX_SLOTS; i++) {
-            const trim_slot_t *o = (const trim_slot_t *)(sector + i * TRIM_SLOT_BYTES);
-            if (*(const uint32_t *)o == 0xFFFFFFFFu) break;
-            if (slot_valid(o)) prev_seq = o->seq;
-        }
-    }
-    s->magic        = TRIM_MAGIC;
-    s->version_len  = (TRIM_VERSION << 16) | 2u;
-    s->trim_l_88    = (int32_t)(short)(packed & 0xFFFFu);
-    s->trim_r_88    = (int32_t)(short)(packed >> 16);
-    s->seq          = prev_seq + 1u;
-    s->chk          = slot_checksum(s);
+    unsigned packed = csd_mb_get_trim();          /* CURRENT value, which is
+                                                   * what the caller just
+                                                   * wrote -- see the header */
+    /* Newest seq FROM THE SECTOR, not from our cached idea of it. If the
+     * boot load failed (or never ran) tr_st_seq is 0 while the sector may
+     * hold seq 7 -- starting at 1 would write a record that tr_scan later
+     * reads as OLDER than the stale ones, so the trim the operator just set
+     * would silently not come back after reboot. The one place where
+     * trusting cached state would produce a store that looks healthy and
+     * loads the wrong value. */
+    unsigned seq = newest + 1u;
+    trim_slot_t *s = (trim_slot_t *)(sector + tr_next_slot * TRIM_SLOT_BYTES);
+    s->magic       = TRIM_MAGIC;
+    s->version_len = (TRIM_VERSION << 16) | 2u;
+    s->trim_l_88   = (int32_t)(short)(packed & 0xFFFFu);
+    s->trim_r_88   = (int32_t)(short)(packed >> 16);
+    s->seq         = seq;
+    s->chk         = slot_checksum(s);
     s->rsvd[0] = 0u; s->rsvd[1] = 0u;
 
-    if (trim_flash_write_sector(CSD_TRIM_FLASH_ADDR, sector,
-                                sizeof sector) != 0) return;
-    trim_next_slot++;
+    int ok = rewrote ? tr_rewrite_sector(sector, &res)
+                     : tr_append_slot(tr_next_slot, sector, &res);
+    if (ok) {
+        tr_st_saved = 1u;
+        tr_st_seq   = seq;
+        tr_next_slot++;
+        tr_st_save_n++;
+    } else {
+        tr_st_saved = 2u;
+        tr_st_err   = res;
+    }
+    return ok;
 }
 
-#else  /* !CSD_TRIM_FLASH_ADDR -- storage compiled out, function unaffected */
-
-void csd_trim_load_boot(void)
+/* Cross-tile status accessor: scalar in, scalar out. The rule in this
+ * codebase is that nothing crosses a tile boundary by pointer -- see
+ * csd_identity.h -- so the caller indexes rather than receiving an array. */
+unsigned csd_trim_status_word(unsigned idx)
 {
-    /* No proven flash region yet: report "no valid persistence found" and
-     * let the documented default stand. The mailbox word is already 0/0 at
-     * reset, so this is an explicit no-op, not an oversight. */
+    switch (idx) {
+    case 0u: return tr_st_partition;
+    case 1u: return tr_st_loaded;
+    case 2u: return tr_st_saved;
+    case 3u: return tr_st_seq;
+    case 4u: return tr_st_err;
+    case 5u: return tr_st_load_n;
+    case 6u: return tr_st_save_n;
+    default: return 0u;                /* out of range: never read past */
+    }
 }
-
-void csd_trim_request_save(void)
-{
-    /* Deliberately empty: the trim pair is live for this power cycle and
-     * applied on every volume change (item 4), but it will NOT survive a
-     * reboot until CSD_TRIM_FLASH_ADDR is defined with the layout audit's
-     * address. Silently not persisting is the safe half of the contract;
-     * writing an unproven address is the unrecoverable half. */
-}
-
-#endif /* CSD_TRIM_FLASH_ADDR */

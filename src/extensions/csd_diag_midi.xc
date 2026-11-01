@@ -258,6 +258,14 @@ void csd_diag_midi(
     msg_open = 0; npend = 0;
     sysex_open = 0; expect_id = 0; parse_pending = 0;
 
+    /* Adopt the persisted L/R trim before this task can serve any SCPI (so
+     * no host can set a trim, and then have a stale journal overwrite it).
+     * Through the proxy: the flash itself is the tile[0] server's to touch,
+     * and blocking here is legitimate because this core is not the audio
+     * path -- the same argument csd_diag_regs.xc makes for REGister:READ?.
+     * No earlier is possible from this core, and no later is safe. */
+    (void) csd_diag_trim_load();
+
     while (1) {
         int is_ack = 0;
         unsigned int datum = 0;

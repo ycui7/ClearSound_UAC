@@ -86,6 +86,13 @@ unsigned csd_diag_reg_writes(void);      /* host codec writes through us */
  * into an SCPI hardware error rather than reporting a stale value. */
 int csd_diag_reg_read(unsigned reg, unsigned *val);
 
+/* L/R trim persistence proxy (csd_diag_regs.xc): forwards to the tile[0]
+ * codec server, which is the only task allowed to drive PORT_SQI_*. See
+ * csd_trim_store.h for why they cannot be called directly from this core. */
+int csd_diag_trim_load(void);
+int csd_diag_trim_save(void);
+unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..6, see csd_trim_store.h */
+
 /* Unit identity, forwarded to the tile[0] owner for the same reason register
  * reads are: the identity statics are per-tile memory (.dp.bss is DP/CP
  * relative), so this core cannot read them directly. Returns 0 on failure; on

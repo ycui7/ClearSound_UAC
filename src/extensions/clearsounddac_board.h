@@ -52,6 +52,9 @@ typedef enum
      * SCPI core reading them directly sees its own zeroed copy and reports
      * "nothing read" forever. Ask the tile[0] owner instead, exactly as
      * REGister:READ? does. */
+    AUDIOHW_CMD_TRIM_LOAD,          //read the journal, publish into the mailbox
+    AUDIOHW_CMD_TRIM_SAVE,          //journal the CURRENT mailbox trim pair
+    AUDIOHW_CMD_TRIM_STAT,          //reply the 7 persistence status words
     AUDIOHW_CMD_IDENTITY
 } audioHwCmd_t;
 

@@ -28,12 +28,30 @@ persistence, which is written and deliberately compiled out -- see item 3.
    `csd_trim_store.c` implements the journal (append-only 32 B slots in one
    4 KiB sector, magic + version + length + checksum, newest-valid-wins).
 
-   OPEN — persistence is COMPILED OUT. `CSD_TRIM_FLASH_ADDR` is undefined, so
-   nothing writes flash and the load always reports "no valid persistence
-   found", leaving 0 dB / 0 dB. Trim therefore does NOT yet survive a reboot.
-   Reason: an unproven write address in the boot flash is unrecoverable
-   without a jig (the boot ROM scans for XEF blocks). Needs an audited free
-   sector, the quadflash clock block, and a reboot-survival rig leg.
+   PERSISTENCE DATA GETS WIPED — owner-acknowledged 2026-11-01 ("ok to flash,
+   add note to todo about persistence data get wiped"). The trim record lives
+   in the flash DATA partition, which is NOT part of what a firmware update
+   preserves. It is erased by any of:
+     - `xflash --data ...` (an explicit data-partition write),
+     - a full-chip reprogram (`xflash --write-all`, or any recipe that
+       re-lays-out the boot partition),
+     - a different `--boot-partition-size` than the one that placed the data
+       partition, which moves or removes it.
+   A plain DFU firmware update (`xflash --factory-version ... --upgrade 1` +
+   the DFU path) writes boot-partition images only and MUST leave the trim
+   intact — that leg is a rig requirement, not an assumption (see below).
+   Consequence for manufacturing: set trim LAST, after the final firmware
+   flash; re-verify trim with `VOLume:TRIM?` after any re-flash and re-run the
+   persistence leg after any firmware update.
+
+   API correction (2026-11-01, verified against XTC 15.3.0 headers): the first
+   draft called `fl_read`, `fl_sectorErase` and `fl_pageWrite`. None of those
+   exist in 15.3.0's quadflash.h — it would not have linked. The real set is
+   the data-partition API: `fl_getDataPartitionSize`, `fl_readData`,
+   `fl_writeData` (+ `fl_getWriteScratchSize`), `fl_eraseDataSector`,
+   `fl_getNumDataSectors`, `fl_getDataSectorSize`. Because the API addresses
+   the data partition by OFFSET, not by raw flash address, the boot-ROM XEF-scan
+   brick risk this item was gated on does not apply — the tool owns placement.
 4. **DONE (2026-11-01) — Trim application point.** Whenever a volume change happens, each
    `Vol_trim_*` is added to its respective L/R channel — the trim rides on
    every volume update, host SET_CUR and button paths alike.

@@ -42,6 +42,46 @@ static unsigned reg_writes;          /* bench audit: how often a host touched
 void csd_diag_note_reg_write(void)  { reg_writes++; }
 unsigned csd_diag_reg_writes(void)  { return reg_writes; }
 
+/* ---- L/R trim persistence proxy (TODO item 3) --------------------------
+ * Same channel, same single-user argument as the register calls above: the
+ * only caller is this task. These exist because quadflashlib needs the
+ * tile[0] SQI ports; see csd_trim_store.h for the measurements that ruled
+ * out a dedicated task. Blocking here is legitimate for the same reason the
+ * register calls may block -- this core is not the audio path.
+ *
+ * Plain locals on every send/receive: nothing relies on the channel
+ * operators accepting an expression or a struct member. */
+int csd_diag_trim_load(void)
+{
+    unsigned ok;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_LOAD;
+        uc_audiohw_diag :> ok;
+    }
+    return ok ? 1 : 0;
+}
+
+int csd_diag_trim_save(void)
+{
+    unsigned ok;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_SAVE;
+        uc_audiohw_diag :> ok;
+    }
+    return ok ? 1 : 0;
+}
+
+unsigned csd_diag_trim_status(unsigned idx)
+{
+    unsigned v;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_STAT;
+        uc_audiohw_diag <: idx;
+        uc_audiohw_diag :> v;
+    }
+    return v;
+}
+
 int csd_diag_reg_read(unsigned reg, unsigned *val)
 {
     unsigned v;
