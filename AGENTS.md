@@ -2,7 +2,8 @@
 
 App repo for the CSD USB DAC (XU316 + ES9219Q). Build/ops procedure lives in
 the `clearsound-dac-xmos` skill; action log in `../LOG.md` (ub-mode).
-Release: `release/` + tag `v2026.11.01.31`.
+Release: `release/` + tag. Current: `v2026.11.01.85` (app 302bb22, DFU bin
+md5 e944e3cc50bc631878b9959855fbfc53). Previous: `v2026.11.01.31`.
 
 ## Release rule (directive 2026-11-01)
 

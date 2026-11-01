@@ -5,8 +5,10 @@ one commit per item, acoustic gate (rig mix + mute) after each.
 
 ## Features (added 2026-11-01)
 
-Status: 1, 4, 5, 6 done (2026-11-01); 2 done (bench-verified); 3 done except
-persistence, which is written and deliberately compiled out -- see item 3.
+Status: ALL SIX DONE (2026-11-01), released as `v2026.11.01.85-346fe14`.
+Item 3's persistence is implemented AND verified on hardware (both builds) --
+it is no longer compiled out; see item 3 for the evidence and for the two legs
+still open (raw power cycle, trim survival across a DFU update).
 
 1. **DONE (2026-11-01) — Remove automute handling from ES9219Q code.** Do nothing to automute:
    leave the register at the DAC's default condition, whatever that is. No
@@ -54,7 +56,21 @@ persistence, which is written and deliberately compiled out -- see item 3.
        partition, which moves or removes it.
    A plain DFU firmware update (`xflash --factory-version ... --upgrade 1` +
    the DFU path) writes boot-partition images only and MUST leave the trim
-   intact — that leg is a rig requirement, not an assumption (see below).
+   intact — that leg was a rig requirement, not an assumption. **MEASURED AND
+   PASSING 2026-11-01** by `rig/trim_dfu_survive.py` (+ scratch wrapper): arm
+   LEFT=−64 / RIGHT=−128 (−8 dB / −16 dB) → device reboot → the release DFU bin
+   (`e944e3cc…`, boot partitions only, **no** `--data`) → exit DFU → fresh boot.
+   On that fresh boot the device replies `VOLume:TRIM?` = `-64,-128` (unchanged)
+   and `VOLume:TRIM:STATus?` = `1048576,1,0,1,0,1,0` — partition 1 MiB still
+   present, `load=1` = a VALID record was found and adopted
+   (`csd_trim_store.c:361-369`: 1=found, 2=nothing valid, 3=connect failed),
+   `seq=1` identical to the armed journal (read from flash, not RAM) while the
+   RAM `save_n` correctly reset to 0 for the new life, `err=0`. A zeroing leg
+   (`rig/trim_dfu_survive.py zero`) then took the board back to `0,0` and
+   advanced `seq` 1→3, proving the journal is still writable after the DFU and
+   that the −64/−128 was not a stale RAM echo. Manufacturing consequence stands:
+   set trim LAST, and re-check `VOLume:TRIM?` after any flash that touches
+   `--data`, `--write-all`, or the boot-partition size — those three DO erase it.
    Consequence for manufacturing: set trim LAST, after the final firmware
    flash; re-verify trim with `VOLume:TRIM?` after any re-flash and re-run the
    persistence leg after any firmware update.
