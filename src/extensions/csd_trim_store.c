@@ -368,14 +368,18 @@ unsigned csd_trim_boot_load(void)
         tr_st_loaded = 3u;
         tr_st_err    = res;
     }
-    /* NO POINTER: the codebase rule is scalars across a tile boundary, and a
-     * C-defined function taking unsigned* and called from XC does not even
-     * link -- "Type of symbol has mismatch ... /* C pointer */ ... /* xC
-     * pointer */"; the compiler's own fix is `unsigned *unsafe` on the
-     * declaration, which the C header cannot express. Returning the value
-     * removes the problem and the rule violation at once. Load status is
-     * already a scalar: csd_trim_status_word(1). Caller (tile[1]) applies the
-     * returned pair to its OWN mailbox. */
+    /* NO POINTER. The rule is scalars across a tile boundary, and it is also
+     * the only shape that links: a C-defined function with an unsigned*
+     * parameter, called from XC, fails xlink with "Type of symbol has
+     * mismatch, found ... C pointer, previous ... xC pointer". The compiler
+     * suggests unsafe on the pointer, which belongs on the declaration -- and
+     * a C header cannot spell that. Returning the value removes the pointer
+     * and the rule violation together. Load status is already a scalar
+     * (csd_trim_status_word index 1), so the server still replies both words.
+     * Caller (tile[1]) applies the returned pair to its OWN mailbox static.
+     * (Careful quoting: this file once failed to build because a comment
+     * quoted the compiler's own slash-star / star-slash tokens and ended the
+     * block comment early. Do not paste comment delimiters into prose.) */
     return packed;
 }
 
