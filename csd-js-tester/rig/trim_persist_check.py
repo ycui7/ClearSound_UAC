@@ -64,7 +64,27 @@ def scpi(cmd, timeout=10):
 
 
 def nums(out):
-    return [int(t) for t in out.replace("\r", " ").replace(",", " ").split()]
+    """Integers in a numeric reply (VOLume:TRIM:STATus? etc).
+
+    Finds digit runs rather than splitting on whitespace and calling int():
+    SYST:ERR? answers 0,"No error", and int('"No') raised ValueError, which is
+    how this rig died on the bench the first time it ran (2026-11-01). Quoted
+    prose can hold digits, so anything reading a REPLY CODE must use
+    err_code() -- the first integer -- instead of trusting the whole list.
+    """
+    return [int(t) for t in re.findall(r"-?\d+", out)]
+
+
+def err_code(timeout=8):
+    """Head-of-queue error CODE, or None if the reply has no number.
+
+    0 means the queue is empty ("0,\"No error\""), which is NOT truthy
+    evidence of anything -- that confusion is why the old
+    `if nums(scpi("SYST:ERR?"))` rejection test passed vacuously, and why
+    `while nums(...)` in drain_errors would have looped forever on [0].
+    """
+    v = nums(scpi("SYST:ERR?", timeout))
+    return v[0] if v else None
 
 
 def card(*pats):
