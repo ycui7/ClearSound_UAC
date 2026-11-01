@@ -16,11 +16,30 @@ the reference for the byte form.
 """
 import os, re, select, sys, time
 
-CSD_SYSEX_ID = 0x7E          # csd_diag_midi.xc:61 -- NOT 0x43. A wrong
-                             # id is abandoned without a reply
-                             # (csd_diag_midi.xc:121-123), which reads
-                             # as a dead device. Verify constants in
-                             # the firmware before writing a probe.
+def read_sysex_id():
+    """Take the SysEx id from the firmware instead of hard-coding it.
+
+    This is the one constant whose failure fakes a DEAD DEVICE: rx_event
+    abandons a message whose id byte mismatches WITHOUT replying
+    (csd_diag_midi.xc:121-123). Three probes hard-coded 0x43 and each one
+    'proved' the device silent at the byte level. Deriving it at run time
+    removes the whole class of bug (and the previous version of this file
+    called its own check before defining the constant -> NameError)."""
+    src = ("/home/ycui/sw-audio-sc/sw_usb_audio/clearsound_uac"
+           "/src/extensions/csd_diag_midi.xc")
+    try:
+        txt = open(src, errors="ignore").read()
+    except OSError:
+        sys.exit(f"cannot read {src} -- refusing to guess the SysEx id")
+    m = re.search(r"#define\s+CSD_SYSEX_ID\s+(0x[0-9A-Fa-f]+)", txt)
+    if not m:
+        sys.exit(f"CSD_SYSEX_ID not found in {src}")
+    v = int(m.group(1), 16)
+    print(f"CSD_SYSEX_ID read from firmware: 0x{v:02X}", flush=True)
+    return v
+
+
+CSD_SYSEX_ID = read_sysex_id()   # csd_diag_midi.xc:61 today = 0x7E
 
 
 def node_path():
@@ -69,8 +88,15 @@ def frame(payload):
     return body
 
 
+# Query whatever the caller asks for. Hard-coding *IDN? meant every claim
+# about another command (VOLume:TRIM:STATus? in the release notes) had to be
+# taken on faith from a client that loses replies -- and it did lose them
+# (csd_diag.py returned <silent> while this rig got 7/7 on the same boot).
+QUERY = (sys.argv[1] if len(sys.argv) > 1 else "*IDN?").encode() + b"\r\n"
+
+
 p = node_path()
-print(f"node: {p}", flush=True)
+print(f"node: {p}  query: {QUERY!r}", flush=True)
 f = os.open(p, os.O_RDWR)
 
 pre = drain(f, 0.5)
@@ -78,10 +104,12 @@ print(f"  pre-drain: {len(pre)} byte(s) {pre[:40]!r}", flush=True)
 
 answered = 0
 for q in range(1, 7):
-    body = frame(b"*IDN?\r\n")
+    body = frame(QUERY)
     write_all(f, body)
     r = drain(f, 4)
-    ok = b"ClearSound" in r or b"CSD-22" in r
+    ok = bool(r.strip())      # any non-empty reply counts -- the caller may
+                              # ask any command, and a trim/status reply does
+                              # not contain 'ClearSound'
     answered += 1 if ok else 0
     print(f"  Q{q}: wrote {len(body)}B -> {len(r)}B {'ANSWERED' if ok else 'SILENT'} "
           f"{r[:56]!r}", flush=True)
@@ -93,9 +121,9 @@ print("  --- lone F7, then one more query ---", flush=True)
 write_all(f, b"\xF7")
 time.sleep(0.4)
 _ = drain(f, 0.5)
-write_all(f, frame(b"*IDN?\r\n"))
+write_all(f, frame(QUERY))
 r = drain(f, 4)
-ok = b"ClearSound" in r or b"CSD-22" in r
+ok = bool(r.strip())
 answered += 1 if ok else 0
 print(f"  Q-f7: -> {len(r)}B {'ANSWERED' if ok else 'SILENT'} {r[:56]!r}", flush=True)
 

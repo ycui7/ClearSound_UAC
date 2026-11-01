@@ -166,11 +166,22 @@ def main():
                 break
         if intf_no is None:
             sys.exit("runtime device exposes no DFU interface")
-        # Release the DFU interface from the kernel BEFORE the class request.
-        # snd-usb-audio claims every interface of this composite device, and a
-        # class request (DFU_DETACH) to a kernel-owned interface is the EIO
-        # seen on the first attempts. Detaching it explicitly is what the
-        # 'runtime bus reset' hack was accidentally achieving.
+        # The DFU state machine must be in appIDLE/appDETACH or DFU_DETACH is
+        # STALLed, which surfaces as EIO and d018 never appearing
+        # (dfu.xc:178/:305/:587 are the only handlers). It is left wedged by a
+        # previous session, so entry must clear it FIRST. Two ways:
+        #   - rt.reset() (a userspace bus reset): WORKS for entry, but it acts
+        #     on a device the audio driver still owns and knocks the card out
+        #     from under the kernel -- after several such resets
+        #     /proc/asound/cards lost the XMOS entry entirely while lsusb
+        #     still listed it. BANNED.
+        #   - a device-side reboot out of band (xgdb 'monitor reset', which is
+        #     what scratch/boot_from_flash.sh does): the whole chip restarts, so
+        #     the SM starts clean in appIDLE and DETACH is accepted. That is the
+        #     supported path; run boot_from_flash.sh before DFU.
+        # Detaching the kernel's claim on the DFU interface is still done, for
+        # the same reason as before: a class request to a kernel-owned
+        # interface fails.
         try:
             if rt.is_kernel_driver_active(intf_no):
                 rt.detach_kernel_driver(intf_no)

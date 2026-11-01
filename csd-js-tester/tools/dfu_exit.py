@@ -17,7 +17,13 @@ NAMES = {0:"appIDLE",1:"appDETACH",2:"dfuIDLE",3:"DNLOAD-SYNC",4:"DNBUSY",
 def present(pid):
     return usb.core.find(idVendor=0x20b1, idProduct=pid) is not None
 
-dev = present(0xD018) and usb.core.find(idVendor=0x20b1, idProduct=0xD018)
+# find() returns a Device or None -- never a bool. An earlier version wrote
+# `present(0xD018) and usb.core.find(...)`, which yields False when absent, so
+# the `is None` guard below never fired and the next line raised
+# AttributeError: 'bool' object has no attribute 'is_kernel_driver_active'.
+# Worse, that traceback buried the real failure above it (d018 never appeared),
+# so a DFU-entry problem was reported as a Python bug.
+dev = usb.core.find(idVendor=0x20b1, idProduct=0xD018)
 if dev is None:
     print("already out of DFU mode" if present(0x0018) else "no device at all")
     sys.exit(0 if present(0x0018) else 1)
