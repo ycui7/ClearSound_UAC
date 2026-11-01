@@ -56,6 +56,39 @@ void csd_mb_put_dop(unsigned dop) { csd_mb_dop = dop ? 1u : 0u; }
 
 unsigned csd_mb_get_dop(void) { return csd_mb_dop; }
 
+/* Per-source pre-mixer gains, packed as (w_gen << 16) | w_host, each Q15
+ * with 32768 = unity. Packed INTO ONE WORD on purpose: a set wants both
+ * values to arrive together (two words would let the mixer apply a new
+ * host weight with the old generator weight for a frame or two -- audible,
+ * and exactly what the file header forbids). Writer: diagnostic thread
+ * (SCPI MIXer:GAIN:* -- a PRODUCTION command, so this word survives the
+ * release gate below). Reader: mixer thread, once per frame. Initialised
+ * to unity/unity so the boot state is byte-exact passthrough even before
+ * the host ever writes. */
+static volatile unsigned csd_mb_gains = (32768u << 16) | 32768u;
+
+void     csd_mb_put_gains(unsigned packed) { csd_mb_gains = packed; }
+unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
+
+/* ---- release gate (TODO items 5+6, directive 2026-11-01) -----------------
+ * Everything below this line EXCEPT the per-source gain word is bench
+ * instrumentation: counters and peak-houses that only the debug SCPI block
+ * in csd_diag_scpi.c (also compiled out) can read. The XC call-sites are
+ * guarded by CSD_GEN_EN, which release builds keep on (the rig drives the
+ * generator), so the note_* entry points must continue to EXIST -- under
+ * SPECIALTYCIRCUITS_RELEASE their bodies compile to nothing and the
+ * whole-program compile inlines the per-sample/per-frame calls away. The
+ * getters are compiled out entirely: with the debug callbacks gone nothing
+ * references them, and an unreferenced static costs flash.
+ * Functional state that stays in every build: csd_mb_fs, csd_mb_dop (rate
+ * + DoP hand-off) and csd_mb_gains (MIXer:GAIN:* is a production command). */
+#ifdef SPECIALTYCIRCUITS_RELEASE
+#define CSD_DBG_OFF 1
+#else
+#define CSD_DBG_OFF 0
+#endif
+#if !CSD_DBG_OFF
+
 /* ---- mixer volume-command trace ------------------------------------------
  *
  * WHY: the host's SET_CUR for 'Mix 2 Playback Volume' returns rc=0 and the
@@ -110,19 +143,6 @@ static volatile unsigned csd_mb_dop_frames;   /* votes cast                  */
 static volatile unsigned csd_mb_dop_match;    /* frames where MARK passed    */
 static volatile unsigned csd_mb_dop_lastL;    /* last raw hostL voted        */
 static volatile unsigned csd_mb_dop_lastR;    /* last raw hostR voted        */
-
-/* Per-source pre-mixer gains, packed as (w_gen << 16) | w_host, each Q15
- * with 32768 = unity. Packed INTO ONE WORD on purpose: a set wants both
- * values to arrive together (two words would let the mixer apply a new
- * host weight with the old generator weight for a frame or two -- audible,
- * and exactly what the file header forbids). Writer: diagnostic thread
- * (SCPI MIXer:GAIN:*). Reader: mixer thread, once per frame. Initialised
- * to unity/unity so the boot state is byte-exact passthrough even before
- * the host ever writes. */
-static volatile unsigned csd_mb_gains = (32768u << 16) | 32768u;
-
-void     csd_mb_put_gains(unsigned packed) { csd_mb_gains = packed; }
-unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
 
 /* Mixer-frame proof. The case-A ladder says the artifact grows with our
  * features (factory +1.0 dB, production +5.8, mixer-no-gen +4..7, mixer+gen
@@ -396,3 +416,19 @@ void csd_mb_get_dopvote(unsigned *f, unsigned *m, unsigned *l, unsigned *r)
     *f = csd_mb_dop_frames; *m = csd_mb_dop_match;
     *l = csd_mb_dop_lastL;  *r = csd_mb_dop_lastR;
 }
+
+#else  /* CSD_DBG_OFF: the XC call-sites (guarded by CSD_GEN_EN, which the
+ * release build keeps on for the generator) still need these symbols --
+ * empty bodies, and the whole-program compile inlines the per-frame/per-
+ * sample calls away entirely. Getters/clears are NOT stubbed: their only
+ * callers were the debug SCPI callbacks, gone with them. */
+void csd_mb_note_vol(unsigned index, unsigned val)              { (void)index; (void)val; }
+void csd_mb_note_mix_frame(void)                                { }
+void csd_mb_note_mix_busy(unsigned delta_ticks)                 { (void)delta_ticks; }
+void csd_mb_note_mix_tail(unsigned delta_ticks)                 { (void)delta_ticks; }
+void csd_mb_note_hwcfg(unsigned sam_freq, unsigned mclk)        { (void)sam_freq; (void)mclk; }
+void csd_mb_note_i2s_delta(unsigned short delta_ticks)          { (void)delta_ticks; }
+void csd_mb_note_host_nonzero(unsigned ch, int s, unsigned f)   { (void)ch; (void)s; (void)f; }
+void csd_mb_note_dac_sample(unsigned ch, unsigned node, int s)  { (void)ch; (void)node; (void)s; }
+void csd_mb_note_dopvote(unsigned m, unsigned l, unsigned rr)   { (void)m; (void)l; (void)rr; }
+#endif /* !CSD_DBG_OFF -- bench instrumentation region */

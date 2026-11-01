@@ -4,6 +4,15 @@ App repo for the CSD USB DAC (XU316 + ES9219Q). Build/ops procedure lives in
 the `clearsound-dac-xmos` skill; action log in `../LOG.md` (ub-mode).
 Release: `release/` + tag `v2026.11.01.31`.
 
+## Release rule (directive 2026-11-01)
+
+For each release, test BOTH builds: the debug build (no
+`SPECIALTYCIRCUITS_RELEASE`) and the release build (flag set). Both must
+pass the acoustic gate (rig mix + mute), and both must be built from a clean
+repo state — no uncommitted changes at build time. The release build is what
+ships (`release/` + tag); the debug build proves the instrumentation stays
+functional and that gating it does not perturb audio.
+
 ## TODO
 
 Feature list lives in [`TODO.md`](TODO.md). Owner-directive items land there;

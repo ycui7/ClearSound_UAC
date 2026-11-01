@@ -947,6 +947,15 @@ static SCPI_FPTR_CMD scpi_result_t gen_state_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* ---- DEBUG-only instruments (TODO item 5, directive 2026-11-01) ----------
+ * Bench counters added during bring-up. Compiled out entirely when
+ * SPECIALTYCIRCUITS_RELEASE is defined (the release switch, TODO item 6):
+ * callbacks AND table rows vanish, so a stray DEBUG:/MIXer:counter command
+ * in a release build answers -113 "Undefined header", and the code costs no
+ * flash. The production surface (*IDN?, error queue, DIAG:DSP:PRESet,
+ * DIAG:IDENTity:*, REGister:*, GENerator: waveform setters + STATe?,
+ * MIXer:GAIN:*) stays in every build. */
+#ifndef SPECIALTYCIRCUITS_RELEASE
 /* GENerator:COUNts? -> emit,sup_dsd,sup_dop
  *
  * What the frame hook decided per frame while the generator was armed:
@@ -1030,6 +1039,8 @@ static SCPI_FPTR_CMD scpi_result_t gen_volume_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+#endif /* !SPECIALTYCIRCUITS_RELEASE: gen_counts_q / gen_volume_q */
+
 /* MIXer:GAIN:HOST <w_q15> | MIXer:GAIN:GENerator <w_q15>
  * MIXer:GAIN? -> w_host,w_gen
  *
@@ -1085,6 +1096,7 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+#ifndef SPECIALTYCIRCUITS_RELEASE   /* debug-only block, see above */
 /* MIXer:BUSY? -- peak ticks mixer1 held audio() between the request token
  * and the sample exchange. Direct answer to "does the generator, which runs
  * INSIDE mixer1 on tile[1], steal budget from the hard-real-time audio()
@@ -1313,6 +1325,8 @@ static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+#endif /* !SPECIALTYCIRCUITS_RELEASE: MIXer counters, DIAG:I2S, probes */
+
 static const scpi_command_t csd_commands[] = {
     /* IEEE 488.2 mandated subset */
     { .pattern = "*IDN?",  .callback = q_idn     },   /* ours, not CoreIdnQ: see q_idn */
@@ -1366,23 +1380,27 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:NOISe",         .callback = gen_noise   },
     { .pattern = "GENerator:OFF",           .callback = gen_off     },
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
-    { .pattern = "GENerator:COUNts?",       .callback = gen_counts_q },
-    /* MIXer:FRAMES? -- mixer1 sample-loop counter (proof of life; see
-     * csd_gen_mailbox.c). Registers with MIXer:GAIN:* as the mixer group. */
-    { .pattern = "MIXer:FRAMES?",           .callback = mixer_frames_q },
-    { .pattern = "MIXer:BUSY?",             .callback = mixer_busy_q },
-    { .pattern = "MIXer:TAIL?",             .callback = mixer_tail_q },
-    { .pattern = "MIXer:HWCfg?",            .callback = mixer_hwcfg_q },
-    { .pattern = "MIXer:DACPeak?",          .callback = mixer_dacpeak_q },
-    { .pattern = "MIXer:DACPeak:CLEAR",     .callback = mixer_dacpeak_clear },
-    { .pattern = "DIAG:I2S?",               .callback = diag_i2s_q },
-    { .pattern = "DIAG:I2S:CLEAR",          .callback = diag_i2s_clear },
-    { .pattern = "GENerator:VOLume?",       .callback = gen_volume_q },
-    { .pattern = "GENerator:DOPpRObe?",     .callback = gen_dop_probe_q },
     { .pattern = "MIXer:GAIN:HOST",         .callback = mixer_gain_host },
     { .pattern = "MIXer:GAIN:GENerator",    .callback = mixer_gain_gen  },
     { .pattern = "MIXer:GAIN?",             .callback = mixer_gain_q    },
-    { .pattern = "GENerator:STATe:REJect?", .callback = gen_reject_q },
+#ifndef SPECIALTYCIRCUITS_RELEASE
+    /* Debug-only rows (TODO item 5): gone in release builds together with
+     * their callbacks above; a stray DEBUG: command then answers -113.
+     * Renamed under the DEBUG: group (old names kept as comments; rigs
+     * moved with them in the same commit). */
+    { .pattern = "DEBUG:GENerator:COUNts?",  .callback = gen_counts_q },
+    { .pattern = "DEBUG:MIXer:FRAMES?",      .callback = mixer_frames_q },
+    { .pattern = "DEBUG:MIXer:BUSY?",        .callback = mixer_busy_q },
+    { .pattern = "DEBUG:MIXer:TAIL?",        .callback = mixer_tail_q },
+    { .pattern = "DEBUG:MIXer:HWCfg?",       .callback = mixer_hwcfg_q },
+    { .pattern = "DEBUG:MIXer:DACPeak?",     .callback = mixer_dacpeak_q },
+    { .pattern = "DEBUG:MIXer:DACPeak:CLEAR",.callback = mixer_dacpeak_clear },
+    { .pattern = "DEBUG:I2S?",               .callback = diag_i2s_q },
+    { .pattern = "DEBUG:I2S:CLEAR",          .callback = diag_i2s_clear },
+    { .pattern = "DEBUG:GENerator:VOLume?",  .callback = gen_volume_q },
+    { .pattern = "DEBUG:GENerator:DOPpRObe?",.callback = gen_dop_probe_q },
+    { .pattern = "DEBUG:GENerator:STATe:REJect?", .callback = gen_reject_q },
+#endif
 
     SCPI_CMD_LIST_END
 };

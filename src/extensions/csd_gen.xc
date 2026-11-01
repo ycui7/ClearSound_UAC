@@ -92,8 +92,20 @@ static csd_gen_t         csd_gen_pend;    /* staged descriptor, caller writes */
  * equivalent in C and are not in XC. */
 static unsigned csd_gen_cmd;              /* incremented by the caller        */
 static unsigned csd_gen_adopted;          /* incremented by the audio thread  */
+/* Release gate (TODO items 5+6): the counters below feed only the debug SCPI
+ * block in csd_diag_scpi.c, which SPECIALTYCIRCUITS_RELEASE compiles out.
+ * CSD_DBG_OFF is defined by csd_gen_mailbox.c's region guard -- but this TU
+ * cannot include it (it is a .c), so spell the same condition from the one
+ * switch the build defines. Keep in sync with csd_gen_mailbox.c. */
+#ifdef SPECIALTYCIRCUITS_RELEASE
+#define CSD_DBG_OFF 1
+#else
+#define CSD_DBG_OFF 0
+#endif
+#if !CSD_DBG_OFF
 static unsigned csd_gen_rejects;
 static unsigned csd_gen_last_reject;      /* a CSD_GEN_REJ_* value            */
+#endif
 
 /* Per-frame accounting of the DSD/DoP injection gate, counted ONLY while the
  * generator is armed -- that is the case the rig must see, and it keeps the
@@ -104,9 +116,11 @@ static unsigned csd_gen_last_reject;      /* a CSD_GEN_REJ_* value            */
  * exactly the false FAIL this counter replaces. A count taken on the audio
  * thread at the decision point is the direct measurement: emitted vs
  * suppressed-by-dsd vs suppressed-by-dop. */
+#if !CSD_DBG_OFF
 static unsigned csd_gen_n_emit;           /* armed: wave written this frame   */
 static unsigned csd_gen_n_sup_dsd;        /* armed: skipped, DSD/native mode  */
 static unsigned csd_gen_n_sup_dop;        /* armed: skipped, DoP latch on     */
+#endif
 
 static unsigned csd_gen_load(const unsigned *p)
 {
@@ -134,9 +148,13 @@ static void csd_gen_reject(unsigned why)
      * volatile write of the same variable in one expression have no defined
      * order, and the compiler refuses rather than guessing. csd_dsp.xc hits
      * the identical wall on csd_dsp_bump and documents it the same way. */
+#if !CSD_DBG_OFF
     unsigned n = csd_gen_load(&csd_gen_rejects) + 1u;
     csd_gen_store(&csd_gen_last_reject, why);
     csd_gen_store(&csd_gen_rejects, n);
+#else
+    (void)why;    /* release: validation still rejects, the tally is gone */
+#endif
 }
 
 /* Validate on the CALLING thread so a bad SCPI argument gets an error reply
@@ -295,6 +313,9 @@ void csd_gen_request_off(void)
  * snapshot -- the rig only ever needs each to have advanced. */
 void csd_gen_note(unsigned why)
 {
+#if CSD_DBG_OFF
+    (void)why;    /* release: gate decided, the per-frame tally is gone */
+#else
     unsigned v;
     if (why == 0u) {
         v = csd_gen_load(&csd_gen_n_emit) + 1u;
@@ -306,6 +327,7 @@ void csd_gen_note(unsigned why)
         v = csd_gen_load(&csd_gen_n_sup_dop) + 1u;
         csd_gen_store(&csd_gen_n_sup_dop, v);
     }
+#endif
 }
 
 void csd_gen_apply_pending(void)
@@ -514,16 +536,20 @@ int csd_gen_mix_sample(unsigned ch, int host)
 
 /* Gate counters for SCPI (see the block above): the rig takes deltas across
  * a stream segment, so these are never reset and need no consistent triple. */
+#if !CSD_DBG_OFF
 unsigned csd_gen_cnt_emit(void)   { return csd_gen_load(&csd_gen_n_emit); }
 unsigned csd_gen_cnt_sup_dsd(void){ return csd_gen_load(&csd_gen_n_sup_dsd); }
 unsigned csd_gen_cnt_sup_dop(void){ return csd_gen_load(&csd_gen_n_sup_dop); }
+#endif
 unsigned csd_gen_state_adopted(void)  { return csd_gen_load(&csd_gen_adopted); }
 unsigned csd_gen_state_cmd(void)      { return csd_gen_load(&csd_gen_cmd); }
+#if !CSD_DBG_OFF
 unsigned csd_gen_state_rejects(void)  { return csd_gen_load(&csd_gen_rejects); }
 int      csd_gen_state_last_reject(void)
 {
     return (int)csd_gen_load(&csd_gen_last_reject);
 }
+#endif
 
 unsigned csd_gen_state_fs(void)       { return csd_gen.fs; }
 unsigned csd_gen_state_f_a_q8(void)   { return csd_gen.f_a; }
