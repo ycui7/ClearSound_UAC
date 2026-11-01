@@ -906,21 +906,15 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE) ); 
     DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | (AnalogVolume & 0x1F)));
 
-    /* Automute considered and REJECTED (user ruling 2026-10-31: "automute
-     * is the wrong direction, automute is not the reason"). Enabled once,
-     * reg readback over SCPI returned nothing usable, and the hypothesis
-     * itself was off: the case-A artifact needs a mechanism that GENERATES
-     * content on zeros; automute can only gate the analog stage, and the
-     * digital module audit (rig/datapath_2k_check.py + mirror probe) is
-     * still open on whether the words leaving the audio thread equal the
-     * words the capture mirror showed. Parked, not deleted, values pinned
-     * in es9219q.h for when automute is wanted for its own sake (between-
-     * tracks hiss is a real product concern; it is just not THIS bug).
+    /* Automute: DISABLED per user directive (2026-10-31). It never fixed
+     * case A -- the artifact scales with unmuted exposure and survives the
+     * automute state (0x48=0x32 asserted, first stream still popped; rig/
+     * case_a_timing.py, rig/automute_ab.py, rig/first_stream_pop.py).
+     * Left commented, with the reasoning, per the dead-code rule:
      *
-     * DAC_REGWRITE (ES9219Q_MIXING_N_AUTOMUTE_CONFIG, 0x50); // 2'b01 mute
-     *   on automute | ANALOG_AUTOMUTE=0 (keep reg 3) | TIMER_FAST | mix map
-     * DAC_REGWRITE (ES9219Q_AUTOMUTE_TIME, 128);             // ~5 ms @48k
-     * DAC_REGWRITE (ES9219Q_AUTOMUTE_LEVEL, 104);            // -104 dB
+     *   DAC_REGWRITE(ES9219Q_MIXING_N_AUTOMUTE_CONFIG, MUTE_ON|ANALOG_HOLD|TIMER_FAST|MIX_SEL_DEFAULTS);
+     *   DAC_REGWRITE(ES9219Q_AUTOMUTE_TIME,  128);
+     *   DAC_REGWRITE(ES9219Q_AUTOMUTE_LEVEL, 104);
      */
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
@@ -1027,8 +1021,15 @@ void csd_AudioHwConfig_Mute(void){
 
 
 void csd_AudioHwConfig_UnMute(void){
-    /* Runs after AudioHwConfig on every rate change. Must not override a host
-     * mute: ask the server to re-assert reg 7 for its cached mute state
-     * (unmuted -> writes unmuted, exactly as before). */
+    /* Runs after AudioHwConfig on every stream start. Must not override a
+     * host mute: re-asserts reg 7 for whatever the host asked for.
+     *
+     * A 150 ms mute-hold here (delay, then RESYNC) was TRIED against the
+     * stream-start pop and REVERTED with data: it made case A WORSE
+     * (-29.5/-30.6 dBFS vs -45.5/-45.8 baseline). The artifact scales with
+     * mute exposure -- a longer muted stretch unmutes into a LOUDER pop --
+     * so this is the unmute ramp itself (reg 14 SOFT_START, never written;
+     * see rig/softstart_probe.py), not a glitch at the mute edge. A hold
+     * here is anti-evidence code; it stays out. */
     DAC_MUTE_RESYNC();
 }
