@@ -1,0 +1,211 @@
+
+#include <platform.h>
+#include <xs1.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <iso646.h>
+#include <xccompat.h> // REFERENCE_PARAM
+#include <debug_print.h>    
+
+//#include "_version.h" // First this..
+//#include "_globals.h" // ..then this
+//#include "param.h"
+#include "button_debounce.h"
+
+#define DEBOUNCE_TIMEOUT_MS 50
+#define BUTTON_PRESSED   0 // If pullup resistor
+#define BUTTON_RELEASED  1 // If pullup resistor
+
+[[combinable]]
+void button_debounce_task ( in buffered port:1          p_button,
+                            // chanend                     c_remote,
+                            const unsigned              button_n
+                            )
+{
+    int      button_on_event = BUTTON_PRESSED;
+    int      do_timeout_debounce_now = 0;
+    int      do_timeout_long_now = 0;
+    int      filter_next_button_released = 1 ; // This would come initially
+    timer    tmr_debounce; // Only one combined hardware timer..
+    timer    tmr_long;     // ..is used for these two software timers
+    int32_t  timeout_debounce;
+    int32_t  timeout_long;
+    int32_t  current_time;
+    unsigned button_edge_cnt = 0;
+
+    debug_printf("inP_Button_Task_2[%u] started\n", button_n);
+
+    while(1) {
+        select {
+            case p_button when pinsneq(button_on_event) :> button_on_event: {
+                do_timeout_debounce_now = 1 ;
+                do_timeout_long_now     = 0;
+                button_edge_cnt++;
+                tmr_debounce :> current_time;
+                timeout_debounce = current_time + (DEBOUNCE_TIMEOUT_MS * XS1_TIMER_KHZ);
+            } break;
+
+            case do_timeout_debounce_now => tmr_debounce when timerafter(timeout_debounce) :> void: {
+                do_timeout_debounce_now = 0;
+                if (button_on_event == BUTTON_PRESSED) {
+                    debug_printf(" BUTTON_ACTION_PRESSED %u send, cnt %u\n", button_n, button_edge_cnt);
+                    // i_button_out.button (BUTTON_ACTION_PRESSED, button_edge_cnt); // Button down
+                    {
+                        // c_remote <: BUTTON_ACTION_PRESSED;
+                        // c_remote <: button_edge_cnt;
+                    }
+                    // if (long_button_enabled == long_enabled) {
+                    if (1) {
+                        do_timeout_long_now = 1 ;
+                        tmr_long :> current_time;
+                        timeout_long = current_time + (BUTTON_ACTION_PRESSED_FOR_LONG_TIMEOUT_MS * XS1_TIMER_KHZ);
+                    } else {
+                        // long_disabled, no code
+                    }
+                } else if (filter_next_button_released) {
+                    // BUTTON_RELEASED, but we don't want it after BUTTON_ACTION_PRESSED_FOR_LONG, no code
+                    debug_printf(" BUTTON_ACTION_RELEASED %u filtered\n", button_n);
+                } else { // BUTTON_RELEASED
+                    debug_printf(" BUTTON_ACTION_RELEASED %u send, cnt %u\n", button_n, button_edge_cnt);
+                    // i_button_out.button (BUTTON_ACTION_RELEASED, button_edge_cnt);
+                    {
+                        // c_remote <: BUTTON_ACTION_RELEASED;
+                        // c_remote <: button_edge_cnt;
+                    }
+                }
+                filter_next_button_released = 0;
+                button_edge_cnt = 0;
+            } break;
+
+            case do_timeout_long_now => tmr_long when timerafter(timeout_long) :> void: {
+                do_timeout_long_now = 0;
+                if (button_on_event == BUTTON_PRESSED) {
+                    debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u send, cnt %u\n", button_n, button_edge_cnt);
+                    {
+                        // c_remote <: BUTTON_ACTION_PRESSED_FOR_LONG;
+                        // c_remote <: button_edge_cnt;
+                    }
+                    filter_next_button_released = 1 ;
+                } else { // BUTTON_RELEASED
+                    // cannot happen here since do_timeout_long_now was set when BUTTON_PRESSED, no code
+                    debug_printf(" BUTTON_ACTION_RELEASED_FOR_LONG %u NOT sent, cnt %u\n", button_n, button_edge_cnt);
+                }
+                button_edge_cnt = 0;
+            } break;
+        }
+    }
+}
+
+/* COPYRIGHT (C) �yvind Teig
+ * Source: https://www.teigfam.net/oyvind/home/technology/214-my-button-presses-vs-bounce-vs-emi-notes/
+ * COPYRIGHT (C) SPECIALTYCIRCUITS LLC 2025
+ * Modified for using chanend instead of interface
+ */
+
+// [[combinable]]
+// void button_debounce_task ( const unsigned              button_n,
+//                             const long_button_enabled_e long_button_enabled,
+//                             in buffered port:1          p_button,
+//                             client button_if_2          i_button_out)
+// {
+//     int      button_on_event = BUTTON_PRESSED;
+//     int      do_timeout_debounce_now = 0;
+//     int      do_timeout_long_now = 0;
+//     int      filter_next_button_released = 1 ; // This would come initially
+//     timer    tmr_debounce; // Only one combined hardware timer..
+//     timer    tmr_long;     // ..is used for these two software timers
+//     int32_t  timeout_debounce;
+//     int32_t  timeout_long;
+//     int32_t  current_time;
+//     unsigned button_edge_cnt = 0;
+
+//     debug_printf("inP_Button_Task_2[%u] started\n", button_n);
+
+//     while(1) {
+//         select {
+//             case p_button when pinsneq(button_on_event) :> button_on_event: {
+//                 do_timeout_debounce_now = 1 ;
+//                 do_timeout_long_now     = 0;
+//                 button_edge_cnt++;
+//                 tmr_debounce :> current_time;
+//                 timeout_debounce = current_time + (DEBOUNCE_TIMEOUT_MS * XS1_TIMER_KHZ);
+//             } break;
+
+//             case do_timeout_debounce_now => tmr_debounce when timerafter(timeout_debounce) :> void: {
+//                 do_timeout_debounce_now = 0;
+//                 if (button_on_event == BUTTON_PRESSED) {
+//                     debug_printf(" BUTTON_ACTION_PRESSED %u send, cnt %u\n", button_n, button_edge_cnt);
+//                     i_button_out.button (BUTTON_ACTION_PRESSED, button_edge_cnt); // Button down
+//                     if (long_button_enabled == long_enabled) {
+//                         do_timeout_long_now = 1 ;
+//                         tmr_long :> current_time;
+//                         timeout_long = current_time + (BUTTON_ACTION_PRESSED_FOR_LONG_TIMEOUT_MS * XS1_TIMER_KHZ);
+//                     } else {
+//                         // long_disabled, no code
+//                     }
+//                 } else if (filter_next_button_released) {
+//                     // BUTTON_RELEASED, but we don't want it after BUTTON_ACTION_PRESSED_FOR_LONG, no code
+//                     debug_printf(" BUTTON_ACTION_RELEASED %u filtered\n", button_n);
+//                 } else { // BUTTON_RELEASED
+//                     debug_printf(" BUTTON_ACTION_RELEASED %u send, cnt %u\n", button_n, button_edge_cnt);
+//                     i_button_out.button (BUTTON_ACTION_RELEASED, button_edge_cnt);
+//                 }
+//                 filter_next_button_released = 0;
+//                 button_edge_cnt = 0;
+//             } break;
+
+//             case do_timeout_long_now => tmr_long when timerafter(timeout_long) :> void: {
+//                 do_timeout_long_now = 0;
+//                 if (button_on_event == BUTTON_PRESSED) {
+//                     debug_printf(" BUTTON_ACTION_PRESSED_FOR_LONG %u send, cnt %u\n", button_n, button_edge_cnt);
+//                     i_button_out.button (BUTTON_ACTION_PRESSED_FOR_LONG, button_edge_cnt);
+//                     filter_next_button_released = 1 ;
+//                 } else { // BUTTON_RELEASED
+//                     // cannot happen here since do_timeout_long_now was set when BUTTON_PRESSED, no code
+//                     debug_printf(" BUTTON_ACTION_RELEASED_FOR_LONG %u NOT sent, cnt %u\n", button_n, button_edge_cnt);
+//                 }
+//                 button_edge_cnt = 0;
+//             } break;
+//         }
+//     }
+// }
+
+
+[[combinable]] void button_press_deglitch(port p_button)
+{
+    int current_button_val = 0;
+    int is_stable = 1;
+    timer tmr;
+    const unsigned debounce_delay_ms = 50;
+    unsigned debounce_timeout;
+
+    while (1) {
+        select {
+            // If the button is "stable", react when the I/O pin changes value
+            case is_stable => p_button when pinsneq(current_button_val) :> current_button_val:
+                unsafe {
+                    if (current_button_val == 1) {
+                        debug_printf("Button %d up\n", (unsigned int)p_button);
+                    } else {
+                        debug_printf("Button %d down\n", (unsigned int)p_button);
+                    }
+                }
+                is_stable = 0;
+                int current_time;
+                tmr :> current_time;
+                debug_printf("Current time: %d \n", (unsigned int)current_time);
+
+                // Calculate time to event after debounce period
+                // note that XS1_TIMER_HZ is defined in timer.h
+                debounce_timeout = current_time + (debounce_delay_ms * XS1_TIMER_HZ);
+                break;
+            // If the button is not stable (i.e. bouncing around) then select
+            // when we the timer reaches the timeout to renter a stable period
+            case !is_stable => tmr when timerafter(debounce_timeout) :> void:
+                is_stable = 1;	
+                break;
+        }
+    }
+}
