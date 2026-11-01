@@ -199,6 +199,16 @@ if MODE == "arm":
         print("measure the 0 dB/0 dB reset default. NOT tested, NOT passed.")
         sys.exit(1)
 
+    # Aggregate the contract legs into the exit code. Without this, arm
+    # reports rc=3 ("armed") after printing FAILs, phase 2 never re-checks
+    # the contract, and the final verdict silently omits every contract
+    # failure. A leg that fails here means the rig should stop, not proceed.
+    if FAILS:
+        print("\nARM FAILED contract legs:")
+        for m in FAILS:
+            print("  BAD", m)
+        sys.exit(1)
+
     with open(EXP, "w") as f:
         f.write(f"{L} {R} {st['seq']} {st['saves']}\n")
     print(f"\nARMED L={L} R={R} seq={st['seq']} -- reload the firmware, then")
