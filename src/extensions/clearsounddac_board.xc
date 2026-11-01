@@ -70,6 +70,30 @@ on tile[0]: out port p_codec_reset  = PORT_CODEC_RST_N;
 on tile[0]: out port p_led_024      = XS1_PORT_4F;
 on tile[0]: out port p_led_35       = XS1_PORT_4E;
 on tile[0]: out port p_led_d3g      = PORT_LED_D3G;
+
+/* QSPI clock block for the L/R trim journal (TODO item 3), on the tile whose
+ * ports quadflashlib drives. Must be an XC-declared clock: xmap claims the
+ * hardware block and hands out a real handle; a raw XS1_CLKBLK_n integer
+ * from C is unowned and fl_connect dies with ET_ILLEGAL_RESOURCE
+ * (measured 2026-11-01).
+ *
+ * Must be BOUND -- xmap does not auto-allocate clocks; leaving it unbound is
+ * "clock c_trim_qspi is uninitialized". The number is sourced, not guessed,
+ * because three builds were lost guessing it:
+ *
+ *   tile[0] clock owners, per tile:
+ *     4  tx_usb_clk   lib_xud/src/core/XUD_Main.xc:72  (USB_TILE = tile[0])
+ *     5  rx_usb_clk   lib_xud/src/core/XUD_Main.xc:73  (USB_TILE = tile[0])
+ *   1/2/3 (uac_hwresources.h: SPDIF, MCLK, I2S bit) live on the AUDIO IO
+ *   tile, which in this app is tile[1] -- they do NOT compete here. That
+ *   distinction is the whole reason an earlier revision picked 4 believing it
+ *   free: it read uac_hwresources.h and never lib_xud. SPDIF is compiled out
+ *   anyway (XUA_SPDIF_TX_EN = 0).
+ *
+ * So 6 is the first free block ON THIS TILE. If a future config claims it,
+ * xmap names the owner ("previously declared as <symbol>") and the number
+ * moves here -- xmap is the check, this comment is the trail. */
+on tile[0]: clock c_trim_qspi = XS1_CLKBLK_6;
 // on tile[0]: out port p_led_1        = XS1_PORT_8D;
 
 
@@ -383,6 +407,19 @@ static void vol_apply_all(client interface i2c_master_if i2c)
                      * boundary by pointer, per csd_identity.h. The sector
                      * buffer is static inside csd_trim_store.c and never
                      * leaves that translation unit. */
+                    /* The QSPI clock block is a CLAIMED tile resource: XC
+                     * declares it (c_trim_qspi, file scope) and xmap gives
+                     * this task a handle. Handing quadflashlib a raw
+                     * XS1_CLKBLK_n from C instead died with
+                     * ET_ILLEGAL_RESOURCE in configure_clock_src, which is
+                     * a RESOURCE EXCEPTION -- from this task that means the
+                     * codec server dies and the board goes silent, so the
+                     * claim is not a formality. (unsigned) cast of a clock
+                     * is the same idiom user_main.h uses for chanends. */
+                    unsafe {
+                        csd_trim_set_clkblk((unsigned) c_trim_qspi);
+                    }
+
                     if (cmd == AUDIOHW_CMD_TRIM_LOAD)
                     {
                         csd_trim_boot_load();

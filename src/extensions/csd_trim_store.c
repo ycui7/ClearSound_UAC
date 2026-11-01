@@ -88,12 +88,19 @@
 #define TRIM_SLOT_BYTES   32u       /* 8 words: hdr(4) + payload(2) + spare(2) */
 #define TRIM_MAX_SLOTS    128u      /* 4 KiB sector / 32 */
 
-/* Clock block for our own QSPI use. XS1_CLKBLK_1..3 are claimed by the audio
- * path (uac_hwresources.h: SPDIF 1, MCLK 2, I2S bit clock 3 -- and lib_xua's
- * CLKBLK_FLASHLIB alias is 3 too). 4 is free in this build; if a future
- * config claims it, fl_connect() returns non-zero and VOLume:TRIM? reports
- * the failure instead of corrupting anything. */
-#define TRIM_CLKBLK XS1_CLKBLK_4
+/* Clock block handle: INJECTED by the tile[0] server, never hardcoded here.
+ * An earlier revision put XS1_CLKBLK_4 directly in the port struct from C
+ * and the board died at fl_connect with "Program received signal
+ * ET_ILLEGAL_RESOURCE ... in configure_clock_src" (measured on hardware,
+ * 2026-11-01). A clock block is an XC-claimed tile resource: xmap allocates
+ * them from `clock` declarations, and a raw integer in a C struct is a
+ * handle nobody owns. lib_dfu gets away with its define because XC hands it
+ * a claimed handle; we must do the same. The server calls
+ * csd_trim_set_clkblk() with (unsigned)c_trim_qspi -- declared in
+ * clearsounddac_board.xc -- before every operation, so a missing claim shows
+ * up as connect failure, never as an exception. */
+static unsigned tr_clkblk = 0;
+void csd_trim_set_clkblk(unsigned clk) { tr_clkblk = clk; }
 
 /* Our own failure codes, above the quadflashlib range, so a code in
  * csd_trim_last_error() is unambiguous about which step failed. */
@@ -101,6 +108,7 @@
 #define TRIM_ERR_SCRATCH_SMALL 0x101u
 #define TRIM_ERR_BEYOND_PARTITION 0x102u  /* cursor past the partition end */
 #define TRIM_ERR_PARTITION_SMALL  0x103u  /* < one 4 KiB sector: unusable */
+#define TRIM_ERR_NO_CLKBLK        0x104u  /* server never injected a clock */
 
 typedef struct {
     uint32_t magic;
@@ -160,8 +168,8 @@ static volatile unsigned tr_st_save_n    = 0;   /* successful saves */
  * and believe it, instead of racing a poll interval. */
 
 /* ---- the flash side, reached only from the tile[0] task ----------------- */
-static fl_QSPIPorts tr_ports = { PORT_SQI_CS, PORT_SQI_SCLK, PORT_SQI_SIO,
-                                 TRIM_CLKBLK };
+/* clkblk 0 until csd_trim_set_clkblk() supplies the claimed handle. */
+static fl_QSPIPorts tr_ports = { PORT_SQI_CS, PORT_SQI_SCLK, PORT_SQI_SIO, 0 };
 static unsigned tr_next_slot;       /* append cursor, set by the load */
 
 /* fl_connect per operation: see the threading note above. *res carries the
@@ -185,6 +193,14 @@ static unsigned char tr_scratch[TRIM_SECTOR_BYTES];
  * branch may use them. */
 static int tr_partition_open(unsigned *res, unsigned *psz, unsigned *need)
 {
+    /* No claimed clock: refuse before touching the ports. An unclaimed
+     * handle does not return an error, it raises a RESOURCE EXCEPTION that
+     * kills the codec server -- the one failure mode this file must never
+     * produce, because that task is the sole owner of the codec, mute and
+     * volume path. */
+    if (tr_clkblk == 0u) { *res = TRIM_ERR_NO_CLKBLK; return 0; }
+    tr_ports.qspiClkblk = tr_clkblk;
+
     int r = fl_connect(&tr_ports);
     if (r) { *res = (unsigned)r; fl_disconnect(); return 0; }
 

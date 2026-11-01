@@ -43,6 +43,14 @@
 extern "C" {
 #endif
 
+/* Give the store its CLAIMED clock-block handle. Must be called by the
+ * tile[0] server, which declares the `clock` resource in XC, before the
+ * other three entry points. The handle is a resource: only a claimed one
+ * may reach quadflashlib, and an unclaimed one does not fail -- it raises a
+ * RESOURCE EXCEPTION that would kill the codec server. See the long comment
+ * in the .c. Zero (unclaimed) makes every operation refuse with 0x104. */
+void csd_trim_set_clkblk(unsigned clk);
+
 /* Adopt the newest VALID record into the mailbox trim word, or leave it at
  * the 0 dB / 0 dB reset default when the store holds none. Idempotent and
  * cheap to re-request; the diagnostic task runs it at startup and a rig can
