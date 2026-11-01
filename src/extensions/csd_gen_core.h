@@ -83,7 +83,13 @@ typedef enum {
     CSD_GEN_SQUARE = 2,
     CSD_GEN_SWEEP = 3,          /* linear or log per `domain` */
     CSD_GEN_MULTITONE = 4,
-    CSD_GEN_NOISE = 5
+    CSD_GEN_NOISE = 5,
+    /* DC (TODO item 2, 2026-11-01): constant offset, both channels, value
+     * = amp (Q31, positive full scale at 0x7FFFFFFF). No oscillator: the
+     * descriptor's f_a carries a 1 Hz PLACEHOLDER so the shared Nyquist/
+     * floor validators (csd_gen_apply_fs, csd_gen_check_freq) apply to every
+     * mode without a mode-specific branch; it is never read in this case. */
+    CSD_GEN_DC = 6
 } csd_gen_mode_t;
 
 typedef enum {
@@ -437,7 +443,7 @@ static int csd_gen_wave(csd_gen_t *g, unsigned fs, unsigned mode,
     if (why) *why = 1;
     if (fs == 0u) return -1;
     if (why) *why = 2;
-    if (mode > CSD_GEN_NOISE) return -1;
+    if (mode > CSD_GEN_DC) return -1;
     if (why) *why = 3;
     if (mode == CSD_GEN_SWEEP && domain > CSD_GEN_LOG) return -1;
     if (why) *why = 4;
@@ -583,6 +589,15 @@ static void csd_gen_sample(csd_gen_t *g, int32_t samp[2])
         y = ((int64_t)(int32_t)x * (int64_t)g->amp) >> 31;
         break;
     }
+
+    case CSD_GEN_DC:
+        /* Constant: amp IS the sample value (validated <= 2^31-1 at arm,
+         * so no saturation path is reachable; sat64 below keeps the
+         * contract uniform anyway). Phase slots and n are deliberately
+         * untouched by any oscillator; n still advances so a period_ms
+         * burst behaves like every other mode (the caller's window). */
+        y = (int64_t)(uint32_t)g->amp;
+        break;
 
     case CSD_GEN_OFF:
     default:

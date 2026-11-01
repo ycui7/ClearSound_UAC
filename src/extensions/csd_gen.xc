@@ -35,6 +35,7 @@ CSD_GEN_STATIC_ASSERT(CSD_GEN_MODE_SQUARE    == (unsigned)CSD_GEN_SQUARE,    squ
 CSD_GEN_STATIC_ASSERT(CSD_GEN_MODE_SWEEP     == (unsigned)CSD_GEN_SWEEP,     sweep);
 CSD_GEN_STATIC_ASSERT(CSD_GEN_MODE_MULTITONE == (unsigned)CSD_GEN_MULTITONE, multitone);
 CSD_GEN_STATIC_ASSERT(CSD_GEN_MODE_NOISE     == (unsigned)CSD_GEN_NOISE,     noise);
+CSD_GEN_STATIC_ASSERT(CSD_GEN_MODE_DC        == (unsigned)CSD_GEN_DC,        dc);
 CSD_GEN_STATIC_ASSERT(CSD_GEN_DOMAIN_LIN     == (unsigned)CSD_GEN_LIN,       lin);
 CSD_GEN_STATIC_ASSERT(CSD_GEN_DOMAIN_LOG     == (unsigned)CSD_GEN_LOG,       log);
 CSD_GEN_STATIC_ASSERT(CSD_GEN_MAX_PERIOD_MS  == (unsigned)CSD_GEN_PERIOD_MAX_MS, period);
@@ -181,7 +182,7 @@ int csd_gen_request_arm(unsigned mode, unsigned fs_hz,
         if (why) *why = CSD_GEN_REJ_FS;
         return -1;
     }
-    if (mode > CSD_GEN_MODE_NOISE) {
+    if (mode > CSD_GEN_MODE_DC) {
         csd_gen_reject(CSD_GEN_REJ_MODE);
         if (why) *why = CSD_GEN_REJ_MODE;
         return -1;

@@ -897,6 +897,40 @@ bad:
     return SCPI_RES_ERR;
 }
 
+/* GENerator:DC <fs>,<amp>,<period_ms>  (TODO item 2, directive 2026-11-01)
+ *
+ * Constant offset: every frame both channels carry exactly <amp> (Q31,
+ * same scale as the other modes; 0x7FFFFFFF = +full scale). The DC case in
+ * csd_gen_sample ignores frequency, so f_a is the 1 Hz placeholder the
+ * shared validators demand -- same shape as noise. period_ms = 0 holds
+ * indefinitely; a non-zero value is a timed burst, and like every other
+ * mode csd_gen_off / a new command ends it. Negative DC is out of scope:
+ * amp is unsigned by contract, and the DUT-relevant stimulus sweep stays
+ * positive; if a bipolar offset is ever needed it is its own command, not
+ * a sign bit smuggled through the shared amplitude gate. */
+static SCPI_FPTR_CMD scpi_result_t gen_dc(scpi_t *context)
+{
+    const char *why = "argument";
+    uint32_t fs, amp, per;
+    int rwhy = 0;
+
+    if (!gen_u32(context, "sample rate", &fs, 1u, 1000000u, &why)) goto bad;
+    if (!gen_u32(context, "amplitude", &amp,
+                 CSD_GEN_AMP_MIN, CSD_GEN_AMP_MAX, &why)) goto bad;
+    if (!gen_u32(context, "period", &per, 0u, CSD_GEN_MAX_PERIOD_MS, &why))
+        goto bad;
+
+    return gen_report(context,
+        csd_gen_request_arm(CSD_GEN_MODE_DC, fs, CSD_GEN_HZ_SCALE /* 1 Hz,
+                                                          ignored by DC */,
+                            0u,
+                            CSD_GEN_DOMAIN_LIN, amp, per, &rwhy), rwhy);
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    (void)why;
+    return SCPI_RES_ERR;
+}
+
 /* GENerator:OFF */
 static SCPI_FPTR_CMD scpi_result_t gen_off(scpi_t *context)
 {
@@ -1378,6 +1412,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "GENerator:SWEep",         .callback = gen_sweep   },
     { .pattern = "GENerator:TONEs",         .callback = gen_tones   },
     { .pattern = "GENerator:NOISe",         .callback = gen_noise   },
+    { .pattern = "GENerator:DC",            .callback = gen_dc      },
     { .pattern = "GENerator:OFF",           .callback = gen_off     },
     { .pattern = "GENerator:STATe?",        .callback = gen_state_q  },
     { .pattern = "MIXer:GAIN:HOST",         .callback = mixer_gain_host },

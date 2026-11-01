@@ -42,6 +42,7 @@ extern "C" {
 #define CSD_GEN_MODE_SWEEP     3u
 #define CSD_GEN_MODE_MULTITONE 4u
 #define CSD_GEN_MODE_NOISE     5u
+#define CSD_GEN_MODE_DC        6u   /* constant offset = amp, both channels */
 
 /* Sweep domain -- must match csd_gen_domain_t. */
 #define CSD_GEN_DOMAIN_LIN     0u
