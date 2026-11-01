@@ -5,7 +5,9 @@ one commit per item, acoustic gate (rig mix + mute) after each.
 
 ## Features (added 2026-11-01)
 
-1. **Remove automute handling from ES9219Q code.** Do nothing to automute:
+Status: 1, 5, 6 done (2026-11-01); 2, 3, 4 open.
+
+1. **DONE (2026-11-01) — Remove automute handling from ES9219Q code.** Do nothing to automute:
    leave the register at the DAC's default condition, whatever that is. No
    writes, no reads used for decisions, no "disable automute" boot writes.
 2. **Add DC as a function-generator output type.** New waveform mode next to
@@ -20,7 +22,7 @@ one commit per item, acoustic gate (rig mix + mute) after each.
 4. **Trim application point.** Whenever a volume change happens, each
    `Vol_trim_*` is added to its respective L/R channel — the trim rides on
    every volume update, host SET_CUR and button paths alike.
-5. **Move debug-only SCPI under `DEBUG:` with a compile gate.** Many commands
+5. **DONE (2026-11-01) — Move debug-only SCPI under `DEBUG:` with a compile gate.** Many commands
    were added purely for bench debugging. Group them under a `DEBUG:` prefix
    and put them behind a selective compile flag so release packages do not
    contain them at all — table entries *and* their callbacks, not just the
@@ -36,7 +38,7 @@ one commit per item, acoustic gate (rig mix + mute) after each.
      `REGister:READ?`/`WRITE`, `MIXer:GAIN:*` (per-source volume), and the
      `GENerator:` waveform setters (manufacturing rig drives them; revisit
      once factory tests move to a debug build).
-6. **Release build flag.** Release builds enable `SPECIALTYCIRCUITS_RELEASE`.
+6. **DONE (2026-11-01) — Release build flag.** Release builds enable `SPECIALTYCIRCUITS_RELEASE`.
    This same flag is the gate that disables all debug functions (item 5's
    SCPI set, and any future bench-only code): release = `-DSPECIALTYCIRCUITS_RELEASE`,
    debug/bench builds omit it. It already exists in `src/core/xua_defs.h`

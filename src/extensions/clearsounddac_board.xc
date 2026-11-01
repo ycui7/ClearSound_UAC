@@ -910,7 +910,10 @@ void csd_AudioHwInit(const csd_config_t &config)
         delay_milliseconds(1);
     }
     DAC_REGREAD(0x40, regVal);
-    debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tAUTOMUTE:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));
+    /* Automute field dropped from the print (TODO item 1): the read itself
+     * stays -- it is the chip-presence probe -- but nothing decodes or
+     * reports its automute bits any more. */
+    debug_printf(ANSI_CYAN "CHIPI_ID:\t0x%x\tDPLL_LOCK:\t0x%x" ANSI_RESET "\n", (regVal >>2), (regVal & 0x01));
     assert(regVal != 0);
     
     // General Comment:
@@ -1025,12 +1028,21 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
         debug_printf("===================Current State===============\n");   
         DAC_REGREAD(ES9219Q_GPIO_READBACK, regVal);
         debug_printf(ANSI_GREEN "CLK_GEAR: %d\tGPIO2: %d\tGPIO1: %d" ANSI_RESET "\n", (regVal>>2)&3, (regVal>>1)&1, (regVal>>0)&1);   
-        DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);        
-        debug_printf(ANSI_GREEN "OC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d" ANSI_RESET "\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);   
+        /* Automute status read removed (TODO item 1, directive 2026-11-01):
+         * nothing may DO anything with automute -- the chip runs on its
+         * default register condition (TIME=0 => disabled per datasheet v1.3),
+         * no writes, no reads feeding anything. This was the last code path
+         * touching an automute register (0x48); it only fed a boot print,
+         * and the same word stays reachable on demand over the production
+         * REGister:READ? 0x48 whenever the bench wants it:
+         *
+         *   DAC_REGREAD(ES9219Q_READ_INPUT_SEL_N_AUTOMUTE_STAT, regVal);
+         *   debug_printf(ANSI_GREEN "OC_R: %d\tOC_L: %d\tAUTOMUTE_R: %d\tAUTOMUTE_L: %d" ANSI_RESET "\n", (regVal>>7)&1, (regVal>>6)&1, (regVal>>5)&1, (regVal>>4)&1);
+         */
         DAC_REGREAD(ES9219Q_READ_LOCK_STATUS, regVal);
         debug_printf(ANSI_GREEN "MQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d" ANSI_RESET "\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
-        debug_printf(ANSI_GREEN "CHIPI_ID: %d\tAUTOMUTE: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x03), (regVal & 0x01));   
+        debug_printf(ANSI_GREEN "CHIPI_ID: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x01));   
      }
 
 }
