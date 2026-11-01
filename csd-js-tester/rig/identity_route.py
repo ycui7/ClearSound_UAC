@@ -21,9 +21,15 @@ table; the host then reads iSerialNumber out of the USB descriptor. That path
 never touches my SCPI handlers.
 
   iSerial == "123456789"  -> the copy never happened -> cause (a)
-  iSerial == "DV..."      -> thread ran and computed  -> cause (b)
+  iSerial == "IPENDING"   -> server ran, the read had not landed at publish
+  iSerial == 8 hex chars  -> the flash serial was read and copied -> cause (b)
 
-Read-only: no register writes, no OTP programming.
+(2026-11-01: the identity THREAD and the OTP read are gone -- the serial now
+comes from the QSPI die, read once by the codec server before its select loop.
+The old "DV..." provenance prefix never existed in shipping firmware: the
+serial is pure lowercase hex and provenance is SOURce? only.)
+
+Read-only: no register writes, no flash writes (the identity read is 4Bh).
 """
 import os
 import re
@@ -63,11 +69,12 @@ m = re.search(r'iSerial\s+\d+\s+(\S+)', desc)
 got = m.group(1) if m else ""
 if got == "123456789":
     print("\n  VERDICT: iSerial is still the factory SERIAL_STR.")
-    print("  -> the identity thread never executed. Not OTP, not sswitch.")
+    print("  -> the codec server never reached the identity block, or its")
+    print("     publish did not. Not the flash, not sswitch.")
 elif got == "IPENDING":
-    print("\n  VERDICT: the thread started (entry publish landed) but never")
-    print("  -> finished the reads. Compare with STAGe? below: the stage names")
-    print("     the access it stalled on.")
+    print("\n  VERDICT: the server published the pending marker but the flash")
+    print("  -> serial never landed. STAGe? names where: 1 = stuck in the")
+    print("     flash read, 2 = read done but report/publish did not run.")
 elif re.match(r"^[0-9a-f]{8}$", got):
     print(f"\n  VERDICT: the thread completed and published serial {got}.")
     print("  -> iSerial is authoritative; it is written on tile[0], the tile")

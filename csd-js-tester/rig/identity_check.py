@@ -4,7 +4,8 @@
 Answers three questions, in the order that makes each answer falsifiable:
 
   1. Is the tile[0] audio-hw task ALIVE?  csd_identity_run() is called at the
-     top of AudioHwRemoteTile0, before its select loop. If an OTP read hung,
+     top of AudioHwRemoteTile0, before its select loop. If the flash serial
+     read (Winbond 4Bh) hung,
      that task never serves REGister:READ? again -- so a working register read
      is the evidence that the identity read RETURNED, and a blocked one is the
      evidence it did not. Distinguishing these two is the whole point: "no
@@ -14,7 +15,8 @@ Answers three questions, in the order that makes each answer falsifiable:
      so the FNV-1a/64 is recomputed HERE and compared. A hash nobody
      recomputes is a decoration.
 
-Read-only: no register writes, no OTP programming (there is no OTP write path
+Read-only: no register writes, no flash writes (the identity read is 4Bh;
+there is no OTP path at all since the OTP read was retired 2026-11-01) (
 in the firmware at all).
 """
 import base64
@@ -72,7 +74,8 @@ def main():
     except Exception as e:
         print(f"  could not decode ({e}); register path did not answer")
     print("  csd_identity_run() runs BEFORE that task's select loop, so a live")
-    print("  register read means the OTP reads returned; a dead one means they hung.\n")
+    print("  register read means the server reached its select loop; a dead")
+    print("  one means the identity flash read ahead of it never returned.\n")
 
     # -- 2. what the device claims -----------------------------------------
     print("=== identity as the device reports it ===")
@@ -104,7 +107,7 @@ def main():
         return 1
 
     labels = ["tile0 node id", "tile1 node id", "tile0 jtag id", "tile1 jtag id",
-              "otp header word", "otp serial word", "otp board id word"]
+              "flash serial hi", "flash serial lo"]
     print("  material (big-endian words, the documented order):")
     for i, w in enumerate(words):
         lab = labels[i] if i < len(labels) else "?"
@@ -139,21 +142,33 @@ def main():
 
     # -- verdict ------------------------------------------------------------
     print("\n=== verdict ===")
-    all_zero = all(w == 0 for w in words)
-    if all_zero:
-        print("  OTP reads all zero: this board is UNPROVISIONED. Expected on a")
-        print("  bench board. The serial must therefore be DERIVED, never OTP:")
-        if "DERIVED" in source:
-            print("  PASS  provenance correctly reports DERIVED for a blank OTP")
-        else:
-            print(f"  FAIL  blank OTP but provenance says {source} -- the device")
-            print("        is claiming an authority it does not have")
-            rc = 1
+    # Material [4],[5] are the QSPI die's factory 64-bit serial -- the only
+    # per-unit input the device has. Words 0..3 are board-configuration
+    # constants (tile node ids + JTAG IDCODE) and are identical on every board
+    # of this design, which is exactly why the flash serial replaced the OTP
+    # read: while they were the only material all three bench boards hashed to
+    # the SAME serial.
+    ser = (words[4] << 32) | words[5] if len(words) > 5 else 0
+    if ser == 0:
+        # The datasheet has no blank-serial case, and the firmware refuses to
+        # hash an all-00/all-FF answer, so zero means the READ failed.
+        print("  FAIL  flash unique serial is ZERO -- the read did not land.")
+        print("        The serial on offer is DERIVED, i.e. a hash of four")
+        print("        board-configuration constants: NOT unique. Do not book")
+        print("        this board's identity against it.")
+        if "DERIVED" not in source:
+            print(f"        WORSE: provenance says {source}, claiming an")
+            print("        authority the data does not support.")
+        rc = 1
+    elif ser == 0xFFFFFFFFFFFFFFFF:
+        print("  FAIL  flash serial is all-FF (DO floating) -- not a read.")
+        rc = 1
     else:
-        print(f"  OTP carries data: header=0x{words[4]:08X} serial=0x{words[5]:08X}")
-        want = "OTP" if words[5] else "DERIVED"
-        print(f"  {'PASS' if want in source else 'FAIL'}  provenance {source} (want {want})")
-        if want not in source:
+        print(f"  flash unique serial = 0x{ser:016X}")
+        if "FLASH" in source:
+            print("  PASS  provenance FLASH: per-unit identity from the die")
+        else:
+            print(f"  FAIL  serial is non-zero but provenance says {source}")
             rc = 1
 
     if not task_alive:
@@ -161,27 +176,21 @@ def main():
         print("        likely hung, which would take the codec server with it")
         rc = 1
 
-    # Stage is the tie-breaker when material is all zero: blank OTP (3) and a
-    # stalled read (1) look identical in RAW? and demand opposite responses.
+    # Stage is the tie-breaker when the serial is zero: "the server never got
+    # there" (0) and "the flash read was attempted and failed" (>=1) look the
+    # same in RAW? and demand opposite responses. The old 3..6 OTP-walk
+    # stages are retired with the OTP path.
     try:
         stage_n = int(stage.strip().strip('"'))
     except Exception:
         stage_n = -1
         print(f"  FAIL  STAGe? unreadable ({stage})")
         rc = 1
-    # The stage is the whole point of the staged design: on a virgin board every
-    # material word is legitimately zero, so RAW? alone cannot tell "OTP is
-    # blank" (stage 6) from "the read stalled at the first access" (stage 1).
-    # Those two demand opposite responses and would otherwise be identical here.
-    if stage_n != 6:
-        where = {0: "thread never started",
-                 1: "stalled before the first read",
-                 2: "stalled in tile0 node id",
-                 3: "stalled in tile0 JTAG id",
-                 4: "stalled in tile1 node id (CROSS-TILE read)",
-                 5: "stalled in tile1 JTAG id (CROSS-TILE read)"}.get(
-                     stage_n, f"unknown stage {stage_n}")
-        print(f"  FAIL  staged read incomplete: stage {stage_n} -- {where}")
+    if stage_n != 2:
+        where = {0: "codec server never reached the identity block",
+                 1: "stalled in the flash read (fl_connect entered, no answer)"
+                 }.get(stage_n, f"unknown stage {stage_n}")
+        print(f"  FAIL  identity read incomplete: stage {stage_n} -- {where}")
         rc = 1
 
     # UNAVAILABLE means the tile-1 core could not reach the tile-0 owner at all

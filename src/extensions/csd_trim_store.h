@@ -61,6 +61,29 @@ unsigned csd_trim_boot_load(void);
  * flash failure -- which is latched into the status words, never silent. */
 int csd_trim_journal_now(unsigned packed);
 
+/* Factory 64-bit unique serial from the QSPI die (Winbond 4Bh). Returns 1 on
+ * success; on failure returns 0 and leaves the reason in csd_flash_serial_err()
+ * -- a TRIM_ERR_* for a missing clock claim, FLASH_ERR_DEGENERATE if the
+ * device answered all-00 or all-FF, or quadflashlib's own connect code.
+ * Result lands in module statics read through the scalar getters below: this
+ * file is C and the only caller is XC, and a C-defined unsigned-pointer
+ * parameter called from XC does not link (the exact class of the
+ * 'Type of symbol has mismatch with previous definition' error this took).
+ *
+ * Lives here, not in the identity module, because this file owns the QSPI
+ * access: quadflashlib is a singleton with no device handle, and the codec
+ * server is the only task allowed to drive PORT_SQI_*. READ-ONLY -- the only
+ * opcode it issues is 0x4B. */
+int csd_flash_read_unique_serial(void);
+
+/* The read's outputs, one boot, one read: plain module statics behind scalar
+ * getters -- no pointer crosses the C/XC boundary (csd_identity.h: a C
+ * `unsigned*` parameter called from XC does not link). Valid only after
+ * csd_flash_read_unique_serial() has returned; err 0 means success. */
+unsigned csd_flash_serial_hi(void);
+unsigned csd_flash_serial_lo(void);
+unsigned csd_flash_serial_err(void);   /* 0 ok, else TRIM_ERR_* / fl_connect rc */
+
 /* Status word by index 0..6: partition_bytes, load_status, save_status,
  * seq, last_error, boot_count, save_count. Scalar in / scalar out: the
  * cross-tile rule in this codebase is scalars only, never pointers (see

@@ -559,7 +559,8 @@ static SCPI_FPTR_CMD scpi_result_t q_ident_source(scpi_t *context)
     const char *s;
     if (!ident_fetch(&snap)) { push_hw_error(context); return SCPI_RES_ERR; }
     switch ((csd_id_source_t)snap.source) {
-        case CSD_ID_OTP:     s = "OTP";     break;   /* provisioned: trust it  */
+        case CSD_ID_FLASH:   s = "FLASH";   break;   /* factory die serial     */
+        case CSD_ID_OTP:     s = "OTP";     break;   /* retired; never set     */
         case CSD_ID_DERIVED: s = "DERIVED"; break;   /* NOT unique: bench only */
         default:             s = "NONE";    break;   /* read did not complete  */
     }

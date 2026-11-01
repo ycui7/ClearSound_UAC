@@ -340,6 +340,73 @@ static void vol_apply_all(client interface i2c_master_if i2c)
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
 
+    /* ---- unit identity: the flash's factory 64-bit serial --------------
+     * Read ONCE into plain locals before the select loop, and handed to the
+     * identity module as scalars. No new channel, task or timer: the serial is
+     * a value, so it needs a variable and nothing else.
+     *
+     * WHY HERE, WHEN csd_identity.xc's comment forbids a blocking call in
+     * this task: that warning is about OTP. The OTP data port can wedge, and
+     * a wedged OTP read ahead of this loop took the codec server -- and with
+     * it the single SCPI core and the whole bench -- down with it. That path
+     * is now deleted. The flash cannot wedge in any way that matters: this
+     * board boots from this QSPI part, so if the read hangs the boot image
+     * never ran, audio never starts and DFU is unreachable either. Waiting
+     * for a serial from a flash that will not answer is not a new failure
+     * mode -- it is the same dead board we already could not recover from.
+     *
+     * It also cannot contend for the ports: this runs BEFORE the select loop
+     * exists, so no TRIM_LOAD/SAVE/STAT can be in flight, and lib_dfu's
+     * runtime writer is unreachable until the device enumerates. fl_connect/
+     * fl_disconnect bracket the read itself, so the ports are released before
+     * the first select.
+     *
+     * Deliberately NOT a csd_diag_regs.xc round trip: the value is consumed
+     * here, by the tile that owns it, so a channel would only add a peer to
+     * schedule. tile[0] is at 8/8 cores and 32/32 chanends -- every chanend
+     * declared here, including unused ones, is allocated on BOTH tiles. */
+    /* The serial and its error code live as variables in csd_trim_store.c
+     * (module statics, scalar getters): the read happens once per boot and
+     * the value lives with the code that reads it. */
+    /* The clock claim must be injected BEFORE the read. csd_trim_set_clkblk()
+     * otherwise runs only inside the TRIM select branch, so at task start the
+     * store still holds 0 and the read would refuse with TRIM_ERR_NO_CLKBLK
+     * on every boot -- a silent, permanent DERIVED serial, which is exactly
+     * the kind of fault that reads as data. The claim is idempotent, so the
+     * TRIM branch calling it again is harmless. */
+    unsafe { csd_trim_set_clkblk((unsigned) c_trim_qspi); }
+    csd_identity_stage(1u);                   /* server reached the read */
+    int id_serial_ok = csd_flash_read_unique_serial();
+    /* Publish it whether or not the read worked: the serial's consumer is the
+     * USB descriptor and *IDN?, and a board that answers with a DERIVED
+     * serial plus an honest SOURce? is more useable than one that sits at
+     * the pending marker. The failure is not silently swallowed: SOURce?
+     * reports DERIVED (a serial with no flash behind it can never claim
+     * FLASH -- csd_identity.c enforces that), and the exact reason stays
+     * readable in-module via csd_flash_serial_err() for the next rig that
+     * needs to tell "no clock claim" from "connect failed" from
+     * "device answered all-FF". */
+    /* The four board-configuration words, read here rather than kept in a
+     * thread. get_tile_id() is the only correct way to name a tile to the
+     * switch -- the logical index in tile[n] is NOT the address the
+     * interconnect routes to (every read failed at once when passed 0/1
+     * literally, and the task never advanced). Distinct sentinels per read so
+     * a dead read path cannot be mistaken for a legitimately-zero register. */
+    const unsigned id_t0 = get_tile_id(tile[0]);
+    const unsigned id_t1 = get_tile_id(tile[1]);
+    unsigned id_n0 = 0, id_n1 = 0, id_j0 = 0, id_j1 = 0;
+    if (!read_sswitch_reg(id_t0, XS1_SSWITCH_NODE_ID_NUM,      id_n0)) id_n0 = 0xDEAD0001u;
+    if (!read_sswitch_reg(id_t0, XS1_SSWITCH_JTAG_DEVICE_ID_NUM, id_j0)) id_j0 = 0xDEAD0002u;
+    if (!read_sswitch_reg(id_t1, XS1_SSWITCH_NODE_ID_NUM,      id_n1)) id_n1 = 0xDEAD0003u;
+    if (!read_sswitch_reg(id_t1, XS1_SSWITCH_JTAG_DEVICE_ID_NUM, id_j1)) id_j1 = 0xDEAD0004u;
+
+    csd_identity_stage(2u);                   /* sswitch reads complete */
+    csd_identity_report(csd_flash_serial_hi(), csd_flash_serial_lo(),
+                        XS1_SS_NODE_ID_ID(id_n0), XS1_SS_NODE_ID_ID(id_n1),
+                        id_j0, id_j1, id_serial_ok);
+    csd_identity_usb_publish();           /* the one push; value has stopped
+                                           * changing -- see csd_identity.c */
+
     /* L/R trim (TODO item 3): the persisted pair is adopted by
      * csd_trim_store_task() on tile[0], NOT here. It used to be loaded from
      * this task, which is the codec/audio server -- the same mistake

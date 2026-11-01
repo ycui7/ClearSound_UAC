@@ -21,12 +21,17 @@ set(SW_USB_AUDIO_FLAGS ${EXTRA_BUILD_FLAGS} -fcomment-asm
 											-DDEBUG_PRINT_ENABLE=1
                                             -DDSD_CHANS_DAC=2
                                             -DNATIVE_DSD=1
-                                            -DSCPI_USER_CONFIG=1
-                                            -lotp3)
-                                            # -lotp3 gives the OTP reads used
-                                            # by csd_identity.xc. Read-only
-                                            # use: that file documents why
-                                            # nothing here may program OTP.
+                                            -DSCPI_USER_CONFIG=1)
+                                            # -lotp3 DROPPED 2026-11-01: it was
+                                            # linked only for csd_identity.xc's
+                                            # OTP board-info reads. That module
+                                            # is archived in archive_otp/ and
+                                            # the unit serial now comes from the
+                                            # QSPI die (4Bh), so nothing reads
+                                            # OTP. Still no OTP write path
+                                            # anywhere: OTP burns 0->1 once, and
+                                            # provisioning stays on xburn on the
+                                            # production line.
 											
 											
 set(APP_COMPILER_FLAGS_2AMi2o2xxxxxd ${SW_USB_AUDIO_FLAGS})

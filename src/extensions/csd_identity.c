@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <xclib.h>            /* byterev: the hash's fixed big-endian wire order */
 
 /* lib_xua's public setter for the USB iSerialNumber string. Declared here
  * rather than including xua_endpoint0.h to keep this file free of the USB
@@ -37,6 +38,29 @@ static unsigned          s_words[CSD_ID_MATERIAL_WORDS];
 static unsigned long long s_hash;
 static char              s_str[CSD_ID_SERIAL_LEN + 1];
 
+/* ---- the hash ----------------------------------------------------------
+ * FNV-1a/64, moved here from the deleted tile[0] identity thread so there is
+ * exactly one implementation of the byte order. Byte order is fixed
+ * big-endian so a host can recompute it from the material words and get the
+ * same number -- rig/identity_check.py does exactly that, and a hash nobody
+ * can independently recompute is decoration.
+ *
+ * Not a cryptographic commitment: a handful of instructions, no lookup table,
+ * and the job is a fingerprint over the material words. */
+static unsigned long long fnv1a64_be(const unsigned w[], unsigned n)
+{
+    unsigned long long h = 0xcbf29ce484222325ull;
+    for (unsigned i = 0; i < n; i++) {
+        unsigned v = byterev(w[i]);                 /* fixed BE wire order */
+        unsigned char *b = (unsigned char *)&v;
+        for (unsigned j = 0; j < 4; j++) {
+            h ^= (unsigned long long)b[j];
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
 /* ---- local formatting -------------------------------------------------- */
 
 /* Lowercase hex, exactly `digits`, most significant first. Fixed width on
@@ -62,12 +86,10 @@ static const char *display_str(void)
 }
 
 /* ---- handoff from the tile[0] read ------------------------------------- */
-void csd_identity_report(unsigned otp_header,
-                         unsigned otp_serial,
-                         unsigned otp_board_id,
+void csd_identity_report(unsigned serial_hi, unsigned serial_lo,
                          unsigned node0, unsigned node1,
                          unsigned jtag0, unsigned jtag1,
-                         unsigned long long hash)
+                         int serial_ok)
 {
     /* Order is the contract in csd_identity.h. A host recomputes the hash
      * from exactly these words, so it is written once here and nowhere
@@ -77,19 +99,29 @@ void csd_identity_report(unsigned otp_header,
     w[1] = node1;
     w[2] = jtag0;
     w[3] = jtag1;
-    w[4] = otp_header;
-    w[5] = otp_serial;
-    w[6] = otp_board_id;
+    w[4] = serial_hi;
+    w[5] = serial_lo;
 
     /* Build the whole answer before publishing any of it, so a reader can
      * never see a half-written serial. */
+    unsigned long long hash = fnv1a64_be(w, CSD_ID_MATERIAL_WORDS);
     unsigned src;
 
-    /* An all-zero serial word does NOT count as a provisioned serial: a
-     * header that claims a serial which reads back 0 is as unprovisioned as
-     * no header at all, and calling it OTP would be a false claim of unit
-     * identity on a bench record. */
-    src = (otp_serial != 0u) ? CSD_ID_OTP : CSD_ID_DERIVED;
+    /* Two ways to lose the flash serial, and they must not collapse into
+     * each other:
+     *   - serial_ok == 0: the read FAILED (no clock claim, connect failed, or
+     *     the device answered all-00 / all-FF, which means it did not drive
+     *     DO at all). Hashing zeros there would hand every such board the
+     *     same serial and look exactly like a working identity.
+     *   - serial_ok == 1 but the value is 0: not believed either. The
+     *     datasheet has no blank-serial case, so a zero is a fault, not an
+     *     unprovisioned state.
+     * Either way the answer is DERIVED -- and DERIVED here means a hash over
+     * four board-configuration constants, i.e. NOT unique. That is a bench
+     * label, and it is why SOURce? exists: a serial must never be booked as
+     * unit identity without checking it. */
+    src = (serial_ok && (serial_hi != 0u || serial_lo != 0u))
+              ? (unsigned)CSD_ID_FLASH : (unsigned)CSD_ID_DERIVED;
 
     /* The serial is the tail of the hash: the low 32 bits, 8 lowercase hex
      * characters, for every board whether the identity came from OTP or from

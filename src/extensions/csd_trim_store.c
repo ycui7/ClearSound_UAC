@@ -110,6 +110,11 @@ void csd_trim_set_clkblk(unsigned clk) { tr_clkblk = clk; }
 #define TRIM_ERR_BEYOND_PARTITION 0x102u  /* cursor past the partition end */
 #define TRIM_ERR_PARTITION_SMALL  0x103u  /* < one 4 KiB sector: unusable */
 #define TRIM_ERR_NO_CLKBLK        0x104u  /* server never injected a clock */
+/* Own code, deliberately not a TRIM_* one: a rig reading a failure back must
+ * be able to tell "the serial did not read" from "the trim journal is bad",
+ * or an identity fault gets reported as a persistence fault. */
+#define FLASH_ERR_DEGENERATE      0x105u  /* 4Bh returned all-00 or all-FF */
+#define FLASH_ERR_UNSTABLE        0x106u  /* two reads disagreed: do not trust */
 
 typedef struct {
     uint32_t magic;
@@ -236,6 +241,114 @@ static int tr_partition_open(unsigned *res, unsigned *psz, unsigned *need)
         return 0;
     }
     *need = n;
+    return 1;
+}
+
+/* ---- factory unique serial (identity root, NOT trim persistence) ---------
+ * 4Bh "Read Unique ID Number" on the Winbond W25Q16JV: a factory-set,
+ * read-only 64-bit number, unique per device. Measured on board 3:
+ * 0x443258C251377B1C, identical across 6 reads in 2 boots and 3 cold image
+ * loads, so it is a genuine per-unit root -- unlike the derived fingerprint,
+ * whose four sswitch words are board-configuration constants and therefore
+ * the SAME on every board of this design (all three boards report 201b0d69).
+ *
+ * This lives here rather than in csd_identity.xc because this file owns the
+ * QSPI access: quadflashlib is a SINGLETON (no device handle on any entry
+ * point) and csd_diag.h:90 makes the codec server the only task allowed to
+ * drive PORT_SQI_*. An identity-thread read would put a second, unordered
+ * fl_connect beside the trim journal's and lib_dfu's runtime writer, with no
+ * lock anywhere to keep them apart. Same reason the trim calls ride this
+ * file: the ports have exactly one owner.
+ *
+ * Deliberately does NOT go through tr_partition_open: the serial lives in the
+ * die, not in the data partition, so the read must still work on a board
+ * flashed without --data. It brackets fl_connect/fl_disconnect itself, like
+ * every other operation here.
+ *
+ * READ-ONLY: the only opcode issued is 0x4B. Audit with
+ *   grep -nE "0x(06|04|02|20|52|D8|C7|60|01|42|44|31|11|BE|99|66|B9)" csd_trim_store.c
+ * -- any hit outside a comment is a defect. There is no WREN, no erase, no
+ * program and no write-status-register anywhere in this function. */
+#define FLASH_OP_READ_UNIQUE_ID   0x4Bu
+#define FLASH_UNIQUE_ID_DUMMY     4u          /* datasheet: four dummy bytes */
+#define FLASH_UNIQUE_ID_BYTES     8u          /* then 8 bytes out on DO      */
+
+static unsigned s_uid_hi, s_uid_lo, s_uid_err;
+
+unsigned csd_flash_serial_hi(void)  { return s_uid_hi; }
+unsigned csd_flash_serial_lo(void)  { return s_uid_lo; }
+unsigned csd_flash_serial_err(void) { return s_uid_err; }
+
+/* Returns 1 on a usable serial, 0 with the reason left in s_uid_err. No
+ * pointer parameters anywhere: this file is C and the only caller is XC
+ * (clearsounddac_board.xc), and a C-defined `unsigned*` argument called from
+ * XC does not link -- see csd_identity.h's note on the same boundary. Scalar
+ * getters instead, the shape csd_trim_status_word() already uses. */
+int csd_flash_read_unique_serial(void)
+{
+    unsigned char dummy[FLASH_UNIQUE_ID_DUMMY] = { 0, 0, 0, 0 };
+    unsigned char uid[FLASH_UNIQUE_ID_BYTES]   = { 0, 0, 0, 0 };
+
+    s_uid_hi = s_uid_lo = s_uid_err = 0u;
+
+    /* Same guard as tr_partition_open: an unclaimed clock handle does not
+     * return an error, it raises a RESOURCE EXCEPTION, and from the codec
+     * server that kills mute and volume along with everything else. */
+    if (tr_clkblk == 0u) { s_uid_err = TRIM_ERR_NO_CLKBLK; return 0; }
+    tr_ports.qspiClkblk = tr_clkblk;
+
+    int r = fl_connect(&tr_ports);
+    if (r) { s_uid_err = (unsigned)r; fl_disconnect(); return 0; }
+
+    /* cmd is the bare opcode: bits 12..15 (input lanes) and 8..11 (output
+     * lanes) are left 0, which the library documents as its 1-lane default.
+     * That is the 1-1-1 form the datasheet specifies for 4Bh. */
+    r = fl_command(FLASH_OP_READ_UNIQUE_ID, dummy, FLASH_UNIQUE_ID_DUMMY,
+                   uid, FLASH_UNIQUE_ID_BYTES);
+    s_uid_err = (unsigned)r;
+    if (r) { fl_disconnect(); return 0; }     /* disconnect on EVERY exit */
+
+    /* A second read must agree with the first. WHY: the value this read
+     * produces is STABLE (measured identical across three cold image loads)
+     * but it is NOT the datasheet's number -- it comes back exactly one clock
+     * late, i.e. firmware == probe >> 1, so the true LSB is lost. A lost bit
+     * costs nothing for identity: 63 stable bits still separate every board,
+     * and the serial the host sees is 32 of them. What WOULD be fatal is a
+     * phase that changes between boots, because the board would silently
+     * re-serialise and the host would enumerate a new device every power
+     * cycle. This check cannot fix a phase shift and does not try to; it
+     * converts "the phase moved during this read" into an honest DERIVED
+     * instead of a serial that quietly changed. Two reads on one connect
+     * cost 9 bytes of wire and one compare. */
+    unsigned char uid2[FLASH_UNIQUE_ID_BYTES] = { 0, 0, 0, 0 };
+    int r2 = fl_command(FLASH_OP_READ_UNIQUE_ID, dummy, FLASH_UNIQUE_ID_DUMMY,
+                        uid2, FLASH_UNIQUE_ID_BYTES);
+    fl_disconnect();
+    if (r2) { s_uid_err = (unsigned)r2; return 0; }
+    for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++) {
+        if (uid2[i] != uid[i]) { s_uid_err = FLASH_ERR_UNSTABLE; return 0; }
+    }
+
+    /* A degenerate answer means the read did not happen, not that the part's
+     * serial is blank -- the datasheet has no blank-serial case. Hashing
+     * 0x0000000000000000 or 0xFFFFFFFFFFFFFFFF would hand every such board
+     * the same serial and look exactly like a working identity. Refusing is
+     * the only honest result, and it is loud: see the caller. */
+    int nz = 0, nff = 0;
+    for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++) {
+        if (uid[i] != 0x00u) nz++;
+        if (uid[i] != 0xFFu) nff++;
+    }
+    if (nz == 0 || nff == 0) { s_uid_err = FLASH_ERR_DEGENERATE; return 0; }
+
+    /* Wire order is big-endian (uid[0] is the MSB), matching fnv1a64_be's
+     * fixed byte order, so a host that recomputes the hash from the material
+     * words gets the same number. */
+    unsigned long long v = 0;
+    for (unsigned i = 0; i < FLASH_UNIQUE_ID_BYTES; i++)
+        v = (v << 8) | (unsigned long long)uid[i];
+    s_uid_hi = (unsigned)(v >> 32);
+    s_uid_lo = (unsigned)(v & 0xFFFFFFFFu);
     return 1;
 }
 
