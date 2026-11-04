@@ -79,9 +79,22 @@ unsigned csd_mb_get_gains(void) { return csd_mb_gains; }
  * diagnostic thread (SCPI VOLume:TRIM:*). Reader: tile[0]'s volume owner,
  * once per volume change. Production state -- above the release gate. */
 static volatile unsigned csd_mb_trim = 0u;      /* 0 dB / 0 dB on reset */
+/* Trim-dirty (owner directive 2026-11-04): trim EFFECT moved from the
+ * mixer-thread multiply into the ES9219Q MASTER TRIM registers (regs
+ * 17..20, one 32-bit signed common 0 dB reference, datasheet v1.3). The
+ * value's writers are the SCPI setter and the boot adopt (both tile[1]);
+ * they post this flag so csd_AudioHwInit / the next config pass
+ * (clearsounddac_board.xc) re-writes the registers even if the host never
+ * touches SCPI again. 1 at reset: boot has not written the chip yet.
+ * The SCPI setter ALSO writes the four registers immediately via
+ * csd_diag_reg_write, so a rig sees the effect without waiting; this
+ * flag covers the boot path and any missed config pass. */
+static volatile unsigned csd_mb_trim_dirty = 1u;
 
-void     csd_mb_put_trim(unsigned packed) { csd_mb_trim = packed; }
+void     csd_mb_put_trim(unsigned packed) { csd_mb_trim = packed; csd_mb_trim_dirty = 1u; }
 unsigned csd_mb_get_trim(void) { return csd_mb_trim; }
+unsigned csd_mb_get_trim_dirty(void) { return csd_mb_trim_dirty; }
+void     csd_mb_clear_trim_dirty(void) { csd_mb_trim_dirty = 0u; }
 
 /* ---- L/R trim as a mixer output multiplier (TODO items 3+4) ------------
  *
@@ -139,7 +152,7 @@ static unsigned csd_trim_cache_valid   = 0u;
 /* Plain int/unsigned, no int32_t: this file includes only csd_gen.h, the
  * same choice the rest of the mailbox makes. Width is not incidental here --
  * the trim word's halves are int16 by contract, and int is 32-bit on xcore. */
-static unsigned csd_trim_counts_to_mult(int counts)        /* counts = 0.125 dB */
+unsigned csd_trim_counts_to_mult_q29(int counts)        /* counts = 0.125 dB */
 {
     /* 0 dB (counts 0) is unity; counts are <= 0 by contract. dB in 8.8
      * fixed point = counts * 32. db_to_mult(db, 8, 29) is what the library
@@ -175,6 +188,16 @@ static unsigned csd_trim_counts_to_mult(int counts)        /* counts = 0.125 dB 
 
 unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
 {
+    /* PASS-THROUGH by default (owner directive 2026-11-04): trim is chip
+     * register setup now (csd_trim_master_trim_q31 -> MASTER TRIM regs
+     * 17..20), computed in ZERO audio-path instructions. mixer.xc still
+     * calls this at its two volume sites; an identity function inlines to
+     * nothing, so the MIXER=1 frame path loses the trim multiply entirely.
+     * The body below survives behind CSD_TRIM_IN_AUDIO_PATH for a forensic
+     * A/B against the pre-directive behaviour -- same file, same maths,
+     * git-verifiable. Do not delete it without re-verifying the register
+     * path reproduces rig/trim_acoustic_ab.py within tolerance. */
+#ifdef CSD_TRIM_IN_AUDIO_PATH
     unsigned w = csd_mb_trim;                      /* single aligned load */
     if (!csd_trim_cache_valid || w != csd_trim_cache_word) {
         int tl = (int)(short)(w & 0xFFFFu);
@@ -185,14 +208,72 @@ unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
                   ((unsigned)(-tl) % CSD_TRIM_STEP88)) ? 0 : tl / 32;
         int cr = (tr > 0 || tr < -(int)CSD_TRIM_MAX88 ||
                   ((unsigned)(-tr) % CSD_TRIM_STEP88)) ? 0 : tr / 32;
-        csd_trim_mult_cache[0] = csd_trim_counts_to_mult(cl);
-        csd_trim_mult_cache[1] = csd_trim_counts_to_mult(cr);
+        csd_trim_mult_cache[0] = csd_trim_counts_to_mult_q29(cl);
+        csd_trim_mult_cache[1] = csd_trim_counts_to_mult_q29(cr);
         csd_trim_cache_word  = w;
         csd_trim_cache_valid = 1u;
     }
     unsigned tm = csd_trim_mult_cache[ch & 1u];
     if (tm == CSD_TRIM_UNITY) return host_mult;    /* the 99% case, no math */
     return csd_trim_long_mul(host_mult, tm, 29);
+#else
+    (void)ch;
+    return host_mult;                              /* trim lives in regs    */
+#endif
+}
+
+/* ---- MASTER TRIM register value (directive 2026-11-04) -----------------
+ * ONE implementation of the trim -> chip-word conversion, shared by the
+ * SCPI immediate write (csd_diag_scpi.c) and the boot writer
+ * (clearsounddac_board.xc), so the two paths cannot drift.
+ *
+ * Datasheet v1.3, Registers 20-17: MASTER TRIM is ONE 32-bit SIGNED number
+ * setting the 0 dB reference for ALL volume controls; default 32'h7FFFFFFF,
+ * documented example -1 dB = 32'h721482BF. It is NOT per channel -- the
+ * header's BYTE0..3 comments name byte halves of this single word. The
+ * mailbox pair therefore becomes a common reference: the MORE negative
+ * (quieter) channel wins, so neither channel is ever amplified past its
+ * requested trim. This mirrors vol_analog_common()'s largest-common-term
+ * rule for reg 3; a true per-channel trim would need USE_SHARED_VOLUME=0
+ * (reg 27) plus datasheet work and is deliberately NOT assumed.
+ *
+ * Scale: csd_trim_counts_to_mult_q29 is Q2.29 (2^29 = unity, the same
+ * scale the pre-directive mixer multiply used -- gate-verified acoustics,
+ * reproduced by construction). Q31 = Q2.29 >> 2 is exact (low 2 bits of a
+ * Q2.29 unity are zero at this grid); capped to 0x7FFFFFFF per datasheet. */
+unsigned csd_trim_reg_byte(unsigned q31, unsigned idx)
+{
+    /* See csd_gen.h: byte order across regs 17..20 is settled by
+     * rig/trim_reg_probe.py leg 5, NOT by reasoning about the header.
+     * Default: reg 17 holds the MOST significant byte. */
+#ifdef CSD_TRIM_BYTES_SWAPPED
+    return (q31 >> (8u * idx)) & 0xFFu;            /* reg 17 = LSB          */
+#else
+    return (q31 >> (8u * (3u - idx))) & 0xFFu;     /* reg 17 = MSB          */
+#endif
+}
+
+unsigned csd_trim_master_trim_q31(unsigned packed)
+{
+    /* Unit trap caught by a fresh-boot rig, 2026-11-04: an earlier revision
+     * read the packed fields as RAW 0.125 dB counts, but the mailbox stores
+     * them in the 8.8 grid (SCPI setter packs counts*32; csd_gen.h header:
+     * "int16 in 8.8 dB... -32 dB = -8192, in 0.125 dB = 32-count steps").
+     * So -96 counts (-12 dB) arrived as -3072, clamped to the -256-count
+     * (-32 dB) rail: every trim shallower than full scale measured as
+     * 0x00337183. Divide by the grid step FIRST, clamp in counts. */
+    /* (int)(short) rather than int16_t: this TU has no stdint in scope --
+     * the file's existing idiom (csd_gen_mailbox.c). */
+    int trimL = (int)(short)(packed & 0xFFFFu);
+    int trimR = (int)(short)(packed >> 16);
+    int common = (trimL < trimR) ? trimL : trimR;  /* deepest channel */
+    if (common > 0) common = 0;                    /* never amplify   */
+    if (common < -CSD_TRIM_MAX88) common = -CSD_TRIM_MAX88;
+    int counts = common / 32;                      /* 8.8 grid -> 0.125 dB steps */
+    unsigned q29 = csd_trim_counts_to_mult_q29(counts);
+    unsigned q31 = q29 >> 2;
+    if (q31 > 0x7FFFFFFFu) q31 = 0x7FFFFFFFu;
+    return q31;
 }
 
 /* ---- release gate (TODO items 5+6, directive 2026-11-01) -----------------
