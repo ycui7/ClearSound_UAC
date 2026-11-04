@@ -230,7 +230,9 @@ void csd_gen_fill(int samp[2]);
  */
 #ifdef CSD_GEN_PREMIX
 void csd_gen_mix_begin(int hostL, int hostR, unsigned dsd_mode);
-int  csd_gen_mix_sample(unsigned ch, int host);
+int  csd_gen_mix_sample(unsigned ch, int host);   /* pre-volume path, MAX_MIX_COUNT>0 builds only */
+int  csd_gen_mix_host_only(unsigned ch, int host);   /* spec 2026-11-04: w_host on USB audio only */
+int  csd_gen_mix_post_volume(unsigned ch, int volled_host); /* + FG, no FG volume, mixer1 only */
 #endif
 
 /* Post-mixer bypass input. The mixer thread owns DoP detection in a mixer
@@ -296,7 +298,28 @@ unsigned csd_mb_get_gains(void);
  * 8.8 dB, 0..-8192 (0 dB .. -32 dB), 32-count (0.125 dB) steps. See
  * csd_gen_mailbox.c for the single-word rationale. Production, not debug:
  * this is manufacturing calibration, so it survives the release gate. */
-void     csd_mb_put_trim(unsigned packed);
+void     csd_mb_put_trim(unsigned packed);   /* posts trim-dirty too     */
+unsigned csd_mb_get_trim_dirty(void);        /* boot/config-pass refresh */
+void     csd_mb_clear_trim_dirty(void);
+unsigned csd_trim_master_trim_q31(unsigned packed);  /* the ONE conversion */
+/* MASTER TRIM base register (ES9219Q regs 17..20 == 0x11..0x14). Named
+ * here rather than pulling es9219q.h across the mailbox boundary. */
+#define CSD_TRIM_REG_BASE 0x11u
+/* Byte order of the 32-bit MASTER TRIM across regs 17..20 is a MEASURED
+ * question, not a header detail: datasheet v1.3 gives the value semantics
+ * and the -1 dB example but no bit-to-register map, and the es9219q.h
+ * comments ("byte 0 of master trim" on reg 0x11) read MSB-first while a
+ * little-endian reading is equally arguable. Default = reg 0x11 holds the
+ * MOST significant byte (the example 0x721482BF is byte-meaningful that
+ * way). rig/trim_reg_probe.py leg 5 settles it empirically: apply -12 dB
+ * trim, then compare null depth under both orders (-DCSD_TRIM_BYTES_
+ * SWAPPED); the order giving the expected null is the silicon's. Until
+ * that leg runs, do not re-reason this from the header. */
+/* Byte idx (0 = reg 17) of the Q31 word, order behind the ifdef above.
+ * DEFINED IN csd_gen_mailbox.c (a plain function, not a header inline: no
+ * static-inline precedent in this codebase and XC's parser has rejected
+ * unexpected forms before -- see csd_diag_regs.xc's parser notes). */
+unsigned csd_trim_reg_byte(unsigned q31, unsigned idx);
 unsigned csd_mb_get_trim(void);
 
 /* L/R trim as a mixer output multiplier (TODO items 3+4, 2026-11-01).

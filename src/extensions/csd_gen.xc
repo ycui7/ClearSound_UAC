@@ -533,6 +533,39 @@ int csd_gen_mix_sample(unsigned ch, int host)
     return csd_gen_mix_gain_sum(host, csd_gen_mix_wave[ch],
                                 csd_gen_mix_w_host, csd_gen_mix_w_gen);
 }
+
+/* ---- post-volume injection pair (owner spec 2026-11-04) ---------------
+ * Spec: the mixer applies its volume calculation to the USB-audio
+ * component ONLY; the function-generator path carries no volume. The old
+ * single call summed host+FG BEFORE the output-volume stage, so a host
+ * SET_CUR attenuated the tone with the music. These two split it:
+ * host_only() scales the host word upstream (w_host, byte-exact at
+ * unity); post_volume() sums the frame's wave into the ALREADY-SCALED
+ * host word, unscaled. Both stay on mixer1 -- the NCO owner rule above
+ * still holds; do not call post_volume() from mixer2.
+ */
+int csd_gen_mix_host_only(unsigned ch, int host)
+{
+    /* w_host on the USB-audio component only. ch>=2 passthrough, DSD/DoP
+     * payloads NEVER scaled (the markers live in these bytes), unity is
+     * byte-exact -- same three gates the old pre-volume path enforced. */
+    if (ch > 1u) return host;
+    if (csd_gen_mix_dsd != 0u || csd_mb_get_dop() != 0u) return host;
+    if (csd_gen_mix_w_host == CSD_GEN_Q15_UNITY) return host;
+    return csd_gen_mix_scale(host, csd_gen_mix_w_host);
+}
+
+int csd_gen_mix_post_volume(unsigned ch, int volled_host)
+{
+    /* Saturating sum, no FG gain: w_gen is deliberately unused here --
+     * per spec the generator has no volume control. valid==0 (gen OFF,
+     * DSD, DoP) returns the host word byte-exact; the suppress paths in
+     * csd_gen_mix_begin() clear valid before fill, so this cannot sum a
+     * stale wave. */
+    if (ch > 1u) return volled_host;
+    if (!csd_gen_mix_valid) return volled_host;
+    return csd_gen_mix_sum(volled_host, csd_gen_mix_wave[ch]);
+}
 #endif /* CSD_GEN_PREMIX */
 
 /* Gate counters for SCPI (see the block above): the rig takes deltas across
