@@ -240,51 +240,85 @@ def filtered_expectation(uL, uR, rate, rounding):
 
 
 
-def find_delta(cL, cR, uL, uR, W=8192, SPAN=8192):
-    """Offset search for a filtering preset: returns (delta, matched_frames).
+def find_delta(cL, cR, uL, uR, min_mass=0.002):
+    """Locate the stream by RARE-VALUE POSITION, tolerating a bounded residual.
 
-    The rig's aligner anchors on a constant sync run, which a recursive filter
-    cannot provide (poles at |z|=0.99866 -> ~16,000-sample decay, longer than
-    the 4096-frame marker; rounding can also leave a last-bit limit cycle).
-    Anchor instead on the stimulus's own property: every frame is unique
-    band-limited noise on an independent seed, so exactly one offset matches
-    thousands of frames. Safety does not rest on this being right -- the
-    verdict comes from scoring EVERY frame afterwards, so a wrong offset
-    produces a huge defect count, never a false PASS.
+    Returns (modal_delta, mass_fraction, n_pairs, candidates_tried).
+
+    WHY NOT A RUN-MATCH (this is the bug that wasted the most time here). The
+    first two versions demanded EXACT equality over a long run -- an 8-word
+    signature over 2,048 frames. A bounded residual defeats that silently: if
+    the twin is off by ~10 LSB, only ~1.2% of samples land on their exact twin
+    value, so only those are locatable, the rest scatter flat, and the rig
+    printed "VOID: no anchor" for a capture that was in fact delivered in
+    order and correct to ~110 dB. A null probe read as a device verdict.
+
+    The rare-value histogram survives a residual: values that occur <=3 times
+    on BOTH sides can be located unambiguously, and an ordered stream puts a
+    spike on one delta while chance stays flat. Measured on the 800 MHz preset-2
+    capture: 17,342 rare values at delta 146 against ~0.28 expected by chance,
+    equal on L and R (which also rules out a channel-pairing bug), and flat
+    against the UNFILTERED schedule -- so the spike is evidence the filter ran.
+
+    SAFETY is unchanged: this only chooses the offset. The verdict still comes
+    from scoring EVERY frame afterwards (A.score + the strict 32-bit compare),
+    so a wrong offset yields a huge defect count, never a false PASS.
     """
-    # Locate by SIGNATURE, not by a guessed nominal. The first version
-    # searched +-8192 around (n_frames - got_n) -- a nominal I invented -- and
-    # matched nothing, because the real offset on this fixture is set by the
-    # prefill (384,000 frames written before capture opens) plus the 0.25 s
-    # gap: hundreds of thousands of frames, and the device free-runs I2S
-    # before the host plays anything. A window that size cannot be guessed,
-    # so do not guess: the stimulus has no translational self-similarity (the
-    # property the rig was designed for), so ONE 8-word signature identifies
-    # the schedule position exactly.
-    #
-    # Several capture positions are tried because the capture HEAD may be
-    # pre-stream filler (the tap's RX side returns the sticky last word until
-    # TX has produced one), and each candidate must hold up over RUN frames.
-    got_n, n_frames = len(cL), len(uL)
-    SIG, RUN, TRIES = 8, 2048, 24
-    best = (-1, None)
-    for t in range(TRIES):
-        i0 = int(got_n * (t + 1) / (TRIES + 1))
-        if i0 + RUN > got_n or i0 < 64:
+    RARE, CAP_POS = 3, 3          # rare on both sides; locate unambiguously
+    best = (None, 0.0, 0, 0)
+    for which in (0, 1):          # L and R independently; they must agree
+        capv = cL if which == 0 else cR
+        sch = uL if which == 0 else uR
+        uv, uf, cf = np.unique(sch, return_index=True, return_counts=True)
+        cand = uv[cf <= RARE]
+        if len(cand) == 0:
             continue
-        cand = np.flatnonzero((uL == cL[i0]) & (uR == cR[i0]))
-        for k in cand[:16]:
-            k = int(k)
-            if k + RUN > n_frames:
-                continue
-            m = int(np.count_nonzero(
-                (cL[i0:i0 + RUN] == uL[k:k + RUN])
-                & (cR[i0:i0 + RUN] == uR[k:k + RUN])))
-            if m > best[0]:
-                best = (m, k - i0)
-        if best[0] >= RUN:
-            break
+        srt = np.sort(capv)
+        ordv = np.argsort(capv, kind="stable")
+        lo = np.searchsorted(srt, cand, "left")
+        hi = np.searchsorted(srt, cand, "right")
+        keep = (hi > lo) & ((hi - lo) <= CAP_POS)
+        if int(keep.sum()) < 500:
+            continue
+        pos_c = ordv[lo[keep]].astype(np.int64)
+        pos_f = uf[cf <= RARE][keep].astype(np.int64)
+        d = pos_f - pos_c
+        v, c = np.unique(d, return_counts=True)
+        o = int(np.argmax(c))
+        mass = float(c[o]) / len(d)
+        if mass > best[1]:
+            best = (int(v[o]), mass, int(c[o]), int(keep.sum()))
     return best
+
+
+def describe_residual(cL, cR, uL, uR, delta):
+    """Say what the capture-twin difference IS, instead of only its absence.
+
+    A run-match answers "exact?" and nothing else, so a bounded residual looks
+    identical to a scrambled stream. This answers the question that decides who
+    owns the defect: |diff| distribution at the located delta (delivery is fine
+    if it is bounded), plus whether the difference is additive or scale-like.
+    """
+    n = min(len(cL), len(uL) - max(0, delta))
+    i = np.arange(n, dtype=np.int64)
+    out = {}
+    for tag, capv, sch in (("L", cL, uL), ("R", cR, uR)):
+        d = capv[i].astype(np.int64) - sch[i + delta].astype(np.int64)
+        ad = np.abs(d)
+        out[tag] = dict(exact=float((d == 0).mean()) * 100.0,
+                        le1=float((ad <= 1).mean()) * 100.0,
+                        le100=float((ad <= 100).mean()) * 100.0,
+                        median=float(np.median(ad)),
+                        rms=float(np.sqrt((d.astype(np.float64) ** 2).mean())),
+                        sig=float(np.sqrt((sch[i + delta].astype(np.float64)
+                                           ** 2).mean())))
+    for tag, st in out.items():
+        snr = (20 * np.log10(st["sig"] / st["rms"]) if st["rms"] > 0
+               else float("inf"))
+        print(f"  residual {tag}: exact {st['exact']:.3f}%  |d|<=1 "
+              f"{st['le1']:.3f}%  |d|<=100 {st['le100']:.3f}%  "
+              f"median {st['median']:.0f}  SNR {snr:.1f} dB")
+    return out
 
 
 def build_regions(cL, cR, uL, uR, delta, PROBE=384):
@@ -522,20 +556,29 @@ def main():
     print(f"  captured {got_n:,} frames")
 
     # ---- anchor + regions (unit-tested in rig/dsp_model_selftest.py) ------
-    frac, delta = find_delta(cL, cR, uL, uR)
-    if delta is not None and frac >= 2048:
-        print(f"  anchor: delta={delta:,} matched {frac}/2048 probe frames "
-              f"exactly")
-    else:
-        # No honest anchor against the FILTERED expectation. Identify what the
-        # capture actually IS before blaming anything: each hypothesis below
-        # has a different owner, and all of them are cheap against arrays we
-        # already hold. The capture is saved so the answer survives the run.
+    delta, mass, n_spike, n_pairs = find_delta(cL, cR, uL, uR)
+    if n_pairs == 0:
+        # Nothing could be located because nothing was TESTABLE: not a device
+        # result. Exiting with a distinct message here is what stops a null
+        # probe being read as a verdict -- the mistake this whole rewrite is
+        # about.
         report_why_no_match(cL, cR, uL, uR, n_frames, got_n,
                             tx_adv=tx_after - tx_before)
-        sys.exit(f"VOID: no anchor against the filtered expectation "
-                 f"(best {frac}/2048 at delta={delta}). The controls above "
-                 f"name the owner.")
+        sys.exit("PROBE FAILURE: zero rare-on-both-sides values could be "
+                 "located, so no offset was ever tested. The device is "
+                 "UNMEASURED by this run -- fix the probe, do not blame it.")
+    print(f"  anchor: rare-value spike at delta={delta:,} carries "
+          f"{n_spike:,}/{n_pairs:,} pairs ({100.0*mass:.2f}%)")
+    if mass < 0.002:
+        report_why_no_match(cL, cR, uL, uR, n_frames, got_n,
+                            tx_adv=tx_after - tx_before)
+        sys.exit(f"VOID: no positional spike (best delta {delta:,} at "
+                 f"{100.0*mass:.3f}%). The capture is not an ordered copy of "
+                 f"the schedule at any offset. Controls above name the owner.")
+    # Report what the difference IS before scoring it. The strict verdict below
+    # still decides PASS/FAIL; this only makes a bounded residual legible, so a
+    # ~110 dB delivery-correct capture can never again be printed as VOID.
+    describe_residual(cL, cR, uL, uR, delta)
     regions = build_regions(cL, cR, uL, uR, delta)
     scored = sum(b - x for (x, b, _) in regions)
     print(f"  regions: {len(regions)}, {scored:,} of {got_n:,} frames "
