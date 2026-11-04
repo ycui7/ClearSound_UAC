@@ -509,7 +509,8 @@ def build_regions(cL, cR, uL, uR, delta, PROBE=384):
 
 
 
-def report_why_no_match(cL, cR, uL, uR, n_frames, got_n, tx_adv=None):
+def report_why_no_match(cL, cR, uL, uR, n_frames, got_n, tx_adv=None,
+                        dc_pair=None):
     """Name the failure instead of guessing at it.
 
     A VOID with no explanation is how a rig burns hardware time. Each check
@@ -548,7 +549,11 @@ def report_why_no_match(cL, cR, uL, uR, n_frames, got_n, tx_adv=None):
             print(f"  <== {name} is near-constant: tap disarmed, or RX fell "
                   f"back to the mic path")
     # Control: the unfiltered schedule (the DSP-bypassed hypothesis).
-    rL, rR, _ = O.build_block(n_frames)
+    # Control stimulus MUST match the played one: building the default noise
+    # block here while the device played DC means the bypass hypothesis could
+    # never fire, and a bypass would be reported as a filter defect.
+    rL, rR, _ = O.build_block(n_frames, dc_pair=dc_pair,
+                              pip_period=(CHUNK_FRAMES if dc_pair else 0))
     # find_delta now returns (delta, mass, spike, pairs) -- this call site kept
     # the old 2-tuple unpack and raised ValueError, which killed the whole
     # no-match battery (and with it the amplitude A/B runs) before it printed
@@ -609,6 +614,11 @@ def main():
                          "drift between generator and firmware) from an "
                          "arithmetic cause. Baseline is scored first and "
                          "printed; every hypothesis must be read against it.")
+    ap.add_argument("--dc", default=None, metavar="L,R",
+                    help="constant stimulus (hex 24-bit, e.g. 0x123456,0x345612) "
+                         "instead of noise: isolates the recursion, since the "
+                         "expected output is the analytic steady state. Landmark "
+                         "pips are injected automatically.")
     ap.add_argument("--amp-shift", type=int, default=0,
                     help="attenuate the stimulus noise by 2**-N before the DAC. "
                          "Absolute per-step effects (state quantization, an "
@@ -632,7 +642,28 @@ def main():
     if a.amp_shift:
         print(f"  stimulus attenuated by 2**-{a.amp_shift} "
               f"(markers left full-scale)")
-    expL, expR, block = O.build_block(n_frames, amp_shift=a.amp_shift)
+    dc_pair = None
+    if a.dc:
+        try:
+            ls, rs = a.dc.split(",")
+            dc_pair = (int(ls, 16), int(rs, 16))
+        except ValueError:
+            sys.exit("--dc wants L,R as hex 24-bit, e.g. 0x123456,0x345612")
+        if not all(0 <= v < (1 << 24) for v in dc_pair):
+            sys.exit("--dc values must be 24-bit")
+        # Top byte must never be a DoP marker: 0x05 then 0xFA over 4 frames
+        # latches the guard and the FIR BYPASSES -- the run would measure a
+        # bypassed filter and report it as a filter.
+        if any((v >> 16) in (0x05, 0xFA) for v in dc_pair):
+            sys.exit(f"--dc {a.dc} uses a DoP marker top byte; pick other "
+                     f"values (top byte not 0x05/0xFA)")
+        print(f"  stimulus: DC L=0x{dc_pair[0]:06X} R=0x{dc_pair[1]:06X} "
+              f"(top bytes avoid DoP); unique landmark pips every "
+              f"{CHUNK_FRAMES:,} frames")
+    expL, expR, block = O.build_block(n_frames, amp_shift=a.amp_shift,
+                                      dc_pair=dc_pair,
+                                      pip_period=(CHUNK_FRAMES if dc_pair
+                                                  else 0))
     print(f"  block {n_frames:,} frames, markers every {MARKER_PERIOD:,}")
 
     # Vectorised: a Python list over 23M frames cost ~1 GB and is what got
@@ -802,7 +833,8 @@ def main():
         # probe being read as a verdict -- the mistake this whole rewrite is
         # about.
         report_why_no_match(cL, cR, uL, uR, n_frames, got_n,
-                            tx_adv=tx_after - tx_before)
+                            tx_adv=tx_after - tx_before,
+                            dc_pair=dc_pair)
         sys.exit("PROBE FAILURE: zero rare-on-both-sides values could be "
                  "located, so no offset was ever tested. The device is "
                  "UNMEASURED by this run -- fix the probe, do not blame it.")
@@ -810,7 +842,8 @@ def main():
           f"{n_spike:,}/{n_pairs:,} pairs ({100.0*mass:.2f}%)")
     if mass < 0.002:
         report_why_no_match(cL, cR, uL, uR, n_frames, got_n,
-                            tx_adv=tx_after - tx_before)
+                            tx_adv=tx_after - tx_before,
+                            dc_pair=dc_pair)
         sys.exit(f"VOID: no positional spike (best delta {delta:,} at "
                  f"{100.0*mass:.3f}%). The capture is not an ordered copy of "
                  f"the schedule at any offset. Controls above name the owner.")

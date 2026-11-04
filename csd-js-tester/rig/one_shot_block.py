@@ -224,7 +224,8 @@ class AlsaXrunTracker:
 # The block, built once.
 # ---------------------------------------------------------------------------
 def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
-                marker_len: int = MARKER_LEN, amp_shift: int = 0):
+                marker_len: int = MARKER_LEN, amp_shift: int = 0,
+                dc_pair=None, pip_period: int = 0):
     """Return (expected_L, expected_R, bytes) for the block we are about to send.
 
     The bytes ARE the expectation: they are produced once here and both written
@@ -251,6 +252,51 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
     if amp_shift:
         L = (L >> int(amp_shift))
         R = (R >> int(amp_shift))
+    if dc_pair is not None:
+        # DC stimulus: the recursion is then the ONLY thing that can move the
+        # output, because the input is constant and its filtered steady state
+        # is analytic (this shelf has H(0)=1, so DC out == DC in). A per-sample
+        # additive error inside the hardware recursion shows up directly as an
+        # offset in the captured plateau -- which no host model can produce,
+        # since my twin, the vendor's Python model and the xsim oracle all
+        # implement the same reading of the asm.
+        #
+        # Values must avoid the DoP marker bytes: the guard latches on 0x05
+        # then 0xFA in the top byte over 4 frames and BYPASSES the FIR, which
+        # would silently measure a bypassed filter. The defaults put 0x12 /
+        # 0x34 in the top byte. The rig's own DoP scan aborts if a schedule
+        # would latch, so a bad choice fails loudly rather than lying.
+        L[:] = int(dc_pair[0])
+        R[:] = int(dc_pair[1])
+    if pip_period:
+        # Sparse unique landmarks, because a constant stimulus leaves the
+        # capture with almost nothing rare, and find_delta anchors on values
+        # RARE ON BOTH SIDES. One unique frame per pip_period is enough
+        # (352 over the block) and is excluded from scoring downstream, so it
+        # cannot bias the plateau measurement. Markers alone are not enough:
+        # 29 x 4096 = 118,784 occurrences of one value is 0.5% of frames,
+        # which the rarity test does not treat as rare against a 99.5% constant.
+        rng = np.random.default_rng(20261104)
+        pos = np.arange(pip_period // 2, n_frames, pip_period)
+        # Top byte must avoid the DoP markers by CONSTRUCTION, not by luck: a
+        # random pip landing on 0x05 (or 0xFA) can complete the 4-frame
+        # 0x05->0xFA pattern that latches the guard, and while latched the FIR
+        # BYPASSES -- the run would then measure an unfiltered device and
+        # report it as a filter defect. The rig's own DoP scan would abort
+        # loudly, but a stimulus that cannot latch is better than one that
+        # fails only when you notice the abort.
+        DOP_TOP = (0x05, 0xFA)
+        def _safe_pips(k):
+            out = np.empty(k, dtype=np.int64)
+            for j in range(k):
+                while True:
+                    v = int(rng.integers(1, 1 << 24))
+                    if (v >> 16) not in DOP_TOP:
+                        out[j] = v
+                        break
+            return out
+        L[pos] = _safe_pips(len(pos))
+        R[pos] = _safe_pips(len(pos))
     m = (idx % np.uint64(marker_period)) < np.uint64(marker_len)
     L[m] = sig.SYNC_L
     R[m] = sig.SYNC_R
