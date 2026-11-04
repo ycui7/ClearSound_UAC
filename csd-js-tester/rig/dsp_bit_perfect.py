@@ -393,9 +393,19 @@ def report_why_no_match(cL, cR, uL, uR, n_frames, got_n, tx_adv=None):
                   f"back to the mic path")
     # Control: the unfiltered schedule (the DSP-bypassed hypothesis).
     rL, rR, _ = O.build_block(n_frames)
-    f2, d2 = find_delta(cL, cR, rL.astype(np.int32), rR.astype(np.int32))
-    print(f"  vs UNFILTERED schedule: best {f2}/2048 at delta={d2}"
-          + ("   <== DSP DID NOT RUN (byte-exact bypass)" if f2 >= 2048 else ""))
+    # find_delta now returns (delta, mass, spike, pairs) -- this call site kept
+    # the old 2-tuple unpack and raised ValueError, which killed the whole
+    # no-match battery (and with it the amplitude A/B runs) before it printed
+    # anything. The control's question is unchanged: if the capture anchors on
+    # the UNFILTERED schedule, the DSP did not run. Gate on mass, the new
+    # locator's confidence measure, not on a frame-run that a bounded residual
+    # can never reach.
+    d2, m2, s2, p2 = find_delta(cL, cR, rL.astype(np.int32),
+                                rR.astype(np.int32))
+    bypass = m2 >= 0.002
+    print(f"  vs UNFILTERED schedule: delta={d2} spike {s2:,}/{p2:,} pairs"
+          f" ({100.0*m2:.2f}%)"
+          + ("   <== DSP DID NOT RUN (byte-exact bypass)" if bypass else ""))
     # Membership: is the capture even OUR audio, at any offset at all?
     rng = np.random.default_rng(7)
     pick = rng.choice(got_n, size=min(4096, got_n), replace=False)
