@@ -45,9 +45,34 @@ static int32_t sat32(int64_t v)
 /* one product: (x*c + 2^29) >> 30, checked to stay inside int34 the way
  * utils.int34 does -- an escape means the model or the coefficients are
  * wrong, and failing loudly is the only acceptable response. */
+/* Product rounding mode, argv[9], for fitting the device's actual rule.
+ * DEFAULT 0 keeps the shipped behaviour (the semantics biquad.S's single
+ * vlmaccr is modelled with, and what dsp_model_selftest.py pins to the
+ * vendor's process_xcore). The others exist so a residual can be attributed
+ * by FIT rather than by argument: which rule drives the capture-to-twin
+ * difference to zero is the rule the silicon implements. */
+static int g_round = 0;
+
+static int64_t prod_round(int64_t raw)
+{
+    switch (g_round) {
+    case 1:                                   /* truncate toward zero */
+        return raw >= 0 ? (raw >> 30) : -((-raw) >> 30);
+    case 2:                                   /* arithmetic shift (floor) */
+        return raw >> 30;
+    case 3: {                                 /* round half to even */
+        int64_t q = raw >> 30, r = raw & ((1LL << 30) - 1);
+        if (r > (1LL << 29) || (r == (1LL << 29) && (q & 1))) q += 1;
+        return q;
+    }
+    default:                                  /* 0: half up -- shipped form */
+        return (raw + (1LL << 29)) >> 30;
+    }
+}
+
 static int64_t mac(int32_t x, int32_t c)
 {
-    int64_t p = ((int64_t)x * (int64_t)c + (1LL << 29)) >> 30;
+    int64_t p = prod_round((int64_t)x * (int64_t)c);
     if (p > ((1LL << 33) - 1) || p < -(1LL << 33)) {
         fprintf(stderr, "dsp_bq_host: VPU product %lld escaped int34 -- "
                         "model or coefficients invalid\n", (long long)p);
@@ -58,14 +83,21 @@ static int64_t mac(int32_t x, int32_t c)
 
 int main(int argc, char **argv)
 {
-    if (argc != 9) {
-        fprintf(stderr, "usage: %s IN OUT c0 c1 c2 c3 c4 lsh\n", argv[0]);
+    if (argc != 9 && argc != 10) {
+        fprintf(stderr, "usage: %s IN OUT c0 c1 c2 c3 c4 lsh [round]\n", argv[0]);
         return 2;
     }
     const char *inf = argv[1], *outf = argv[2];
     int32_t c[5];
     for (int i = 0; i < 5; i++) c[i] = (int32_t)strtol(argv[3 + i], NULL, 10);
     int lsh = (int)strtol(argv[8], NULL, 10);
+    /* argv[9] selects the product-rounding rule for residual FITTING only.
+     * Absent (the rig always omits it) = mode 0, the shipped form that
+     * dsp_model_selftest.py pins to the vendor's process_xcore. A fit result
+     * from another mode is evidence about the silicon, never a shipping
+     * default -- switching the default without the selftest re-passing would
+     * silently redefine what "bit-perfect" means. */
+    if (argc == 10) g_round = (int)strtol(argv[9], NULL, 10);
 
     FILE *fi = fopen(inf, "rb");
     if (!fi) { perror("open in"); return 2; }
