@@ -279,6 +279,15 @@ void csd_diag_midi(
     {
         unsigned trim_packed = 0u;
         (void) csd_diag_trim_load(&trim_packed);
+        /* Tile[1], and only tile[1], verified by reading the code rather
+         * than assuming (a tile[0] publish was added on a wrong tile model
+         * and removed once AudioHwInit was found in the audio() task --
+         * lib_xua xua_audiohub.xc:905 -- which runs on AUDIO_IO_TILE=1):
+         * the mirror's readers are the boot/rate writer in csd_AudioHwInit
+         * and VOLume:TRIM? in the SCPI callbacks, both on this tile. The
+         * dirty flag csd_mb_put_trim posts is what makes csd_AudioHwInit
+         * put the value into MASTER TRIM (directive 2026-11-04: trim is
+         * es9219 register setup, not audio-path math). */
         csd_mb_put_trim(trim_packed);
     }
 

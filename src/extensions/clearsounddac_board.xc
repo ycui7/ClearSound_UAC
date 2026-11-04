@@ -1148,10 +1148,44 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE    (ES9219Q_DOP_N_VOL_RAMP_RATE,           (ES9219Q_DOP_N_VOL_RAMP_RATE_VALUE | ES9219Q_DOP_ENABLE | ES9219Q_VOLUME_RATE) );
     DAC_REGWRITE    (ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,    (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE) );
     //DAC_REGWRITE    (ES9219Q_MASTER_MODE_N_SYNC_CONFIG,     ((0b01 << 5) | (0 << 4) || 2) ); //DATA_CLK = MCLK/4 for 192KHz, Disable MCLK = 128FS, DPLL 5461 FS edge Lock. 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE0,             (uint8_t)((VolumeMasterTrim >> 0) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE1,             (uint8_t)((VolumeMasterTrim >> 1) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE2,             (uint8_t)((VolumeMasterTrim >> 2) & 0xFF) ); 
-    //DAC_REGWRITE    (ES9219Q_MASTER_TRIM_BYTE3,             (uint8_t)((VolumeMasterTrim >> 3) & 0xFF) );    
+
+    /* ---- L/R trim as codec register setup (owner directive 2026-11-04):
+     * "volume trim is a function in the es9219 register setup, it does not
+     * need to be computed in any audio path." The mixer-path multiply is a
+     * pass-through now (csd_gen_mailbox.c); this boot writer plus the
+     * SCPI-side immediate write (csd_diag_scpi.c) are the implementation.
+     * Zero instructions per audio frame.
+     *
+     * Why a boot writer at all when SCPI writes immediately: the
+     * flash-adopted pair (csd_diag_midi.xc boot adopt) never passes
+     * through SCPI, so without this the trim read from flash would sit in
+     * the mailbox un-applied -- the class of bug the persistence work
+     * already documented. The dirty flag (set at reset and by every
+     * csd_mb_put_trim) makes this block write the chip exactly once per
+     * change, not once per init re-entry. csd_AudioHwInit runs on tile[1]
+     * (the mailbox's owning tile) and reaches I2C only through DAC_REGWRITE
+     * -> the tile[0] server, the file's existing idiom.
+     *
+     * Semantics and byte order: single implementation upstream, see
+     * csd_trim_master_trim_q31 / csd_trim_reg_byte (csd_gen.h) comments. */
+    {
+        static unsigned trimRegLast = 0u;
+        static unsigned trimRegValid = 0u;
+        unsigned packed = csd_mb_get_trim();
+        if (!trimRegValid || csd_mb_get_trim_dirty()) {
+            unsigned q31 = csd_trim_master_trim_q31(packed);
+            if (!trimRegValid || trimRegLast != q31) {
+                for (unsigned ti = 0; ti < 4u; ti++) {
+                    unsigned tb = csd_trim_reg_byte(q31, ti);
+                    DAC_REGWRITE(ES9219Q_MASTER_TRIM_BYTE0 + ti, (uint8_t)tb);
+                }
+                trimRegLast = q31;
+                trimRegValid = 1u;
+                debug_printf("TRIMWR boot packed:0x%x q31:0x%x\n", packed, q31);
+            }
+            csd_mb_clear_trim_dirty();
+        }
+    }
     //DAC_REGWRITE    (ES9219Q_GENERAL_CONFIG,              TBD ); 
     //DAC_REGWRITE    (ES9219Q_GPIO_CONFIG_N_AUTO_CLK_GEAR, TBD ); 
 
