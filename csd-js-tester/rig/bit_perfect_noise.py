@@ -649,6 +649,15 @@ def main():
     ap.add_argument("--minutes", type=float, default=5.0)
     ap.add_argument("--rig-selftest", action="store_true")
     ap.add_argument("--skip-arm", action="store_true")
+    # Rig-fault discriminator. The reader thread does numpy analysis (unpack +
+    # comparator + resync search) while the writer thread feeds a hard real-time
+    # ISO endpoint; they share one GIL, so an analysis spike can starve the writer
+    # and the DEVICE then underflows -- which would score as device defects that the
+    # rig manufactured. The skill prescribes separating collection from analysis
+    # for exactly this. --collect-only reads into memory with no analysis, then
+    # analyses after the window: if hole counts drop, the defects are rig-induced.
+    ap.add_argument("--collect-only", action="store_true",
+                    help="collect raw chunks with no analysis, then analyse")
     a = ap.parse_args()
 
     if a.rig_selftest:
@@ -679,12 +688,26 @@ def main():
         # "w_host,w_gen" in Q15 with 32768 = unity (csd_diag_scpi.c:1106);
         # anything else means the words we compare were multiplied before
         # reaching I2S. w_gen is irrelevant here -- the generator is OFF below.
-        require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
+        #
+        # With MIXER=0 there is no mixer task, so the row does not exist and
+        # nothing scales the stream in the digital domain -- skipping is correct,
+        # but it must be announced, because a silently-skipped gain gate is how a
+        # scaled stream would sneak past a "bit-perfect" verdict. The codec-side
+        # readback below (regs 0x0F/0x10 = 0 dB, 0x07 unmuted, 0x03 analog max) is
+        # the gate that still applies, and it stays mandatory either way.
         got = scpi("MIXer:GAIN?")
-        if got.split(",")[0].strip() != "32768":
-            die(f"mixer host gain is {got!r}, not Q15 unity 32768 -- the "
-                f"stream reaching I2S is scaled, so it cannot match what "
-                f"we sent")
+        if got and not got.lower().startswith(("err", "")):
+            require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
+            got = scpi("MIXer:GAIN?")
+            if got.split(",")[0].strip() != "32768":
+                die(f"mixer host gain is {got!r}, not Q15 unity 32768 -- the "
+                    f"stream reaching I2S is scaled, so it cannot match what "
+                    f"we sent")
+            print(f"  mixer host gain = unity ({got})")
+        else:
+            print("  mixer host gain: NO MIXER IN THIS BUILD -- nothing scales "
+                  "the stream digitally.\n  Codec 0 dB / unmuted readback below "
+                  "is the remaining (mandatory) gate.")
         # REGister:READ? answers base64. (reg, mask, why): reg 3's volume field
         # is bits [4:0] only; the upper bits are unrelated status, so masking
         # the whole register fails a correctly-configured codec (0x03 legitimately
@@ -736,6 +759,7 @@ def main():
     run = 0
     reads = stalls = 0
     latency = []
+    collected = []          # (raw bytes, read timestamp) when --collect-only
     t_start = time.monotonic()
 
     print("\n=== waiting for the sync marker (player holds it) ===")
@@ -803,8 +827,14 @@ def main():
         stalls = 0
         reads += 1
         raw = bytes(buf[:n * BPB])
-        L, R = unpack_frames(raw)
         tr = time.monotonic()
+        if a.collect_only:
+            # Collector thread does NOTHING but copy: no unpack, no comparator, no
+            # resync search. Those are numpy and share the GIL with the writer
+            # feeding a hard real-time ISO endpoint.
+            collected.append((raw, tr))
+            continue
+        L, R = unpack_frames(raw)
         abort = cmp.feed(L, R, pos0=cmp.total)
         # Pair markers on the SCHEDULE index, not on the count of captured
         # frames. The writer stamps (blk, ...) using schedule indices; deriving
@@ -847,6 +877,29 @@ def main():
     th.join(timeout=5)
     alsa.snd_pcm_drop(play)
     alsa.snd_pcm_drop(cap)
+
+    if a.collect_only:
+        # Analysis happens AFTER the stream is closed, so no numpy work ever
+        # competes with the writer thread. Comparing this run's defect counts
+        # against the inline-analysis run is the discriminator: fewer holes here
+        # means the holes were manufactured by the rig starving its own writer.
+        print(f"=== analysing {len(collected):,} collected chunks "
+              f"({len(collected)*CHUNK_FRAMES/RATE:.1f}s) post-stream ===")
+        for raw, tr in collected:
+            L, R = unpack_frames(raw)
+            cmp.feed(L, R, pos0=cmp.total)
+            end_idx = cmp.next_idx
+            start_idx = end_idx - len(L)
+            m0 = (np.arange(start_idx, end_idx, dtype=np.uint64)
+                  % np.uint64(MARKER_PERIOD))
+            hit = np.nonzero(m0 == 0)[0]
+            if len(hit):
+                blk = int((start_idx + int(hit[0])) // MARKER_PERIOD)
+                for (b, tw, q) in stats["mark_write"]:
+                    if b == blk:
+                        latency.append((b, tr - tw, q, -1))
+                        break
+        collected.clear()
 
     elapsed = time.monotonic() - t_soak
     print("\n=== RESULT ===")
