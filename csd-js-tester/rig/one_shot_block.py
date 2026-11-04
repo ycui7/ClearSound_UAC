@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64          # module level: _reg_read (gate helper) needs it at call time
 import ctypes
 import os
 import sys
