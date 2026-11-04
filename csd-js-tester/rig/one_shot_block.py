@@ -224,7 +224,7 @@ class AlsaXrunTracker:
 # The block, built once.
 # ---------------------------------------------------------------------------
 def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
-                marker_len: int = MARKER_LEN):
+                marker_len: int = MARKER_LEN, amp_shift: int = 0):
     """Return (expected_L, expected_R, bytes) for the block we are about to send.
 
     The bytes ARE the expectation: they are produced once here and both written
@@ -240,6 +240,17 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
     L, R = sig.expected_vec(idx)
     L = L.astype(np.int64)
     R = R.astype(np.int64)
+    # Amplitude study knob: attenuate the NOISE only, as an arithmetic right
+    # shift, BEFORE the markers are stamped. Power-of-two matters -- the wire
+    # format parks the value in bits 31..8 and byte0==0 is asserted by
+    # dsp_model_selftest.py and relied on by the DoP guard; a non-power-of-two
+    # scale would write junk into byte0 and could latch DoP. Markers stay
+    # full-scale on purpose: they are the alignment landmarks and the DoP
+    # guard's subject, and weakening them would break anchoring at the very
+    # moment the signal gets small.
+    if amp_shift:
+        L = (L >> int(amp_shift))
+        R = (R >> int(amp_shift))
     m = (idx % np.uint64(marker_period)) < np.uint64(marker_len)
     L[m] = sig.SYNC_L
     R[m] = sig.SYNC_R

@@ -420,6 +420,13 @@ def main():
     ap.add_argument("--rounding", choices=["vpu", "once"], default="vpu")
     ap.add_argument("--mixer", action="store_true")
     ap.add_argument("--preset", type=int, default=2)
+    ap.add_argument("--amp-shift", type=int, default=0,
+                    help="attenuate the stimulus noise by 2**-N before the DAC. "
+                         "Absolute per-step effects (state quantization, an "
+                         "offset inside the recursion) keep the same LSB size, "
+                         "so SNR falls with the signal; RELATIVE causes (a "
+                         "mis-modelled gain, multiply or rounding) shrink with "
+                         "it and hold SNR. One A/B separates the two families.")
     a = ap.parse_args()
 
     rate = sig.RATE
@@ -433,7 +440,10 @@ def main():
 
     n_frames = ((int(rate * 60 * a.minutes) + CHUNK_FRAMES - 1)
                 // CHUNK_FRAMES) * CHUNK_FRAMES
-    expL, expR, block = O.build_block(n_frames)
+    if a.amp_shift:
+        print(f"  stimulus attenuated by 2**-{a.amp_shift} "
+              f"(markers left full-scale)")
+    expL, expR, block = O.build_block(n_frames, amp_shift=a.amp_shift)
     print(f"  block {n_frames:,} frames, markers every {MARKER_PERIOD:,}")
 
     # Vectorised: a Python list over 23M frames cost ~1 GB and is what got
@@ -485,8 +495,14 @@ def main():
         print("  PASS here requires the STRICT 32-bit compare to be clean, so")
         print("  the low 8 bits are checked -- which no preset-0 run has ever")
         print("  done. A 24-bit-only pass proves nothing at this preset.")
-        eL = wL32.astype(np.int32)
-        eR = wR32.astype(np.int32)
+        # wL32/wR32 were freed by the DoP guard's `del` above, so rebuild the
+        # identity words here rather than move the guard: same expression, and
+        # keeping the guard first means a DoP-latching stimulus still aborts
+        # before any hardware contact at this preset too.
+        eL = ((expL.astype(np.uint32) << np.uint32(8))
+              & np.uint32(0xFFFFFFFF)).astype(np.int32)
+        eR = ((expR.astype(np.uint32) << np.uint32(8))
+              & np.uint32(0xFFFFFFFF)).astype(np.int32)
     else:
         # Feed the twin the 24-bit schedule fields directly (it scales by 256
         # itself); int32 keeps four 23M-element arrays at ~90 MB each instead of
