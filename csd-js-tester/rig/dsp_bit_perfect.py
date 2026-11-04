@@ -348,7 +348,42 @@ def _replay_score(a, expL, expR, rate):
             if not (5 <= med <= 60):
                 sys.exit(f"MUST-PASS FAILED: eps=0 median {med:.0f}, expected "
                          f"~21. Replay harness is broken; sweep void.")
-    results.sort()
+    if a.shape_sweep:
+        # Same capture, same delta, same full-length twin -- only the shape
+        # parameters of the generator move. If the flashed header came from an
+        # older parameter set, or the agreed spec drifted from what shipped,
+        # the device is running a genuinely different filter: persistent,
+        # low-pass and bounded, i.e. every measured property of the residual.
+        print("\n  shape sweep (fc / shelf gain / Q):")
+        HYPS = ([("fc", v) for v in (80, 85, 88, 92, 95, 100, 110, 130)]
+                + [("gain", v) for v in (-7.0, -6.5, -6.2, -5.8, -5.5, -5.0)]
+                + [("q", v) for v in (0.5, 0.6, 0.8, 0.9, 1.0, 1.2)])
+        base_c, base_l = gb.shelf_coeffs(rate)
+        for kind, val in HYPS:
+            kw = {"fc": "fc", "gain": "shelf_db", "q": "q_factor"}[kind]
+            cb, lb = gb.shelf_coeffs(rate, **{kw: val})
+            if list(cb) == list(base_c) and lb == base_l:
+                continue
+            eL2, eR2 = filtered_expectation(expL.astype(np.int32),
+                                            expR.astype(np.int32), rate,
+                                            a.rounding, coeffs_override=(cb, lb))
+            u2L = (eL2.astype(np.uint32) >> np.uint32(8)).astype(np.int32)
+            u2R = (eR2.astype(np.uint32) >> np.uint32(8)).astype(np.int32)
+            del eL2, eR2
+            meds, exs = [], []
+            for cap_, exp_ in ((cL, u2L), (cR, u2R)):
+                d = np.abs(cap_[i].astype(np.int64)
+                           - exp_[i + delta0].astype(np.int64))
+                meds.append(float(np.median(d)))
+                exs.append(float(np.mean(d == 0)) * 100)
+            results.append((max(meds), None))
+            print(f"    {kind}={val!s:6s}  median|d|={max(meds):9.0f}  "
+                  f"exact={min(exs):6.3f}%")
+
+    # Sort on the median ONLY: shape hypotheses carry no eps, and comparing
+    # None (or nan) as a tiebreak either raises TypeError or orders
+    # arbitrarily. The tag is printed separately below.
+    results.sort(key=lambda t: t[0])
     med_b, eps_b = results[0]
     med0 = next(m for m, e in results if e == 0.0)
     print(f"  best: eps={eps_b*1e6:+.1f} ppm median|d|={med_b:.0f} "
@@ -566,6 +601,14 @@ def main():
                          "(device clock off nominal). eps=0 runs first and "
                          "MUST reproduce the known residual or the sweep "
                          "aborts.")
+    ap.add_argument("--shape-sweep", action="store_true",
+                    help="with --replay, also score the capture against "
+                         "shelves regenerated at alternative fc / shelf gain "
+                         "/ Q. Distinguishes 'the device runs a slightly "
+                         "different filter shape' (older header, or a spec "
+                         "drift between generator and firmware) from an "
+                         "arithmetic cause. Baseline is scored first and "
+                         "printed; every hypothesis must be read against it.")
     ap.add_argument("--amp-shift", type=int, default=0,
                     help="attenuate the stimulus noise by 2**-N before the DAC. "
                          "Absolute per-step effects (state quantization, an "
