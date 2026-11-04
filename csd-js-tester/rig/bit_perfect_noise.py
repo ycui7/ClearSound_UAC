@@ -692,6 +692,29 @@ def find_marker_run(L, R, carry):
     return None, run
 
 
+
+def _reg_read(scpi, reg, tries=3):
+    """REGister:READ? over the PROVEN wire form: quoted base64 of the raw
+    address byte (csd_diag_scpi.c reg_read_q base64-decodes the parameter;
+    the old `REGister:READ? 0x0f` let libscpi reject the '=' padding, and
+    the rejected reply base64-decoded to b'' -> int 0 -> every register
+    'passed' every run. A gate that cannot fail is not a gate. Same trap,
+    documented verdict: rig/automute_ab.py:67). Retries: the tile[0] server
+    can miss a window while mid-journal. Raises when unreadable -- an
+    unanswered read must never count as 0 dB."""
+    tok = base64.b64encode(bytes([reg])).decode()
+    for _ in range(tries):
+        got = scpi(f'REGister:READ? "{tok}"')
+        if got:
+            try:
+                raw = base64.b64decode(got + "=" * (-len(got) % 4))
+            except Exception:
+                raw = b""
+            if raw:
+                return int.from_bytes(raw, "big")
+        time.sleep(0.3)
+    raise RuntimeError(f"REGister:READ? {reg:#04x} unanswered after {tries} tries")
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=5.0)
@@ -798,13 +821,8 @@ def main():
                                (0x0F, 0x00FFFFFF, "digital vol L = 0 dB"),
                                (0x10, 0x00FFFFFF, "digital vol R = 0 dB"),
                                (0x03, 0x0000001F, "analog vol field = max")):
-            got = scpi(f"REGister:READ? {reg:#04x}")
-            try:
-                val = int.from_bytes(base64.b64decode(
-                    got + "=" * (-len(got) % 4)), "big")
-            except Exception:
-                val = None
-            if val is None or (val & mask):
+            val = _reg_read(scpi, reg)
+            if val & mask:
                 die(f"reg {reg:#04x} = {got!r} ({val}); masked field must be 0 "
                     f"-- {why}. Refusing to measure an attenuated or muted path.")
             print(f"  reg {reg:#04x} -> {val:#010x} & {mask:#010x} = 0 ({why})")
