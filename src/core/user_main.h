@@ -84,8 +84,20 @@ extern unsafe chanend uc_audiohw_diag;
  * the declaration's. Verify freed chanends with
  *   xobjdump --resources <.xe> | grep 'channel end usage'
  * rather than assuming them. Re-enable by uncommenting both entries; each
- * costs 1 core on the most contended tile. */
-#define USER_MAIN_CORES     /* xscope_host_data(xscope_data_in); */ \
+ * costs 1 core on the most contended tile.
+ *
+ * SPLIT per owner directive 2026-11-04: outbound ONLY is wanted.
+ *   xscope_host_data  = TARGET->HOST transport: the trace/printf stream
+ *                       (xrun --io console). RE-ENABLED. Without it the
+ *                       xrun log is structurally empty -- the "legitimately
+ *                       empty log" seen all week was this half being off.
+ *   process_xscope    = HOST->TARGET control: parses 'value+l2/l3/x' param
+ *                       commands (clearsounddac_board.xc:977). STAYS OFF --
+ *                       the SCPI-over-MIDI surface owns control now.
+ * Cost: +1 thread on tile[0], and this task OWNS the xscope_data_in chanend
+ * (a chanend belongs to one thread -- with process_xscope gone there is no
+ * double-owner). Verify with xobjdump --resources, do not assume. */
+#define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
                             on tile[1]: {\
                                             par\
                                             {\
