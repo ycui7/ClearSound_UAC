@@ -213,6 +213,9 @@ unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
 #define CSD_DBG_OFF 0
 #endif
 #if !CSD_DBG_OFF
+/* NOTE: the loopback tap below is deliberately compiled OUTSIDE this region
+ * (see the comment at its definition) so a release build with
+ * -DCSD_LOOPBACK_TAP still links. */
 
 /* ---- mixer volume-command trace ------------------------------------------
  *
@@ -389,6 +392,175 @@ void csd_mb_note_i2s_delta(unsigned short delta_ticks)
         csd_mb_i2s_worst_lo = d;
 }
 
+/* ---- DAC->ADC loopback tap: state (see csd_gen.h for the contract) ------
+ *
+ * WHY A SINGLE-WORD HAND-OFF AND NOT A BUFFER
+ * The tap writes one word per channel per LRCLK frame from the TX side of the
+ * audiohub loop; the RX side of the SAME loop, a few hundred cycles later,
+ * reads it. Same task, same tile, no interleaving between the two halves of a
+ * frame -- so a plain volatile word is sufficient and needs no lock. It also
+ * means the value the host eventually reads back is the word from at most one
+ * frame earlier: a fixed pipeline offset, not a queue. The rig does not need
+ * to know that offset, because the stimulus carries its own frame index and
+ * the rig aligns on it; see rig/bit_perfect_common.py.
+ *
+ * CONSEQUENCE WORTH STATING: if the TX side stalls, the RX side re-injects the
+ * PREVIOUS word rather than something fresh. That is the desired behaviour --
+ * the rig then reports a duplicated frame index, which is the true defect
+ * (the device really did put that word on the wire twice). Substituting a
+ * fresh value on a stall would mask the stall.
+ */
+#endif /* !CSD_DBG_OFF -- bench instrumentation region (reopened below) */
+
+/* The loopback tap is ORTHOGONAL to the release gate: it exists only when
+ * -DCSD_LOOPBACK_TAP is passed explicitly, so it is opted into by name rather
+ * than swept up with the automatic debug instrumentation. It must also link in
+ * a RELEASE-optimised image, because the thing being certified (bit-exact
+ * transfer at 384 kHz) has to be certified against the code that ships, not
+ * against the debug build -- measured, the debug image misses 58% of its I2S
+ * deadlines and cannot certify timing at all. An earlier version left these
+ * definitions inside the CSD_DBG_OFF region while the call sites in lib_xua's
+ * xua_audiohub.xc are gated only on CSD_LOOPBACK_TAP, so a release+tap build
+ * failed to link: 'Undefined reference to csd_mb_loop_put'. */
+#if defined(CSD_LOOPBACK_TAP)
+static volatile unsigned csd_mb_loop_en;
+static volatile unsigned csd_mb_loop_tx[2];
+static volatile unsigned csd_mb_loop_frames;
+/* Where do put() calls actually land? Observed hardware result: play
+ * L=0x55AA5A R=0x0F0F01 and BOTH capture channels return 0x0F0F01 -- slot 0
+ * carries slot 1's word -- while the source code of both call sites reads
+ * frameCount+i with i in {0,1} and looks correct. Paper is not evidence here:
+ * count the channel index each call site presents, per call site, so the
+ * device itself says which site collapses the channels (or that the sites
+ * present the indices as intended and the collapse is downstream).
+ * [0]=first TX site (xua_audiohub.xc ~line 453), [1]=second (~592),
+ * [2]=take() arrivals per channel. */
+static volatile unsigned csd_mb_loop_put_ch[4];
+static volatile unsigned csd_mb_loop_take_ch[4];
+static volatile unsigned csd_mb_loop_site[2][4];
+/* Last word each TX site saw. COUNTERS ALONE were not enough: they prove the
+ * sites run and with which index, but the observed fault is a VALUE fault --
+ * both capture channels returned host R's word while source review shows every
+ * writer indexed by i (mixer ptr_samples[i], device send ptr_samples[deviceMap
+ * [i]] with an identity map, USB transfer samplesOut[i] = inuint()). So the
+ * open question is whether samplesOut[0] holds host L at all. site_word[0]
+ * holding R's value answers "no" and puts the fault upstream of the tap;
+ * holding L's value puts it in the tap's read side. Read the value, do not
+ * infer it from the index -- that is the mistake that cost the last three runs.
+ * Torn reads are possible (384 kHz writer vs SCPI reader) but harmless here:
+ * the stimulus is a constant per-channel word. */
+static volatile unsigned csd_mb_loop_site_word[2];
+
+/* THE HOT PATH. Called twice per LRCLK frame from the audio() task, which at
+ * 384 kHz has 32 BCLK = 1.302 us = 781 core ticks per call. Measured evidence
+ * that this mattered: the instrumented version did 5 volatile RMWs per call --
+ * two of them BEFORE the enable check, so even a disarmed tap paid them -- i.e.
+ * ~20 volatile RMWs and 4 cross-TU calls per frame, inside the very budget the
+ * investigation is about. So the histograms are now opt-in: a minimal build
+ * carries only the payload store and the witness counter, which is all the tap
+ * functionally needs. The rig derives its per-frame ratio from 'frames' (2 puts
+ * per LRCLK frame) and does not need the histograms, so nothing is lost except
+ * the ability to see WHERE a put came from -- which is what CSD_LOOPBACK_TAP_
+ * VERBOSE is for. */
+void csd_mb_loop_put_site(unsigned site, unsigned ch, unsigned word)
+{
+#ifdef CSD_LOOPBACK_TAP_VERBOSE
+    if (site < 2u && ch < 4u) csd_mb_loop_site[site][ch]++;
+    if (site < 2u && ch < 2u) csd_mb_loop_site_word[site] = word;
+#else
+    (void)site;
+#endif
+    if (!csd_mb_loop_en) return;
+#ifdef CSD_LOOPBACK_TAP_VERBOSE
+    if (ch < 4u) csd_mb_loop_put_ch[ch]++;
+#endif
+    if (ch < 2u) {
+        csd_mb_loop_tx[ch] = word;
+        csd_mb_loop_frames++;
+    }
+}
+
+void csd_mb_loop_put(unsigned ch, unsigned word)
+{
+    csd_mb_loop_put_site(2u, ch, word);      /* unattributed, if any caller */
+}
+
+unsigned csd_mb_loop_take(unsigned ch, unsigned fallback)
+{
+    /* Same hot path as put_site: called twice per LRCLK frame from the RX half
+     * of the audio() loop, inside the 781-tick budget. The per-channel arrival
+     * histogram was answering "which index does RX present" -- a question that
+     * is now ANSWERED (both channels, once each, symmetric with TX), so it is
+     * no longer worth a volatile RMW per call. Kept behind VERBOSE. */
+#ifdef CSD_LOOPBACK_TAP_VERBOSE
+    if (ch < 4u) csd_mb_loop_take_ch[ch]++;
+#endif
+    if (!csd_mb_loop_en || ch > 1u) return fallback;
+    return csd_mb_loop_tx[ch];
+}
+
+void csd_mb_loop_set_enable(unsigned enable)
+{
+    /* Clear the payload on every transition so a session cannot inherit the
+     * last word of the previous one and have it read as frame 0 of this one:
+     * the rig's alignment leg would then match against a stale word. */
+    csd_mb_loop_tx[0] = 0u;
+    csd_mb_loop_tx[1] = 0u;
+    csd_mb_loop_frames = 0u;
+    /* The WORDS too. Clearing only the counters was the bug: a leg whose tap
+     * never wrote answered with the PREVIOUS leg's words, and the two legs of
+     * the DSP A/B came back byte-identical (0xFFCE53EE / 0xFFF7245B) while their
+     * captures disagreed -- a stale-value artifact that would have been read as
+     * "the DSP does not affect the words", which is exactly backwards. A zero
+     * here is now meaningful: it means "this site has not written since arming",
+     * which is a claim the rig can and must assert on. */
+    csd_mb_loop_site_word[0] = 0u;
+    csd_mb_loop_site_word[1] = 0u;
+    for (unsigned i = 0; i < 4u; i++) {
+        csd_mb_loop_put_ch[i] = 0u;
+        csd_mb_loop_take_ch[i] = 0u;
+    }
+    for (unsigned s = 0; s < 2u; s++)
+        for (unsigned i = 0; i < 4u; i++)
+            csd_mb_loop_site[s][i] = 0u;
+    csd_mb_loop_en = enable ? 1u : 0u;
+}
+
+void csd_mb_loop_get(unsigned *en, unsigned *frames)
+{
+    if (en)     *en     = csd_mb_loop_en;
+    if (frames) *frames = csd_mb_loop_frames;
+}
+
+/* Diagnostics for the channel-collapse question (see put_site above):
+ * returns per-channel put arrivals, per-channel take arrivals, and the two
+ * per-site histograms. */
+void csd_mb_loop_get_index(unsigned *put_ch, unsigned *take_ch,
+                           unsigned *site0, unsigned *site1)
+{
+    for (unsigned i = 0; i < 4u; i++) {
+        if (put_ch)  put_ch[i]  = csd_mb_loop_put_ch[i];
+        if (take_ch) take_ch[i] = csd_mb_loop_take_ch[i];
+        if (site0)   site0[i]   = csd_mb_loop_site[0][i];
+        if (site1)   site1[i]   = csd_mb_loop_site[1][i];
+    }
+}
+
+/* The words, not the counters. Called with (site_word[2], tx[2]):
+ *   site_word[0..1] -- what each TX site last saw from samplesOut
+ *   tx[0..1]        -- what the tap is currently serving to the two RX slots
+ * With a constant per-channel stimulus these four numbers settle, in one
+ * read, whether host L ever reaches samplesOut[0]. */
+void csd_mb_loop_get_words(unsigned *site_word, unsigned *tx)
+{
+    if (site_word) { site_word[0] = csd_mb_loop_site_word[0];
+                     site_word[1] = csd_mb_loop_site_word[1]; }
+    if (tx)        { tx[0] = csd_mb_loop_tx[0];
+                     tx[1] = csd_mb_loop_tx[1]; }
+}
+#endif /* CSD_LOOPBACK_TAP */
+
+#if !CSD_DBG_OFF
 void csd_mb_get_i2s(unsigned *frames, unsigned *bad, unsigned *hi,
                     unsigned *lo, unsigned *first_bad)
 {
