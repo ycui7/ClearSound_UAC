@@ -65,6 +65,9 @@ BPB = CH * 4                              # S32_LE subslots
 APP = "/home/ycui/sw-audio-sc/sw_usb_audio/clearsound_uac/csd-js-tester"
 PY = f"{APP}/.venv/bin/python"
 CARD = os.environ.get("CSD_CARD", "3")
+# Subdevice per direction; both 0 matches the real device (see open_pcm).
+PLAY_DEV = int(os.environ.get("CSD_PLAY_DEV", "0"))
+CAP_DEV = int(os.environ.get("CSD_CAP_DEV", "0"))
 
 CHUNK_FRAMES = 32768                      # 85 ms at 384k
 # MARKER_PERIOD MUST be an exact multiple of CHUNK_FRAMES. The player emits the
@@ -80,6 +83,13 @@ SEARCH_BLOCK = 8192                       # search granularity (bounded work)
 FLIP_MAX_BITS = 6                         # <= this many bits differing from
                                           # the expected entry = corruption,
                                           # not an unexplained frame
+# Abort thresholds are PER CHUNK, not cumulative: see Comparator.feed(). The old
+# cumulative caps (MAX_RESYNCS=300 / ABORT_AFTER=400) made a device losing ~5
+# frames/s abort at ~60 s, so a 30-minute gate could never complete and a 57 s
+# run reported a verdict that read as 30 minutes.
+MIN_ALIGNED_FRACTION_SHOW = 0.5   # keep in step with align_score
+ABORT_PER_CHUNK = 2000     # defects in one CHUNK_FRAMES: comparator runaway
+RESYNC_PER_CHUNK = 500     # resyncs in one chunk: schedule tracking lost
 MAX_RESYNCS = 300
 MAX_REPORT = 20
 ABORT_AFTER = 400
@@ -149,6 +159,9 @@ class Comparator:
         self.xor_hist = {}
         self.max_gap = 0
         self.resyncs = 0
+        # Why the run stopped early. Must be printed: an unannounced early exit
+        # is how a 57 s run came to be reported as a 30-minute soak.
+        self.abort_reason = None
         self.zeros = 0                      # capture fields that were silence
 
     def anchor(self, idx):
@@ -197,7 +210,14 @@ class Comparator:
              ABORT. An unproved leg is void, never evidence of clean.
         """
         self.defects += 1
-        self.resyncs += 1
+        # resyncs counts ACTUAL resynchronisations only -- the `found is not
+        # None` path below, where the schedule index was re-derived by search.
+        # It used to be bumped for every classified defect, including subst and
+        # flip, which do NOT resync: they resume at expected_idx+1 with no
+        # search at all. A fully-explained underflow therefore burned the
+        # MAX_RESYNCS/ABORT_AFTER budget, so a device losing ~5 frames/s aborted
+        # at ~60 s and the 30-minute bar was unreachable regardless of device
+        # quality -- and the run printed a verdict on 57 s while claiming 30 min.
         found, _ = self._search(got_l, got_r, expected_idx)
         eL, eR = schedule_vec(np.array([expected_idx], dtype=np.uint64))
         eL, eR = int(eL[0]), int(eR[0])
@@ -227,6 +247,7 @@ class Comparator:
             else:
                 kind = "back"
             self.counts[kind] += 1
+            self.resyncs += 1          # the ONLY true resync
             if jump > 0:
                 self.max_gap = max(self.max_gap, jump)
             if len(self.reports) < MAX_REPORT:
@@ -261,6 +282,7 @@ class Comparator:
         what turns one real drop into a cascade of millions."""
         if self.next_idx is None:
             raise RuntimeError("feed() before anchor()")
+        d0, r0 = self.defects, self.resyncs
         n = len(Lw)
         if n == 0:
             return False
@@ -289,12 +311,30 @@ class Comparator:
             self.prev_idx = want + k - 1
             self._classify(Lw[i + k], Rw[i + k], want + k, pos0 + i + k)
             i += k + 1
-            if (self.counts["lost"] or self.resyncs > MAX_RESYNCS
-                    or self.defects > ABORT_AFTER):
+            if self.counts["lost"]:
                 break
         self.total += n
-        return (self.counts["lost"] or self.resyncs > MAX_RESYNCS
-                or self.defects > ABORT_AFTER)
+        # Abort on a RATE, not a cumulative count. The abort exists to stop a
+        # runaway comparator -- a rig bug where every frame mismatches, which
+        # shows up as thousands of defects inside one CHUNK_FRAMES=32768 chunk.
+        # A real device underflow is ~5/s, i.e. <1 per chunk, and is already a
+        # FAIL by the verdict rule (defects must be 0), so it needs to COMPLETE
+        # and report, not abort. With cumulative caps (defects > 400,
+        # resyncs > 300) a device losing 5 frames/s aborted at ~60-80 s and the
+        # run printed a verdict claiming 30 minutes on 57 s of data.
+        d_chunk = self.defects - d0
+        r_chunk = self.resyncs - r0
+        if self.counts["lost"]:
+            self.abort_reason = ("unresynchronisable content (lost) -- an "
+                                 "unproved leg is void, never evidence of clean")
+        elif d_chunk > ABORT_PER_CHUNK:
+            self.abort_reason = (f"{d_chunk} defects inside one {n}-frame chunk "
+                                 f"(> {ABORT_PER_CHUNK}) -- comparator runaway")
+        elif r_chunk > RESYNC_PER_CHUNK:
+            self.abort_reason = (f"{r_chunk} resyncs inside one {n}-frame chunk "
+                                 f"(> {RESYNC_PER_CHUNK}) -- schedule tracking "
+                                 f"lost")
+        return bool(self.abort_reason)
 
 
 # ===================== fault injection: prove the rig can fail ==============
@@ -481,10 +521,18 @@ def open_pcm(direction, label):
     stream number is 0 in BOTH directions (pcm0p/pcm0c); passing `direction` as
     the number asks for hw:3,1 and fails in a way that reads exactly like a
     device that cannot capture."""
+    # Device number is parameterised for the FIXTURE TEST. The device puts
+    # playback and capture on the SAME subdevice 0, which is why 0 was hardcoded
+    # -- but the kernel loopback card (snd-aloop) puts playback on pcm0p and
+    # capture on pcm1c, so the identical rig code cannot address it without
+    # this. Set CSD_PLAY_DEV/CSD_CAP_DEV to prove the rig, the host ALSA path and
+    # the comparator with no USB and no firmware in the loop.
+    dev = CAP_DEV if direction else PLAY_DEV
     pcm = ctypes.c_void_p()
-    if alsa.snd_pcm_open(ctypes.byref(pcm), f"hw:{CARD},0".encode(),
+    if alsa.snd_pcm_open(ctypes.byref(pcm), f"hw:{CARD},{dev}".encode(),
                          direction, 0) < 0:
-        die(f"cannot open {'capture' if direction else 'playback'} hw:{CARD},0")
+        die(f"cannot open {'capture' if direction else 'playback'} "
+            f"hw:{CARD},{dev}")
     hp = ctypes.c_void_p()
     alsa.snd_pcm_hw_params_malloc(ctypes.byref(hp))
     alsa.snd_pcm_hw_params_any(pcm, hp)
@@ -649,6 +697,16 @@ def main():
     ap.add_argument("--minutes", type=float, default=5.0)
     ap.add_argument("--rig-selftest", action="store_true")
     ap.add_argument("--skip-arm", action="store_true")
+    # See main(): drives the same code against snd-aloop to prove the fixture.
+    ap.add_argument("--fixture", action="store_true",
+                    help="run against the loopback card: proves rig/host, "
+                    "not the device")
+    # Establish latency -> align globally -> discard outside the aligned region
+    # -> only then count. See rig/align_score.py for why counting before
+    # aligning is what made rig artifacts look like device defects.
+    ap.add_argument("--align-score", action="store_true",
+                    help="collect, then latency/align/discard/count (no "
+                         "incremental re-anchoring)")
     # Rig-fault discriminator. The reader thread does numpy analysis (unpack +
     # comparator + resync search) while the writer thread feeds a hard real-time
     # ISO endpoint; they share one GIL, so an analysis spike can starve the writer
@@ -666,9 +724,23 @@ def main():
     if not sig.self_test():
         die("stimulus self-test failed -- the signal cannot expose a replay")
 
+    # --fixture: run the identical rig against the kernel loopback card
+    # (snd-aloop) with no USB and no firmware in the path. If the ~5 holes/s
+    # appear there too, the FAULT IS THE FIXTURE -- the host ALSA path, the
+    # pacing, the reader thread -- and no firmware conclusion can stand until
+    # it is fixed. Identity cannot be proven with no device, so say so loudly
+    # rather than letting the IDN gate pass silently.
+    if a.fixture:
+        print(f"!!! FIXTURE TEST -- card {CARD} play_dev {PLAY_DEV} "
+              f"cap_dev {CAP_DEV}. NO DEVICE, NO USB, NO FIRMWARE.")
+        print("!!! Any defects here are RIG/host faults, not the device's.")
+
     print("=== arming (every step verified by read-back) ===")
-    require("*IDN?", "ClearSound", "identity")
-    if not a.skip_arm:
+    if a.fixture:
+        print("identity: NOT CHECKED (no device in a fixture run)")
+    else:
+        require("*IDN?", "ClearSound", "identity")
+    if not a.skip_arm and not a.fixture:
         require("VOLume:TRIM:LEFT 0", what="trim L")
         require("VOLume:TRIM:RIGHT 0", what="trim R")
         require("VOLume:TRIM?", "0,0",
@@ -828,9 +900,9 @@ def main():
         reads += 1
         raw = bytes(buf[:n * BPB])
         tr = time.monotonic()
-        if a.collect_only:
-            # Collector thread does NOTHING but copy: no unpack, no comparator, no
-            # resync search. Those are numpy and share the GIL with the writer
+        if a.collect_only or a.align_score:
+            # Collector thread does NOTHING but copy: no unpack, no comparator,
+            # no resync search. Those are numpy and share the GIL with the writer
             # feeding a hard real-time ISO endpoint.
             collected.append((raw, tr))
             continue
@@ -877,6 +949,56 @@ def main():
     th.join(timeout=5)
     alsa.snd_pcm_drop(play)
     alsa.snd_pcm_drop(cap)
+
+    if a.align_score:
+        # The disciplined order: latency, then ONE global alignment, then
+        # discard everything outside it, then count. No incremental re-anchoring,
+        # because re-anchoring is how rig artifacts become device defects.
+        import align_score as A
+        print(f"=== aligning {len(collected):,} collected chunks "
+              f"({len(collected)*CHUNK_FRAMES/RATE:.1f}s) post-stream ===")
+        ntot = len(collected) * CHUNK_FRAMES
+        cL = np.empty(ntot, dtype=np.int64)
+        cR = np.empty(ntot, dtype=np.int64)
+        off = 0
+        for raw, _tr in collected:
+            L, R = unpack_frames(raw)
+            k = len(L)
+            cL[off:off + k] = L
+            cR[off:off + k] = R
+            off += k
+        collected.clear()
+        # centre guess: the writer runs ahead of the device by roughly one ring.
+        al = A.align(cL[:off], cR[:off], schedule_vec, sig.SYNC_L, sig.SYNC_R,
+                     RATE, centre_guess=stats.get("play_buf", 768000),
+                     window=MARKER_PERIOD * 4, marker_period=MARKER_PERIOD)
+        print(f"alignment: {al['verdict']}", end="")
+        if al["verdict"] != "ALIGNED":
+            print(f" -- {al['reason']}")
+            print("RESULT: VOID (unaligned -- no error rate is reported)")
+            sys.exit(2)
+        print()
+        for k in ("markers", "spacing", "latency_frames", "latency_ms",
+                  "delta", "latency_frames_out_to_in", "latency_ms_out_to_in",
+                  "head_discarded", "tail_discarded", "aligned_frames",
+                  "aligned_fraction", "n_captured"):
+            print(f"  {k:26s} {al.get(k)}")
+        sc = A.score(cL[:off], cR[:off], schedule_vec, al["head_discarded"],
+                     al["head_discarded"] + al["aligned_frames"], al["delta"])
+        print("\n=== RESULT (aligned region only) ===")
+        print(f"frames checked : {sc['checked']:,} of {off:,} captured "
+              f"({100.0*sc['checked']/max(1,off):.1f}%)")
+        print(f"defects        : {sc['defects']}  "
+              f"rate={sc['defects']/max(1,sc['checked']):.3e}")
+        print(f"zeros (fields) : {sc['zeros']:,}")
+        print(f"run histogram  : {sc['run_histogram']}")
+        for (p, gl, gr, el, er) in sc["reports"][:10]:
+            print(f"  pos={p} got=0x{gl:06X},0x{gr:06X} "
+                  f"want=0x{el:06X},0x{er:06X}")
+        verdict = (sc["defects"] == 0
+                   and al["aligned_fraction"] >= MIN_ALIGNED_FRACTION_SHOW)
+        print("\nBIT-PERFECT: " + ("PASS" if verdict else "FAIL"))
+        sys.exit(0 if verdict else 1)
 
     if a.collect_only:
         # Analysis happens AFTER the stream is closed, so no numpy work ever
