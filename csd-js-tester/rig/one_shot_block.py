@@ -67,7 +67,8 @@ else:
 import align_score as A
 import csd_signal as sig
 from bit_perfect_noise import (CHUNK_FRAMES, MARKER_LEN, MARKER_PERIOD,
-                               RATE, open_pcm, pack_frames, unpack_frames)
+                               RATE, die, open_pcm, pack_frames, require,
+                               scpi, unpack_frames)
 
 # Bytes per frame, DERIVED from the rig's own wire codec rather than hardcoded:
 # a literal 8 is a claim about the negotiated format, and the format is what
@@ -286,6 +287,103 @@ def sent_lookup(expL, expR):
 # ---------------------------------------------------------------------------
 # The two dumb pipes. No analysis in either.
 # ---------------------------------------------------------------------------
+def arm_device():
+    """Every gate the proven rig applies, before a single frame is played.
+
+    Reused rather than re-derived, because each of these was learned the
+    expensive way and a bit-exact verdict is only falsifiable with all of them
+    in place:
+
+      trim 0            -- a non-zero trim validates an offset DAC
+      DSP preset 0      -- the FIR rewrites EVERY sample (csd_dsp.xc:187 only
+                           returns early for preset 0), so at any other preset
+                           we would compare noise against a filtered copy of
+                           itself and the test could never fail
+      mixer gain unity  -- otherwise the words we compare were multiplied first
+      codec 0 dB/unmute -- otherwise we measure an attenuated path
+      generator OFF     -- the internal generator would sum into the stream
+      tap armed         -- see arm_tap: without this the capture is silence
+    """
+    require("VOLume:TRIM:LEFT 0", what="trim L")
+    require("VOLume:TRIM:RIGHT 0", what="trim R")
+    require("VOLume:TRIM?", "0,0",
+            "a non-zero trim means we validate an offset DAC")
+    require("DIAG:DSP:PRESet 0", what="DSP preset set")
+    got = scpi("DIAG:DSP:PRESet?")
+    if got.split(",")[0].strip() != "0":
+        die(f"DSP preset is {got!r}, not 0 -- the FIR rewrites every sample, "
+            f"so the device would not be bit-exact with itself by construction")
+    got = scpi("MIXer:GAIN?")
+    if got and not got.lower().startswith(("err", "")):
+        require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
+        got = scpi("MIXer:GAIN?")
+        if got.split(",")[0].strip() != "32768":
+            die(f"mixer host gain is {got!r}, not Q15 unity 32768 -- the stream "
+                f"reaching I2S is scaled, so it cannot match what we sent")
+        print(f"  mixer host gain = unity ({got})")
+    else:
+        print("  mixer host gain: NO MIXER IN THIS BUILD -- nothing scales the "
+              "stream digitally; codec readback below is the remaining gate")
+    import base64
+    for reg, mask, why in ((0x07, 0x00000001, "system mute off (bit0)"),
+                           (0x0F, 0x00FFFFFF, "digital vol L = 0 dB"),
+                           (0x10, 0x00FFFFFF, "digital vol R = 0 dB"),
+                           (0x03, 0x0000001F, "analog vol field = max")):
+        got = scpi(f"REGister:READ? {reg:#04x}")
+        try:
+            val = int.from_bytes(base64.b64decode(
+                got + "=" * (-len(got) % 4)), "big")
+        except Exception:
+            val = None
+        if val is None or (val & mask):
+            die(f"reg {reg:#04x} = {got!r} ({val}); masked field must be 0 -- "
+                f"{why}. Refusing to measure an attenuated or muted path.")
+        print(f"  reg {reg:#04x} -> {val:#010x} & {mask:#010x} = 0 ({why})")
+    require("GENerator:STATe OFF", what="function generator off")
+
+
+def arm_tap(label="tap"):
+    """Arm the DAC->ADC tap and read back the device-side witness.
+
+    The tap is opted into BY NAME and is never automatic (csd_diag_scpi.c:1480),
+    so a tool that forgets to arm it captures pure silence -- which is exactly
+    what this tool did: both MIXER=0 runs returned 100% zero fields and a VOID,
+    and every `xrun --io` reload resets the arm. The earlier good run only worked
+    because a previous bit_perfect_noise.py invocation had armed it, an accident
+    of process history that made the result look like a property of the image.
+
+    tx_frames is the reason arming is not enough. The contract requires the
+    counter to have ADVANCED across the run: a capture that matches a tap which
+    never executed is the rig echoing itself. Returns (enable, tx_frames).
+    """
+    def ask(cmd):
+        r = scpi(cmd)
+        return r.strip() if r else r
+
+    print(f"  arming: {label}")
+    if ask("DEBUG:LOOPback 1") is None:
+        raise RuntimeError("DEBUG:LOOPback 1 got no reply -- cannot arm the tap")
+    if ask("DEBUG:LOOPback:CLEAR") is None:
+        raise RuntimeError("DEBUG:LOOPback:CLEAR got no reply")
+    st = ask("DEBUG:LOOPback?")
+    try:
+        en, fr = (int(x) for x in st.split(",")[:2])
+    except Exception:
+        raise RuntimeError(f"unparsable DEBUG:LOOPback? reply {st!r}")
+    if en != 1:
+        raise RuntimeError(f"tap did not arm: DEBUG:LOOPback? -> {st!r}")
+    print(f"  tap armed, tx_frames reset to {fr}")
+    return en, fr
+
+
+def read_tx_frames():
+    st = scpi("DEBUG:LOOPback?")
+    try:
+        return int(st.split(",")[1])
+    except Exception:
+        return -1
+
+
 def prefill(pcm, tr: AlsaXrunTracker, block: bytes, want_frames: int):
     """Fill the playback ring synchronously BEFORE capture starts.
 
@@ -412,6 +510,10 @@ def main(argv=None):
     ap.add_argument("--probe-stride", type=int, default=A.PROBE_STRIDE,
                     help="frames between offset probes; must stay well under "
                          "48*8 to see a single dropped packet boundary")
+    ap.add_argument("--skip-arm", action="store_true",
+                    help="do not apply the device gates/arm the tap (a run "
+                         "without them is unfalsifiable; use only when the "
+                         "device is known armed)")
     ap.add_argument("--no-prefill", action="store_true",
                     help="start capture over an empty ring (tests whether "
                          "delta tracks the prefill; may XRUN the capture)")
@@ -440,9 +542,28 @@ def main(argv=None):
     cd, cap_per, cap_buf = open_pcm(1, "capture")
     print(f"  streams open: playback period={play_per} buffer={play_buf}; "
           f"capture period={cap_per} buffer={cap_buf}")
+    tx_before = None
     if _f.fixture:
         print("FIXTURE MODE: kernel loopback card -- no device, no USB, no "
               "firmware in the path. A defect here belongs to the tester.")
+        print("  device gates and tap arming SKIPPED (no device). There is no "
+              "device-side witness in this mode: it validates the rig and the "
+              "host ALSA path only, and cannot certify the DAC.")
+    elif a.skip_arm:
+        print("  WARNING: --skip-arm. Device gates and tap arm NOT applied by "
+              "this run. If the tap was not already armed the capture is "
+              "silence, and the tx_frames witness below is the only thing "
+              "standing between that and a false verdict.")
+    else:
+        arm_device()
+    # Arm as late as possible and read the witness immediately: every `xrun
+    # --io` reload resets the tap, so arming is part of THIS run's proof and
+    # cannot be inherited from whatever ran before it.
+    if not _f.fixture and not a.skip_arm:
+        arm_tap()
+    if not _f.fixture:
+        tx_before = read_tx_frames()
+        print(f"  witness: tx_frames before run = {tx_before}")
 
     trw = AlsaXrunTracker(pd, True, "playback")
     trr = AlsaXrunTracker(cd, False, "capture")
@@ -522,6 +643,21 @@ def main(argv=None):
     alsa.snd_pcm_close(pd)
     alsa.snd_pcm_close(cd)
 
+    # The device-side witness. tx_frames is incremented by the tap itself, so
+    # this is the only evidence that the DAC->ADC copy actually executed. A
+    # capture that matches while the counter sat still means the rig echoed its
+    # own output -- the comparison would be vacuous and its PASS meaningless.
+    tx_after = None
+    if not _f.fixture:
+        tx_after = read_tx_frames()
+        adv = (tx_after - tx_before) if (tx_after is not None and tx_before is not None
+                                         and tx_after >= 0 and tx_before >= 0) else None
+        print(f"  witness: tx_frames after run = {tx_after} (advanced {adv})")
+        if adv is None or adv <= 0:
+            print("\nRESULT: VOID -- the loopback tap did not advance. The tap "
+                  "never ran, so this capture is not evidence about the DAC.")
+            sys.exit(2)
+
     glitch = not (trw.clean and trr.clean)
     if glitch and not a.allow_stream_glitch:
         print("\nRESULT: VOID -- the tester lost frames at the ALSA level "
@@ -554,11 +690,25 @@ def main(argv=None):
     print(f"alignment: {al['verdict']}")
     for k in ("markers", "n_captured", "delta", "latency_frames",
               "latency_ms", "head_discarded", "tail_discarded",
-              "aligned_frames", "aligned_fraction", "probes"):
+              "aligned_frames", "aligned_fraction", "probes",
+              "slips_unverified", "slip_band_frames"):
         if k in al:
             print(f"  {k:22s} {al[k]}")
     if al["verdict"] != "ALIGNED":
         print(f"  reason: {al['reason']}")
+        # A VOID that only says "no markers" cannot be acted on: the same words
+        # cover a dead capture, a stuck tap replaying one packet, and a genuinely
+        # shifted stream, and they call for opposite responses. Say what IS there.
+        nz = int((capL == 0).sum() + (capR == 0).sum())
+        print(f"  capture content: {nz:,} zero fields of {2*got:,} "
+              f"({100.0*nz/max(1,2*got):.1f}%)")
+        uvals, ucnt = np.unique(capL[:1 << 20], return_counts=True)
+        order = np.argsort(-ucnt)[:5]
+        print("  most common L values in first 1M frames: "
+              + ", ".join(f"0x{uvals[i]:06X}x{ucnt[i]}" for i in order))
+        if nz == 2 * got:
+            print("  the capture is entirely silent -- the device delivered "
+                  "nothing; this is a dead stream, not a defective one")
         print("RESULT: VOID -- unaligned; no error rate is reported")
         sys.exit(2)
     for s in al["slips"][:10]:

@@ -315,10 +315,16 @@ def align(cap_L, cap_R, schedule_vec, sync_l, sync_r, rate,
         and reported as 40 content defects, and a 96-frame drop as 24. A dropped
         packet must be reported as the slip and nothing else.
         """
+        # If either anchor fails, we cannot say where the offset changed, so the
+        # WHOLE interval between the two probes is discarded: region N ends at lo,
+        # region N+1 starts at hi. Returning (lo, lo) instead -- which an earlier
+        # version did -- would leave [lo, hi) scored under the NEW offset when its
+        # content is still the old one, manufacturing defects out of our own
+        # inability to see. Unprovable means discard, never guess.
         if verdict_at(lo, old_d) is not True:
-            return lo, lo            # left side unproven: discard the interval
+            return lo, hi, False
         if verdict_at(hi, new_d) is not True:
-            return hi, hi            # right side unproven: likewise
+            return lo, hi, False
         left, right = lo, hi
         guard = 0
         # Each step halves the interval, so log2(PROBE_STRIDE) ~ 16 iterations
@@ -342,7 +348,15 @@ def align(cap_L, cap_R, schedule_vec, sync_l, sync_r, rate,
                 left = mid - 1
             else:
                 break
-        return left, right
+        # The third value says whether BOTH sides of the slip were bracketed by
+        # content -- i.e. whether a change of offset was actually observed, which
+        # is what separates a real dropout from a boundary of our own probing.
+        # Band width is NOT part of that test. The self-test caught the first
+        # version demanding <= VERIFY_FRAMES, which failed its own injected
+        # 48-frame drop (band 128) and would have VOIDED every genuine dropout on
+        # the device, whose slips run 48..96 frames. The band is simply discarded
+        # and reported: a wide band costs measurement coverage, never a verdict.
+        return left, right, True
 
     # Walk forward at a fixed stride, closing a region whenever the offset moves.
     #
@@ -372,10 +386,12 @@ def align(cap_L, cap_R, schedule_vec, sync_l, sync_r, rate,
             if d is None:
                 break
         if d != cur_delta:
-            lo, hi = refine_boundary(prev_p, p, cur_delta, d)
+            lo, hi, provable = refine_boundary(prev_p, p, cur_delta, d)
             slips.append({"at_capture": int(hi),
                           "frames_lost": int(d - cur_delta),
-                          "direction": "gap" if d > cur_delta else "dup"})
+                          "direction": "gap" if d > cur_delta else "dup",
+                          "verified": bool(provable),
+                          "unresolved_frames": int(hi - lo)})
             regions.append((cur_from, lo, cur_delta))
             uncertain += hi - lo
             cur_from, cur_delta = hi, d
@@ -390,6 +406,12 @@ def align(cap_L, cap_R, schedule_vec, sync_l, sync_r, rate,
 
     res["regions"] = regions
     res["slips"] = slips
+    # Unverified offset changes are a measurement failure, not a defect. If the
+    # whole capture is one clean stream except for boundaries we could not
+    # bracket, the honest verdict is VOID, not FAIL with a defect count of 0.
+    res["slips_unverified"] = sum(1 for s in slips if not s["verified"])
+    res["slip_band_frames"] = int(sum(s.get("unresolved_frames", 0)
+                                      for s in slips))
     res["probes"] = int(n_probe_calls)
     res["uncertain_discarded"] = int(uncertain)
     delta = regions[0][2]
