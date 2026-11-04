@@ -59,7 +59,33 @@ extern unsafe chanend uc_audiohw_diag;
                                             chan xscope_data_in;
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
-#define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
+/* xscope threads DISABLED for the tile-budget experiment (2026-11-04), kept
+ * commented per standing rule -- disabled config stays in the file with a
+ * why-note, never deleted.
+ *
+ * The app spawns xscope_host_data() and process_xscope() UNCONDITIONALLY, so
+ * both allocate a logical core on tile[0] in EVERY build, release included
+ * (-DXSCOPE -fxscope are hardcoded at CMakeLists.txt:15,19). Neither is ever
+ * configured: xscope_user_init() -- the only thing that registers or configures
+ * the trace channel -- is defined in lib_xua main.xc:266 and has NO call site
+ * anywhere in ~/sw-audio-sc (verified by grep). The transport code itself is
+ * real (process_xscope at clearsounddac_board.xc:976 selects on
+ * xscope_data_from_host and prints), so this is not removable dead code in the
+ * linker sense -- it is a configured-nowhere facility still paying a scheduler
+ * slot. A core that traces nothing still consumes one, and xcore.ai guarantees
+ * each core only
+ * 1/5 of tile MIPS at <=5 active cores, degrading to 1/n beyond. tile[0]
+ * measured 7 threads (xobjdump --resources): 86 MIPS guaranteed each, not 120.
+ *
+ * Each also holds a chanend on tile[0], which is at its 32/32 ceiling (see the
+ * c_audiohw note above), so dropping them should relieve that too -- but
+ * `chan xscope_data_in` is left DECLARED on purpose: this file's own note says
+ * an unused chan is not free, and `chanend` accounting is the mapper's, not
+ * the declaration's. Verify freed chanends with
+ *   xobjdump --resources <.xe> | grep 'channel end usage'
+ * rather than assuming them. Re-enable by uncommenting both entries; each
+ * costs 1 core on the most contended tile. */
+#define USER_MAIN_CORES     /* xscope_host_data(xscope_data_in); */ \
                             on tile[1]: {\
                                             par\
                                             {\
@@ -78,7 +104,7 @@ extern unsafe chanend uc_audiohw_diag;
                                                     uc_audiohw3 = (chanend) c_audiohw[2];\
                                                 }\
                                                 AudioHwRemote(c_audiohw);\
-                                                process_xscope(xscope_data_in); \
+                                                /* process_xscope(xscope_data_in); */ \
                                             }\
                                         }
 #endif
