@@ -54,8 +54,23 @@ extern unsafe chanend uc_audiohw_diag;
  * allocates a chanend on each tile. tile[0] is at its 32-chanend ceiling, and
  * the lib_xua mixer's control path needs one more, which is what pushed it to
  * 33/32 and failed the xmap constraints check. Sizing the array to actual use
- * reclaims that chanend. */
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[4]; \
+ * reclaims that chanend.
+ *
+ * Owner directive 2026-11-04 (chanend diet). Two indices retired:
+ *  - [2] uc_audiohw3: xscope-era slot, ZERO send sites tree-wide (grepped).
+ *    Both its ends sat on tile[0] (server select + the dead tile[0] binding
+ *    below) -- the single most expensive dead byte on this tile.
+ *  - [1] uc_audiohw2: ep0's volume/mute channel. ep0 and the codec server are
+ *    BOTH on tile[0] (proven: the binding works under the tile-private-static
+ *    rule), so this was a tile[0]->tile[0] "remote" channel. Volume is now a
+ *    same-tile seqlock mailbox, csd_vol_mailbox.c; lib_xua ep0 calls
+ *    AudioHwRemote_Volume_Update(ch, val) without a chanend.
+ * Remaining array: [0] audio core's codec access (tile[1] client), [1] the
+ * tile[1] diagnostic core's register/trim proxy. uc_audiohw_diag MUST be
+ * re-pointed to the shifted slot below or it silently binds the wrong end.
+ * Acceptance: xobjdump --resources tile[0] chanend bound drops by 4 (one
+ * dead pair + the volume pair) and SCPI REG?/VOLume:TRIM? still answer. */
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[2]; \
                                             chan xscope_data_in;
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
@@ -103,7 +118,7 @@ extern unsafe chanend uc_audiohw_diag;
                                             {\
                                                 unsafe{\
                                                     uc_audiohw1 = (chanend) c_audiohw[0];\
-                                                    uc_audiohw_diag = (chanend) c_audiohw[3];\
+                                                    uc_audiohw_diag = (chanend) c_audiohw[1];\
                                                 }\
                                             }\
                                         }\
@@ -111,10 +126,14 @@ extern unsafe chanend uc_audiohw_diag;
                             on tile[0]: {\
                                             par\
                                             {\
-                                                unsafe{\
-                                                    uc_audiohw2 = (chanend) c_audiohw[1];\
-                                                    uc_audiohw3 = (chanend) c_audiohw[2];\
-                                                }\
+                                                /* uc_audiohw2/uc_audiohw3 bindings
+                                                 * removed 2026-11-04 chanend diet:
+                                                 * [1] volume/mute -> csd_vol_mailbox
+                                                 * (ep0 and this server share tile[0]);
+                                                 * [2] dead xscope-era slot, zero
+                                                 * send sites. Each binding pinned a
+                                                 * tile[0] chanend that no message
+                                                 * ever used. */\
                                                 AudioHwRemote(c_audiohw);\
                                                 /* process_xscope(xscope_data_in); */ \
                                             }\

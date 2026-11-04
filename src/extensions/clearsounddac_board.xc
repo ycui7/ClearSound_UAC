@@ -23,6 +23,10 @@ extern "C" {
                              * caller -- the SQI ports live on this tile. See
                              * csd_trim_store.h. */
 #endif
+#include "csd_vol_mailbox.h" /* chanend diet 2026-11-04: ep0 (tile[0]) posts
+                              * host volume/mute here; this task drains it in
+                              * its select loop. Same tile, so a static is
+                              * visible to both -- see csd_vol_mailbox.h. */
 #endif
 
 #include <debug_print.h>
@@ -318,6 +322,49 @@ static void vol_apply_all(client interface i2c_master_if i2c)
     vol_apply_digital(1, aCom, i2c);
 }
 
+/* ---- Host-request appliers (chanend diet 2026-11-04): the two bodies the
+ * c[] channel cases used to hold, extracted so the mailbox drain tick can
+ * call the same code. The codec registers must have exactly one writer path
+ * per state transition; duplicating these bodies is how that invariant dies.
+ * Both stay callable from the legacy channel cases (kept live for the
+ * MIXER=0 build shape and for rollback). ---- */
+static void vol_apply_host_request(unsigned channel, int valueA, int valueDL,
+                                   client interface i2c_master_if i2c)
+{
+    if (channel < 2) {
+        /* Keep the FULL host request per channel (analog + digital halves of
+         * ep0's split). The mixer must be able to re-partition the total
+         * itself, because the analog half is one shared register:
+         * partitioning at ep0 per channel is what lost the quieter channel's
+         * -24 dB when the louder channel rewrote reg 3. */
+        volHostDl8[channel] = valueA + valueDL;
+        vol_clamp_button();
+        /* Analog term is COMMON to both channels (reg 3 is one register), so
+         * it cannot be recomputed from this channel's word alone. Re-derive
+         * all three registers from both host terms. */
+        vol_apply_all(i2c);
+    }
+    debug_printf("VOLCMD ch:%d A:%d DL:%d\n", channel, valueA, valueDL);
+}
+
+static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i2c)
+{
+    /* Reg 7 bit0 is the codec system mute; the digital/analog volume regs are
+     * left untouched and unmute restores the previous level exactly.
+     * Display: mute-blue outranks everything while held. */
+    if (muted != host_muted)
+    {
+        host_muted = muted;
+        ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+            (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
+             (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+        led_state = muted ? LED_ST_MUTED
+                          : ((led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF);
+        led_render();
+        debug_printf(ANSI_YELLOW "MUTE_SET: %d" ANSI_RESET "\n", muted);
+    }
+}
+
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
     /* ---- Volume mixer (bring-over a5bc0ed, adapted): this task is the SOLE
@@ -422,9 +469,46 @@ static void vol_apply_all(client interface i2c_master_if i2c)
     led_tmr :> led_now;
     led_render();                                 /* power-on: solid red */
 
+    /* Host volume/mute drain (chanend diet 2026-11-04): ep0 posts to
+     * csd_vol_mailbox (same tile, seqlock statics); we adopt on a 1 ms grid.
+     * Cursors are consumer-local; the seqlock check runs HERE in XC because
+     * the module's getters are scalar-only (XC cannot pass C pointers).
+     * MUTE first, then volume per channel -- the post order ep0 guarantees. */
+    timer vol_mb_tmr;
+    unsigned vol_mb_now;
+    unsigned mb_seen_mute = 0, mb_seen_vol[2] = {0, 0};
+    vol_mb_tmr :> vol_mb_now;
+
     while(1)
     {
         select{
+            case vol_mb_tmr when timerafter(vol_mb_now) :> void:
+            {
+                unsigned s = csd_vol_mb_seq_mute();
+                if (s != mb_seen_mute) {
+                    unsigned muted = csd_vol_mb_read_mute();
+                    mb_seen_mute = s;
+                    vol_apply_host_mute(muted, i2c);
+                    csd_vol_mb_note_drain();
+                }
+                for (unsigned ch = 0; ch < 2; ch++) {
+                    unsigned s0 = csd_vol_mb_seq_vol(ch);
+                    if ((s0 & 1u) == 0u && s0 != mb_seen_vol[ch]) {
+                        int a  = csd_vol_mb_read_a(ch);
+                        int dl = csd_vol_mb_read_dl(ch);
+                        if (csd_vol_mb_seq_vol(ch) == s0) {   /* stable */
+                            mb_seen_vol[ch] = s0;
+                            vol_apply_host_request(ch, a, dl, i2c);
+                            csd_vol_mb_note_drain();
+                        }
+                        /* unstable: leave the cursor, next tick retries --
+                         * the producer's copy is bounded, no starvation */
+                    }
+                }
+                vol_mb_now += 1000000;              /* 1 ms @ 100 MHz */
+            }
+            break;
+
             case led_tmr when timerafter(led_now) :> void:
             {
                 if (led_state == LED_ST_CHIPID_FAIL || led_state == LED_ST_BYPASS) {
@@ -637,53 +721,23 @@ static void vol_apply_all(client interface i2c_master_if i2c)
                 }
                 else if (cmd == AUDIOHW_CMD_VOLUME_UPDATE)
                 {
-                    /* Host SET_CUR split words from ep0 (bring-over 072111a
-                     * merged with a5bc0ed mixer): update the host terms, then
-                     * rewrite regs 3/15/16 from (host + button). Value repeats
-                     * are dropped at the register boundary. */
+                    /* Legacy channel path (MIXER=0 shape / rollback): the
+                     * shipping MIXER=1 build delivers host volume via
+                     * csd_vol_mailbox (drain tick below). Same applier --
+                     * single writer invariant is per-code, not per-path. */
                     unsigned channel;
-                    int valueA, valueDL, valueDR;
+                    int valueA, valueDL;
                     c[i] :> channel;
                     c[i] :> valueA;
                     c[i] :> valueDL;
-                    valueDR = valueDL;
-
-                    if (channel < 2) {
-                        /* Keep the FULL host request per channel (analog +
-                         * digital halves of ep0's split). The mixer must be
-                         * able to re-partition the total itself, because the
-                         * analog half is one shared register: partitioning at
-                         * ep0 per channel is what lost the quieter channel's
-                         * -24 dB when the louder channel rewrote reg 3. */
-                        volHostDl8[channel] = valueA + valueDL;
-                        vol_clamp_button();
-                        /* Analog term is COMMON to both channels (reg 3 is one
-                         * register), so it cannot be recomputed from this
-                         * channel's word alone. Re-derive all three registers
-                         * from both host terms. */
-                        vol_apply_all(i2c);
-                    }
-                    debug_printf("VOLCMD ch:%d A:%d DL:%d\n", channel, valueA, valueDL);
+                    vol_apply_host_request(channel, valueA, valueDL, i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_MUTE_SET)
                 {
-                    /* Host mute intent from AudioHwRemote_Volume_Update. Reg 7 bit0
-                     * is the codec system mute, so the digital/analog volume regs are
-                     * left untouched and unmute restores the previous level exactly.
-                     * Display: mute-blue outranks everything while held. */
+                    /* Legacy channel path -- see VOLUME_UPDATE above. */
                     unsigned muted;
                     c[i] :> muted;
-                    if (muted != host_muted)
-                    {
-                        host_muted = muted;
-                        ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-                            (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
-                             (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
-                        led_state = muted ? LED_ST_MUTED
-                                          : ((led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF);
-                        led_render();
-                        debug_printf(ANSI_YELLOW "MUTE_SET: %d" ANSI_RESET "\n", muted);
-                    }
+                    vol_apply_host_mute(muted, i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_LED_STATUS)
                 {
@@ -782,20 +836,26 @@ void csd_AudioHwRemote(chanend c[])
              * inlined there — the mixer state must live with the port owner).
              * button_debounce_task instances removed: a port may only be
              * selected by one task. */
-                        /* 3 client channels now: 0/1 as before, plus index 3 for the
-             * diagnostic core's codec-register access. AudioHwRemoteTile0
-             * already dispatches AUDIOHW_CMD_REGRD/REGWR generically for any
-             * c[i] it selects on, so this adds no server code and, more
-             * importantly, no second I2C client -- the task at c[3] shares the
-             * one bus owner instead of racing it. */
-            AudioHwRemoteTile0(c, 4, i2c[0]);
+                        /* 2 client channels (chanend diet 2026-11-04):
+             * [0] audio core's codec access, [1] the diagnostic core's
+             * register/trim proxy. Old [1] (ep0 volume) moved to
+             * csd_vol_mailbox (same-tile statics), old [2] was dead.
+             * AudioHwRemoteTile0 already dispatches AUDIOHW_CMD_REGRD/REGWR
+             * generically for any c[i] it selects on, so this adds no
+             * server-side code and, more importantly, no second I2C client --
+             * the task at c[1] shares the one bus owner instead of racing it. */
+            AudioHwRemoteTile0(c, 2, i2c[0]);
         }
     }
 }
 
 unsafe chanend uc_audiohw1; // audio core to i2c 
 // unsafe chanend uc_audiohw2;  //i2c hardware volume control from lib_xua
-unsafe chanend uc_audiohw3; //xscope in
+// retired 2026-11-04 chanend diet: ep0 and this server are BOTH tile[0];
+// volume/mute now ride csd_vol_mailbox.c (same-tile seqlock statics), so the
+// two tile[0] chanends were an intra-tile message paying cross-tile rent.
+// unsafe chanend uc_audiohw3; //xscope in -- DEAD: zero send sites tree-wide;
+// both its ends sat on tile[0]. Retired like index 4 (commit 4f06061).
 unsafe chanend uc_audiohw4; //button up
 unsafe chanend uc_audiohw5; //botton down
 /* Diagnostic core's codec-register channel (SCPI over USB MIDI). Bound to
@@ -924,9 +984,14 @@ void csd_AudioHwChanInit(chanend c)
     return {(int)AVol, (int)DVol};
 }
 
-/* Update the volume of the audio hardware 
- */
-void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
+/* Update the volume of the audio hardware
+ *
+ * chanend diet 2026-11-04: no chanend parameter. ep0 and the codec server
+ * share tile[0], so the request is posted to csd_vol_mailbox (same-tile
+ * seqlock statics) and drained by the server's 1 ms tick. The old channel
+ * (c_audiohw[1]) carried these words inside one tile at the price of 2
+ * tile[0] chanends. */
+void AudioHwRemote_Volume_Update(unsigned channel, unsigned val)
 {
     unsigned AVol, DVol;
     unsigned muted;
@@ -938,16 +1003,11 @@ void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsi
      * reg 7 is a hardware mute and the volume registers are never touched while
      * muted, so the unmute that follows restores the level with nothing cached. */
     muted = ((int)(int16_t)val <= (int)(int16_t)MIN_VOLUME) ? 1u : 0u;
-    DAC_MUTE_SET(c_audiohwremote, muted);
-    if (muted) return;               /* keep codec regs at last host level */
+    csd_vol_mb_post_mute(muted);           /* mute first: same order as the
+                                            * old same-FIFO DAC_MUTE_SET */
+    if (muted) return;                     /* keep codec regs at last host level */
     {AVol, DVol} = ADVolume_Split(channel, val);
-    unsafe
-    {
-        c_audiohwremote <: (unsigned) AUDIOHW_CMD_VOLUME_UPDATE;;
-        c_audiohwremote <: channel;
-        c_audiohwremote <: AVol;
-        c_audiohwremote <: DVol;
-    }
+    csd_vol_mb_post_volume(channel, (int)AVol, (int)DVol);
     /* Volume colour ladder removed (bring-over fd9242e): its AudioHwRemote_LED_Update
      * wrote nothing (GPIO_WR lines were already commented out). Display is the
      * tile[0] state machine — rate tier + mute blue. Volume display can be
