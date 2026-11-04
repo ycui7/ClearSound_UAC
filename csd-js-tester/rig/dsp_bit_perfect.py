@@ -279,7 +279,12 @@ def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
 
 
 
-def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
+def _transient_score(a, cL, cR, uL, uR, rate, trans, n_frames):
+    # expL/expR were parameters in the first draft but the twin trace is uL/uR
+    # (the asm-verified FILTERED view); the schedule arrays were used only for
+    # len(). They are del'd at line ~951 to free 736 MB, so passing them here
+    # raised UnboundLocalError after a full 1-minute capture -- the first
+    # attempt died at the very end of the hardware leg.
     """Impulse/step verification against the asm-verified twin.
 
     Why alignment here comes from the landmarks, not find_delta: a sparse
@@ -307,110 +312,171 @@ def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
     print(f"  transient score: {kind}, window {PRE}..{W} frames around onset "
           f"(1 frame = {1e6/rate:.2f} us)")
 
-    M = len(expL)
+    M = len(uL)
+
+    # BOTH sides must be read as two's-complement 24-bit before any
+    # differencing or thresholding. unpack_frames and the twin's >>8 view are
+    # UNSIGNED (0..2^24-1), so a value of -20 arrives as 16,777,196 and a
+    # +5/-5 pair differs by 16,777,206 instead of 10. A decaying oscillation
+    # crosses zero constantly, which made every sign flip look like a
+    # full-scale error (measured: max|A-T| 16,777,208 = 2^24-8) and made the
+    # >100-LSB detection fire on ordinary negatives -- that, not stimulus
+    # degeneracy, is what produced the 5,457 'rival shifts' AMBIGUOUS verdict.
+    def s24(x):
+        x = x.astype(np.int64) & 0xFFFFFF
+        return np.where(x >= (1 << 23), x - (1 << 24), x)
+
+    # Convert BOTH sides once, here, so detection and differencing are
+    # computed in the same signed space. (A previous draft defined s24 and
+    # never applied it -- the identical garbage numbers were the proof.)
+    cL, cR, uL, uR = s24(cL), s24(cR), s24(uL), s24(uR)
     if kind == "impulse":
         # THE shared definition: identical positions the rig played.
-        pos = O.impulse_positions(M, per, jit)
+        classes = {"impulse": O.impulse_positions(M, per, jit)}
     else:
-        pos = np.arange(0, M, 2 * per)           # rising edges of the square
-    print(f"  landmarks in schedule: {len(pos):,}")
+        # RISE and FALL scored as SEPARATE classes. Averaging both into one
+        # trace is a real bug, not a cosmetic one: the window after a rise
+        # sits near +plateau and after a fall near -plateau, so their mean
+        # CANCELS (measured: 'peak' read 2,107,854 -- half the played
+        # 4,194,306) and the repeat-to-repeat std becomes bimodal +-plateau
+        # (measured: pre-roll 'noise' 158,430 LSB, which is plateau/sqrt(n),
+        # not noise). Separate classes keep each transition's own sign, which
+        # is the physics the step test exists to show.
+        # Edges are ANALYTIC, not detected. build_block makes the square with
+        # half = (idx // per) % 2 == 0, i.e. the block STARTS HIGH, so the
+        # falling edges sit at per, 3*per, 5*per... and the rising edges at
+        # 2*per, 4*per... Detecting edges from the twin trace instead (an
+        # earlier draft) would shift every landmark to the |twin| crossing of
+        # some amplitude threshold -- hundreds of frames late on a 1142-sample
+        # time constant -- and that shift would be silently folded into the
+        # latency number. Analytic positions reference the schedule, which is
+        # what latency must be measured against.
+        rise = np.arange(2 * per, M, 2 * per)     # LOW -> HIGH
+        fall = np.arange(per, M, 2 * per)          # HIGH -> LOW
+        classes = {"rise": rise, "fall": fall}
+    for k, v in classes.items():
+        print(f"  landmarks[{k}] in schedule: {len(v):,}")
 
     results = {}
-    for ch, cap_, exp_, amp in ((0, cL, uL, vL), (1, cR, uR, vR)):
-        # ---- locate delta: shift that detects a response at EVERY landmark.
-        # Detection = max|capture| over the first 64 frames after the predicted
-        # onset exceeds 100 LSB -- 5x the single-sample loopback noise, and a
-        # silence base means nothing else can trigger it.
-        cand = []
-        for d in range(-9000, 257):
-            idx = pos - d                       # capture index of onset
-            ok = (idx >= 1) & (idx + 64 < len(cap_))
-            if ok.sum() < 0.9 * len(pos):
-                continue
-            # Fancy-index each landmark's first 64 capture frames: rows are
-            # (capture onset index) + (0..63). The index arithmetic must
-            # happen INSIDE the subscript -- cap_[idx][:,None] + arange adds
-            # the offset to the VALUE instead, which still "finds" large
-            # numbers and fails silently.
-            w = np.abs(cap_[idx[ok][:, None] + np.arange(64)[None, :]])
-            det = int(np.count_nonzero(w.max(axis=1) > 100))
-            cand.append((det, d))
-        cand.sort(reverse=True)
-        if not cand or cand[0][0] < 0.9 * len(pos):
-            sys.exit(f"PROBE FAILURE ch{ch}: best shift {cand[0] if cand else None} "
-                     f"never detects the response at 90% of landmarks -- the "
-                     f"transients are not reaching the tap; device unmeasured.")
-        delta = cand[0][1]
-        margin = f"{cand[0][0]}/{cand[1][0]} at deltas {cand[0][1]}/{cand[1][1]}"
-        # Definitive-peak test: no OTHER shift, far from the winner, may
-        # detect at >=50%. A periodic train fails this (k*period clones the
-        # pattern); a jittered train passes with the second candidate stuck
-        # near chance. Report, do not silently accept.
-        far = [(dt_, dd_) for dt_, dd_ in cand
-               if abs(dd_ - delta) > 512 and dt_ >= 0.5 * len(pos)]
-        print(f"  ch{ch}: peak uniqueness: {len(far)} other shifts >=50% "
-              f"detection "
-              f"{'-- AMBIGUOUS, latency not definitive' if far else '-- unique'}")
-        print(f"  ch{ch}: delta={delta} frames ({-delta/rate*1e6:.1f} us "
-              f"{'-lag' if delta < 0 else '+lead'} vs schedule), winner {margin}")
+    for cname, pos in classes.items():
+      for ch, cap_, exp_, amp in ((0, cL, uL, vL), (1, cR, uR, vR)):
+          # ---- locate delta by MINIMISING mean|capture - twin| over the
+          # response window, at every candidate shift. The earlier draft counted
+          # landmarks whose first 64 frames exceeded 100 LSB; with the signed
+          # view fixed the tap floor is 0.2 LSB, so that threshold sits ~500x
+          # under the response tail and fired for ~30% of ALL shifts (1,969
+          # "rivals") -- no discrimination. Full-window MAE can discriminate:
+          # only the true shift makes the entire window agree with the twin.
+          #
+          # Two resolutions. A full 46k-frame window x 14k shifts is 10^11
+          # element-ops (a first attempt was still running after 3 minutes), so
+          # the scans run on a strided view of the window and only the top
+          # candidates are refined at full resolution. Stride 32 cannot hide the
+          # peak: the response changes slowly compared to 32 frames (tau=1142).
+          lo, hi = -12000, 2048
+          STRIDE = 32
+          sW = np.arange(0, W, STRIDE)
 
-        # ---- average the responses
-        idx = pos - delta
-        ok = (idx - PRE >= 0) & (idx + W + 64 < len(cap_))
-        idx = idx[ok]
-        offs = np.arange(-PRE, W)
-        A = cap_[idx[:, None] + offs[None, :]].astype(np.float64)
-        T = exp_[pos[ok][:, None] + offs[None, :]].astype(np.float64)
-        Am, Tm = A.mean(axis=0), T.mean(axis=0)
-        preA = A[:, :PRE]; preT = T[:, :PRE]
-        noise_pre = float(np.std(preA, axis=0).mean()) / np.sqrt(A.shape[0])
-        d = Am - Tm
-        rms_t = float(np.sqrt((Tm[PRE:] ** 2).mean()))
-        snr = 20 * np.log10(rms_t / max(1e-9, float(np.sqrt((d[PRE:] ** 2).mean()))))
-        peakA, peakT = float(Am.max()), float(Tm.max())
-        print(f"  ch{ch}: n={len(idx):,} averaged; peak measured {peakA:,.0f} "
-              f"vs twin {peakT:,.0f} (played {amp:,}); "
-              f"max|A-T| {np.abs(d).max():.1f}  median {np.median(np.abs(d)):.1f} "
-              f"LSB; SNR {snr:.1f} dB; pre-roll noise/avg {noise_pre:.2f} LSB")
-        # sub-frame check: shifting the twin by +-1 frame must be WORSE
-        d1 = np.abs(Am[PRE:] - np.roll(Tm, 1)[PRE:]).mean()
-        dm1 = np.abs(Am[PRE:] - np.roll(Tm, -1)[PRE:]).mean()
-        d0 = np.abs(d[PRE:]).mean()
-        align_ok = d0 <= d1 and d0 <= dm1
-        print(f"  ch{ch}: integer-frame alignment "
-              f"{'OPTIMAL' if align_ok else 'NOT optimal'} "
-              f"(mean|d| at -1/0/+1 frame: {dm1:.1f}/{d0:.1f}/{d1:.1f})")
-        results[ch] = dict(Am=Am, Tm=Tm, offs=offs, delta=delta, n=len(idx),
-                           peakA=peakA, peakT=peakT, snr=snr, amp=amp,
-                           maxd=float(np.abs(d).max()))
+          def mae_at(d, stride_w):
+              idx = pos - d
+              ok = (idx - PRE >= 0) & (idx + W + 64 < len(cap_))
+              if ok.sum() < 0.9 * len(pos):
+                  return None
+              ii = idx[ok]
+              A = cap_[ii[:, None] + stride_w[None, :]]
+              T = exp_[pos[ok][:, None] + stride_w[None, :]]
+              return float(np.abs(A - T).mean())
+
+          cand = []
+          for d in range(lo, hi):
+              v = mae_at(d, sW)
+              if v is not None:
+                  cand.append((v, d))
+          if not cand:
+              sys.exit(f"PROBE FAILURE {cname} ch{ch}: no candidate shift covered 90% "
+                       f"of the landmarks -- transients not reaching the tap.")
+          cand.sort()
+          # refine the top few at full resolution; the strided scan only ranks
+          sFull = np.arange(0, W)
+          refined = []
+          for _, d in cand[:12]:
+              v = mae_at(d, sFull)
+              if v is not None:
+                  refined.append((v, d))
+          refined.sort()
+          mae0, delta = refined[0]
+          # Definitive-peak test: the best shift FAR (>512) from the winner must
+          # be much worse. Report the actual numbers; do not silently accept.
+          far = [c for c in cand if abs(c[1] - delta) > 512]
+          mae_far = far[0][0] if far else float("nan")
+          d_far = far[0][1] if far else None
+          ratio = mae_far / max(1e-9, mae0)
+          print(f"  {cname} ch{ch}: delta={delta} frames ({delta/rate*1e6:.1f} us "
+                f"capture lags schedule by this much); MAE {mae0:.2f} LSB; "
+                f"best far shift {d_far} MAE {mae_far:.1f} = {ratio:.0f}x "
+                f"{'-- UNIQUE peak' if ratio > 10 else '-- AMBIGUOUS, latency not definitive'}")
+
+          # ---- average the responses
+          idx = pos - delta
+          ok = (idx - PRE >= 0) & (idx + W + 64 < len(cap_))
+          idx = idx[ok]
+          offs = np.arange(-PRE, W)
+          A = cap_[idx[:, None] + offs[None, :]].astype(np.float64)
+          T = exp_[pos[ok][:, None] + offs[None, :]].astype(np.float64)
+          Am, Tm = A.mean(axis=0), T.mean(axis=0)
+          preA = A[:, :PRE]; preT = T[:, :PRE]
+          noise_pre = float(np.std(preA, axis=0).mean()) / np.sqrt(A.shape[0])
+          d = Am - Tm
+          rms_t = float(np.sqrt((Tm[PRE:] ** 2).mean()))
+          snr = 20 * np.log10(rms_t / max(1e-9, float(np.sqrt((d[PRE:] ** 2).mean()))))
+          peakA, peakT = float(Am.max()), float(Tm.max())
+          print(f"  {cname} ch{ch}: n={len(idx):,} averaged; peak measured {peakA:,.0f} "
+                f"vs twin {peakT:,.0f} (played {amp:,}); "
+                f"max|A-T| {np.abs(d).max():.1f}  median {np.median(np.abs(d)):.1f} "
+                f"LSB; SNR {snr:.1f} dB; pre-roll noise/avg {noise_pre:.2f} LSB")
+          # sub-frame check: shifting the twin by +-1 frame must be WORSE
+          d1 = np.abs(Am[PRE:] - np.roll(Tm, 1)[PRE:]).mean()
+          dm1 = np.abs(Am[PRE:] - np.roll(Tm, -1)[PRE:]).mean()
+          d0 = np.abs(d[PRE:]).mean()
+          align_ok = d0 <= d1 and d0 <= dm1
+          print(f"  {cname} ch{ch}: integer-frame alignment "
+                f"{'OPTIMAL' if align_ok else 'NOT optimal'} "
+                f"(mean|d| at -1/0/+1 frame: {dm1:.1f}/{d0:.1f}/{d1:.1f})")
+          results[(cname, ch)] = dict(Am=Am, Tm=Tm, offs=offs, delta=delta, n=len(idx), cname=cname,
+                             peakA=peakA, peakT=peakT, snr=snr, amp=amp,
+                             maxd=float(np.abs(d).max()))
 
     # ---- plot ----------------------------------------------------------------
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    ms = (results[0]["offs"] / rate) * 1e3
-    for ch, ax in ((0, axes[0]), (1, axes[1])):
-        r = results[ch]
+    keys = sorted(results.keys())
+    nrow = len(keys)
+    fig, axes = plt.subplots(nrow, 1, figsize=(10, 2.6 * nrow), sharex=True)
+    if nrow == 1:
+        axes = [axes]
+    for ax, k in zip(axes, keys):
+        r = results[k]
+        ms = (r["offs"] / rate) * 1e3
+        base = float(np.median(r["Tm"][-4000:]))   # settled level of THIS class
         ax.plot(ms, r["Am"], lw=0.9, color="C0",
                 label=f"device (avg of {r['n']:,})")
-        ax.plot(ms, r["Tm"], lw=0.9, color="C3", ls="--", label="twin (asm-verified)")
+        ax.plot(ms, r["Tm"], lw=0.9, color="C3", ls="--",
+                label="twin (asm-verified)")
         ax.axvline(0, color="k", lw=0.5)
         ax.axvspan(ms[0], ms[PRE], color="0.9", lw=0)
         ax.set_yscale("symlog", linthresh=100)
         ax.set_ylabel("24-bit field LSB")
-        ax.legend(loc="upper right", fontsize=8)
-        ax.set_title(f"{kind} response, ch{'LR'[ch]}  "
-                     f"latency {-r['delta']} frames = {-r['delta']/rate*1e6:.1f} us  |  "
+        ax.legend(loc="upper right", fontsize=7)
+        ax.set_title(f"{r['cname']} response, ch{'LR'[k[1]]}   "
+                     f"latency {r['delta']} frames = "
+                     f"{r['delta']/rate*1e6:.1f} us (capture lags schedule)  |  "
                      f"peak dev {r['peakA']:,.0f} vs twin {r['peakT']:,.0f}  |  "
-                     f"max|diff| {r['maxd']:.1f} LSB  SNR {r['snr']:.0f} dB",
-                     fontsize=9)
-    axes[1].set_xlabel("ms from onset (shaded = pre-roll, the noise floor)")
-    axes[1].set_xlim(ms[0], min(ms[-1], 30))
-    fig.suptitle(f"CSD DSP preset 2 {kind} response @ {rate} Hz "
-                 f"(amp L 0x{vL:06X} R 0x{vR:06X}, period {per:,} frames)",
-                 fontsize=10)
-    fig.tight_layout()
+                     f"max|diff| {r['maxd']:.2f} LSB  SNR {r['snr']:.0f} dB",
+                     fontsize=8)
+        ax.grid(alpha=0.2)
+    axes[-1].set_xlabel("ms from edge/onset (shaded = pre-roll, the noise floor)")
+    axes[-1].set_xlim(ms[0], min(ms[-1], 30))
     out = f"/tmp/dsp_{kind}_response.png"
     fig.savefig(out, dpi=130)
     print(f"  plot: {out}")
@@ -1032,7 +1098,7 @@ def main():
             np.stack([cL, cR]))
 
     if trans:
-        _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames)
+        _transient_score(a, cL, cR, uL, uR, rate, trans, n_frames)
         return
 
     # ---- anchor + regions (unit-tested in rig/dsp_model_selftest.py) ------
