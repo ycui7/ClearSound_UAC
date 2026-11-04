@@ -245,7 +245,18 @@ def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
           f"in {time.monotonic()-t0:.1f}s")
     eL = np.ascontiguousarray(out[:, 0])
     eR = np.ascontiguousarray(out[:, 1])
-    np.save(cache, np.stack([eL, eR]))
+    # Atomic write. A plain np.save(cache, ...) leaves a PARTIAL .npy if the
+    # process is killed mid-write (a SIGTERM'd sweep did exactly that), and the
+    # next run then loads it happily -- header says (2, 23068672), payload is
+    # zero bytes -- and dies with "could only read 0 elements (file seems not
+    # fully written?)". A cache that can be half-written is a cache that
+    # silently poisons every later run.
+    # np.save APPENDS ".npy" when the name does not end in it, so the temp
+    # name must too -- the first version used cache+".tmp<PID>", numpy wrote
+    # "...tmp<PID>.npy", and os.replace failed on the name it never wrote.
+    tmp = f"{cache}.tmp{os.getpid()}.npy"
+    np.save(tmp, np.stack([eL, eR]))
+    os.replace(tmp, cache)
     os.remove(inf); os.remove(outf)
     return eL, eR
 
