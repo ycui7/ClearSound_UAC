@@ -52,12 +52,24 @@ unsigned csd_diag_reg_writes(void)  { return reg_writes; }
  * Plain locals on every send/receive: nothing relies on the channel
  * operators accepting an expression or a struct member. */
 /* LOAD returns the packed pair rather than applying it. The store runs on
- * tile[0] and csd_mb_trim is a tile[1]-local static: an earlier revision had
- * the store call csd_mb_put_trim() itself, which wrote tile[0]'s copy and
- * left the mixer reading 0 dB forever (measured: flash verified good,
- * read-back [0,0], mic -0.95 dB instead of -8). The value now travels the
- * channel and the CALLER on tile[1] applies it, so there is exactly one
- * writer of the mailbox -- the tile that owns it.
+ * tile[0] and csd_mb_trim is a static that lives on ONE tile.
+ *
+ * HISTORY of who that tile is, because both readings of "the right tile"
+ * were correct in their own model and the flip is the persistence bug this
+ * module is famous for:
+ *   - mixer-consumer era: the mixer on tile[1] multiplied every frame by the
+ *     trim, so tile[1] had to own the mirror. A revision that had the tile[0]
+ *     store call csd_mb_put_trim() itself wrote tile[0]'s copy and left the
+ *     mixer at 0 dB forever (measured: flash verified good, read-back [0,0],
+ *     mic -0.95 dB instead of -8). LOAD therefore returned the value to
+ *     tile[1] and the caller published it there.
+ *   - register-setup era (directive 2026-11-04): the trim is ES9219Q MASTER
+ *     TRIM, not per-frame math. The mixer no longer reads the mirror; its
+ *     readers are VOLume:TRIM? (tile[0] SCPI) and the dirty-flag consumer in
+ *     csd_AudioHwInit (tile[0]) that writes the chip. tile[0] is now the
+ *     right tile, and PUBLISH exists to put the boot value there.
+ * LOAD/SAVE still round-trip scalars through here because quadflashlib must
+ * run on tile[0] (PORT_SQI_* are declared on that tile in the .xn).
  *
  * Two reply words (packed, status) because 0 is a legitimate packed value:
  * a single word could not tell "adopted the reset default" from "failed". */
@@ -72,6 +84,7 @@ int csd_diag_trim_load(unsigned *packed_out)
     if (packed_out) *packed_out = packed;
     return st ? 1 : 0;
 }
+
 
 /* SAVE takes the pair as an argument for the same reason: tile[0] must never
  * read the tile[1] mailbox to find out what to journal. */

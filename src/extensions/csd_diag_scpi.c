@@ -1192,6 +1192,33 @@ static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
     packed = which_right ? ((v << 16) | (packed & 0xFFFFu))
                          : ((packed & 0xFFFF0000u) | v);
     csd_mb_put_trim(packed);
+    /* Tile note (verified by reading the code 2026-11-04, after a detour
+     * that added -- then removed -- a tile[0] publish): csd_mb_trim's only
+     * readers are this task (VOLume:TRIM?/setter) and the boot/rate writer
+     * in csd_AudioHwInit, and BOTH run on tile[1] -- AudioHwInit() is called
+     * from the audio() task (lib_xua xua_audiohub.xc:905) and audio() lives
+     * on AUDIO_IO_TILE=1. One tile, one copy, one writer. No cross-tile
+     * seeding is needed; an earlier revision believed AudioHwInit was on
+     * tile[0] and published there -- that copy had no reader. */
+    /* Write MASTER TRIM NOW, not on some later pass (directive 2026-11-04:
+     * trim is register setup; the register write is the effect). Four
+     * writes through the existing tile[0] proxy -- same chanend discipline
+     * as REGister:WRITE, blocking on THIS core (not the audio path), so a
+     * rig reads the acoustic effect immediately. Order: registers first,
+     * journal second, so flash latency can never delay the audible value;
+     * if the journal fails the error queue says so while the trim stands,
+     * same contract as before. Value math shared with the boot writer via
+     * csd_trim_master_trim_q31 / csd_trim_reg_byte -- one implementation. */
+    {
+        unsigned q31 = csd_trim_master_trim_q31(packed);
+        for (unsigned ti = 0; ti < 4u; ti++) {
+            unsigned tb = csd_trim_reg_byte(q31, ti);
+            if (!csd_diag_reg_write(CSD_TRIM_REG_BASE + ti, tb)) {
+                SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                break;
+            }
+        }
+    }
     /* Journal through the tile[0] server (csd_diag_regs.xc) -- this core
      * must not touch the SQI ports. Synchronous by design: the reply means
      * the value is in flash (or the status says why not), so a rig can read
@@ -1299,8 +1326,21 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_load(scpi_t *context)
     }
     /* Applied HERE, on tile[1] -- the tile whose local static csd_mb_trim
      * actually is. The store on tile[0] cannot publish this; see
-     * csd_diag_regs.xc. Same writer as the SCPI set path above. */
+     * csd_diag_regs.xc. Same writer as the SCPI set path above. The
+     * registers are re-written too (directive 2026-11-04): LOAD's contract
+     * is "adopt what is in flash", and adoption now means the chip, not
+     * only the mailbox. */
     csd_mb_put_trim(packed);
+    {
+        unsigned q31 = csd_trim_master_trim_q31(packed);
+        for (unsigned ti = 0; ti < 4u; ti++) {
+            unsigned tb = csd_trim_reg_byte(q31, ti);
+            if (!csd_diag_reg_write(CSD_TRIM_REG_BASE + ti, tb)) {
+                SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                break;
+            }
+        }
+    }
     return SCPI_RES_OK;
 }
 
