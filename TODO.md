@@ -122,3 +122,43 @@ still open (raw power cycle, trim survival across a DFU update).
      string to "ClearSound DAC (UAC2.0)"; the rigs and `csd_diag.py` match
      the card by `xmos` OR `clearsound`. SCPI `*IDN?` is unaffected (always
      answers `ClearSound,CSD-22,...`).
+
+## Idle power (added 2026-11-04)
+
+7. **TODO (owner directive 2026-11-04) — Idle-power shutdown / ordered restart.**
+ The XMOS core monitors the audio stream. If NO audio stream arrives for
+ more than 5 minutes, shut down in this exact order:
+   1. amplifier,
+   2. DAC,
+   3. DSP and mixer.
+ Restart on stream return, in this exact order:
+   1. DSP and mixer start first (only if they are enabled),
+   2. DAC next,
+   3. amplifier last (deassert SUSPEND_N).
+ Hard requirements from the owner:
+ - Restarting the DAC means a FULL re-initialization (the boot init
+   sequence, not just an un-mute), and volume must be restored to the value
+   held before shutdown.
+ - Before shutting the amplifier down, reduce volume to minimum first
+   (pop suppression on the way into shutdown).
+ Notes for whoever picks this up:
+ - "No audio stream" must be defined precisely. A paused stream with the
+   clock still running is NOT silence — the codec DPLL locks on clock alone
+   with no samples on the bus (the instrument rule that burned a week).
+   Candidate witnesses: endpoint activity, LRCLK-delivered samples, mixer
+   frame counters (all readable on the audiohub / server tasks).
+ - The 5-minute timer should ride an existing task's select.
+   `AudioHwRemoteTile0` already owns mute, volume, LED state and I2C and is
+   the natural owner. Do NOT add a thread to tile[0] without re-reading the
+   census (`xobjdump --resources`; it is 5/8 threads, 27/32 chanends after
+   the 2026-11-04 chanend diet).
+ - Amplifier shutdown = drive SUSPEND_N; DAC shutdown = codec power-down
+   register(s). The wake path must replay the ES9219Q bring-up including
+   the PLL/chip-ID policy, not just release mute.
+ - Volume snapshot/restore must go through the single-writer appliers
+   (`vol_apply_host_*`). The host-facing USB volume cache in ep0
+   (`volsOut`) must stay authoritative so a host `GET_CUR` during shutdown
+   reads truth.
+- Gate: acoustic (rig mix + mute) across a full shutdown/wake cycle, plus
+   verification that wake restores trim, mute state, LED tier and DSP
+   preset exactly as before.
