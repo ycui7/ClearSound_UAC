@@ -205,9 +205,15 @@ def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
     # three sweeps void today). Heads+tails are enough: any stimulus change
     # that matters changes them, and it is O(8k) to hash.
     import hashlib
-    stim = hashlib.sha1(uL[:4096].tobytes() + uR[:4096].tobytes()
-                        + uL[-4096:].tobytes() + uR[-4096:].tobytes()
-                        ).hexdigest()[:12]
+    # SAMPLED CHUNKS across the whole array, not heads+tails: a periodic and
+    # a jittered impulse train of equal length share first and last 4096
+    # frames and collided in the cache (known-answer test saw the wrong
+    # stimulus's expectation). 16 spread chunks catch any real difference.
+    step = max(1, len(uL) // 16)
+    h = hashlib.sha1()
+    for k in range(0, len(uL), step):
+        h.update(uL[k:k + 512].tobytes()); h.update(uR[k:k + 512].tobytes())
+    stim = h.hexdigest()[:12]
     # .npy, not JSON: 2 x 23M int64 is ~370 MB and json would take minutes
     # and roughly three times the space to say the same thing.
     cache = (f"/tmp/dsp_expect_{rate}_{rounding}_{len(uL)}_{tag}_{stim}.npy")
@@ -293,7 +299,9 @@ def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
     Sign convention (pinned by test, see commit 0ed4ae6): capture[i] pairs
     with schedule[i + delta]; a negative delta means the capture lags.
     """
-    kind, (vL, vR, per) = trans
+    kind, tv = trans
+    vL, vR, per = tv[0], tv[1], tv[2]
+    jit = tv[3] if len(tv) > 3 else 0
     W = min(4 * 11500, per - per // 2 - 2048)   # ~4 time constants, stay clear
     PRE = 1024                                   # pre-roll: noise floor + baseline
     print(f"  transient score: {kind}, window {PRE}..{W} frames around onset "
@@ -301,7 +309,8 @@ def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
 
     M = len(expL)
     if kind == "impulse":
-        pos = np.arange(per // 2, M, per)
+        # THE shared definition: identical positions the rig played.
+        pos = O.impulse_positions(M, per, jit)
     else:
         pos = np.arange(0, M, 2 * per)           # rising edges of the square
     print(f"  landmarks in schedule: {len(pos):,}")
@@ -333,6 +342,15 @@ def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
                      f"transients are not reaching the tap; device unmeasured.")
         delta = cand[0][1]
         margin = f"{cand[0][0]}/{cand[1][0]} at deltas {cand[0][1]}/{cand[1][1]}"
+        # Definitive-peak test: no OTHER shift, far from the winner, may
+        # detect at >=50%. A periodic train fails this (k*period clones the
+        # pattern); a jittered train passes with the second candidate stuck
+        # near chance. Report, do not silently accept.
+        far = [(dt_, dd_) for dt_, dd_ in cand
+               if abs(dd_ - delta) > 512 and dt_ >= 0.5 * len(pos)]
+        print(f"  ch{ch}: peak uniqueness: {len(far)} other shifts >=50% "
+              f"detection "
+              f"{'-- AMBIGUOUS, latency not definitive' if far else '-- unique'}")
         print(f"  ch{ch}: delta={delta} frames ({-delta/rate*1e6:.1f} us "
               f"{'-lag' if delta < 0 else '+lead'} vs schedule), winner {margin}")
 
@@ -767,6 +785,13 @@ def main():
                     help="24-bit stimulus amplitude per channel (signed 24-bit "
                          "field). Values and silence must avoid the DoP marker "
                          "top bytes {0x05,0xFA}; the builder rejects them.")
+    ap.add_argument("--trans-jitter", type=int, default=16384,
+                    help="random extra frames (0..N) added to each gap "
+                         "between impulses. Non-repeating gaps are what make "
+                         "the alignment peak UNIQUE -- a fixed period is "
+                         "autocorrelation-degenerate (any k*period shift "
+                         "matches, so latency has k solutions). 0 restores "
+                         "the periodic train. (owner directive 2026-11-04)")
     ap.add_argument("--trans-period", type=int, default=131072,
                     help="frames between impulses (or square-wave half "
                          "period). Must exceed 5 time constants of the "
@@ -829,7 +854,7 @@ def main():
             sys.exit("--trans-amp channels must differ: equal values cannot "
                      "detect a channel cross-wire")
         if a.transient == "impulse":
-            trans = ("impulse", (vL, vR, a.trans_period))
+            trans = ("impulse", (vL, vR, a.trans_period, a.trans_jitter))
         else:
             trans = ("step", (vL, vR, a.trans_period))
         print(f"  stimulus: {a.transient} L=0x{vL:06X} R=0x{vR:06X} every "

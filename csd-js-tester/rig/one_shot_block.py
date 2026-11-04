@@ -223,6 +223,48 @@ class AlsaXrunTracker:
 # ---------------------------------------------------------------------------
 # The block, built once.
 # ---------------------------------------------------------------------------
+IMPULSE_SEED = 20261104
+
+
+def impulse_positions(n_frames, per, jitter=0, seed=IMPULSE_SEED):
+    """Landmark positions for the transient stimulus: gaps of per..per+jitter.
+
+    WHY JITTER (owner directive 2026-11-04): impulses at a FIXED period are
+    autocorrelation-degenerate -- a shift of one whole period reproduces the
+    landmark pattern, so alignment has k solutions and the winning delta is a
+    coin flip among them (observed: detection tied at deltas -1668/-1669 and
+    any delta differing by ~n*per is structurally equivalent). Non-repeating
+    gaps destroy that symmetry: the position set has ONE self-matching shift,
+    so the landmark-detection peak is unique and the latency read definitive.
+
+    Deterministic (fixed seed) so the rig plays and scores the IDENTICAL
+    pattern from one definition -- the expected_vec rule: two copies drift,
+    and then a rig scores the device against a stream nobody played.
+
+    Marker safety: positions and response windows stay clear of the SYNC
+    marker blocks, which stamp over everything and would poison the average.
+    """
+    rng = np.random.default_rng(seed)
+    pos = []
+    p = per // 2
+    MARGIN = 14000                     # pre-roll + one 5-tau window
+    while p < n_frames - (MARGIN + 2048):
+        mod = p % 786432
+        if mod < 4096 + MARGIN:
+            p += (4096 + MARGIN) - mod
+            mod = p % 786432
+        if mod > 786432 - MARGIN:
+            p += (786432 - mod) + MARGIN
+            mod = p % 786432
+            if mod < 4096 + MARGIN:
+                p += (4096 + MARGIN) - mod
+        if p >= n_frames - (MARGIN + 2048):
+            break
+        pos.append(int(p))
+        p += per + (int(rng.integers(0, jitter + 1)) if jitter else 0)
+    return np.asarray(pos, dtype=np.int64)
+
+
 def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
                 marker_len: int = MARKER_LEN, amp_shift: int = 0,
                 dc_pair=None, pip_period: int = 0,
@@ -282,7 +324,7 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
         L[:] = 0
         R[:] = 0
         if impulse is not None:
-            vL, vR, per = (int(v) for v in impulse)
+            vL, vR, per = (int(v) for v in impulse[:3])
             for name, v in (("impulse L", vL), ("impulse R", vR)):
                 if not 0 < v < (1 << 24):
                     raise ValueError(f"{name} must be a nonzero 24-bit value")
@@ -295,7 +337,8 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
             # overwritten by SYNC, so 1/6 of the train would never be played.
             # At +per/2 the nearest approach to a marker start is per/2 =
             # 65536 frames, far outside the 4096-frame marker length.
-            pos = np.arange(per // 2, n_frames, per)
+            jit = tuple((int(v) for v in impulse))[3] if len(impulse) > 3 else 0
+            pos = impulse_positions(n_frames, per, jit)
             L[pos] = vL
             R[pos] = vR
         else:
@@ -310,6 +353,13 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
             half = (idx // np.uint64(per)) % np.uint64(2) == np.uint64(0)
             L[half] = vL
             R[half] = vR
+        # Suppress the SYNC marker blocks for transients. They stamp AFTER
+        # this branch (full-scale, 4096 frames) and the shelf rings ~57k
+        # frames -- longer than an impulse gap -- so every measurement window
+        # is dominated by MARKER ringing, not the impulse response: the
+        # known-answer test detected at the marker's decay phase, not the
+        # true delta. Transients align on their OWN landmarks; markers are
+        # the noise stimulus's tool and pure pollution here.
     if pip_period:
         # Sparse unique landmarks, because a constant stimulus leaves the
         # capture with almost nothing rare, and find_delta anchors on values
@@ -339,7 +389,8 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
             return out
         L[pos] = _safe_pips(len(pos))
         R[pos] = _safe_pips(len(pos))
-    m = (idx % np.uint64(marker_period)) < np.uint64(marker_len)
+    mlen = 0 if (impulse is not None or step is not None) else marker_len
+    m = (idx % np.uint64(marker_period)) < np.uint64(mlen)
     L[m] = sig.SYNC_L
     R[m] = sig.SYNC_R
 
