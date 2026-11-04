@@ -729,6 +729,16 @@ def main():
     got_n = len(cap) // O.FRAME_BYTES
     cL, cR = unpack_frames(cap[:got_n * O.FRAME_BYTES])
     print(f"  captured {got_n:,} frames")
+    # Save HERE, at unpack, not inside report_why_no_match: the battery only
+    # runs when the anchor fails, so every run that anchored but then VOIDed
+    # on "no scoreable region" saved NOTHING -- and an external per-leg `cp`
+    # then silently copied the PREVIOUS run's stale capture and named it after
+    # this one. That is how amp0/amp7/amp14 all ended up byte-identical
+    # attenuated files (mid-RMS 66k where amp0 must be ~9M), and how three
+    # offline sweeps were built on mislabeled data. A capture must be saved on
+    # every path that produced it, stamped with the run that made it.
+    np.save(f"/tmp/dsp_cap_run_{int(a.amp_shift)}_{int(time.time())}.npy",
+            np.stack([cL, cR]))
 
     # ---- anchor + regions (unit-tested in rig/dsp_model_selftest.py) ------
     delta, mass, n_spike, n_pairs = find_delta(cL, cR, uL, uR)
