@@ -465,15 +465,35 @@ def main():
           "FIR stays armed for the whole run")
     del wL32, wR32, both
 
+    # ---- preset 0: identity expectation, so the STRICT 32-bit compare bites -
+    # one_shot_block.py was "preset 0's job", but it compares 24-bit fields
+    # only: sent_lookup hands it expL/expR and unpack_frames returns
+    # (wire_word >> 8), so the LOW 8 BITS OF THE Q31 WORD WERE NEVER COMPARED
+    # AT PRESET 0 -- not once, across the whole 6/6 PASS ladder. That is the
+    # one open free variable in the preset-2 residual: the asm matches the twin
+    # bit-for-bit (xsim oracle), the coefficient row is fitted correct, delivery
+    # is ordered -- so if the 24-bit-exact capture is missing low bits on the
+    # way INTO the filter, everything else already checked out and only this
+    # was wrong.
+    # At preset 0 the DSP is a bypass, so the expected Q31 word IS the word we
+    # sent: wL32/wR32, already computed for the DoP guard. Feeding them as the
+    # expectation makes the rest of this rig work unchanged -- the 24-bit score
+    # reduces to what one_shot_block measured, and the strict block compares
+    # full 32-bit words, which is the new information.
     if a.preset == 0:
-        sys.exit("preset 0 is one_shot_block.py's job (byte-exact bypass); "
-                 "this rig exists for the filtering presets")
+        print("  preset 0: expectation = the words SENT (identity bypass).")
+        print("  PASS here requires the STRICT 32-bit compare to be clean, so")
+        print("  the low 8 bits are checked -- which no preset-0 run has ever")
+        print("  done. A 24-bit-only pass proves nothing at this preset.")
+        eL = wL32.astype(np.int32)
+        eR = wR32.astype(np.int32)
+    else:
+        # Feed the twin the 24-bit schedule fields directly (it scales by 256
+        # itself); int32 keeps four 23M-element arrays at ~90 MB each instead of
+        # ~180 MB. build_block's int64 copies are freed once the twin has run.
+        eL, eR = filtered_expectation(expL.astype(np.int32),
+                                      expR.astype(np.int32), rate, a.rounding)
 
-    # Feed the twin the 24-bit schedule fields directly (it scales by 256
-    # itself); int32 keeps four 23M-element arrays at ~90 MB each instead of
-    # ~180 MB. build_block's int64 copies are freed once the twin has run.
-    eL, eR = filtered_expectation(expL.astype(np.int32), expR.astype(np.int32),
-                                  rate, a.rounding)
     # >>8, NOT &0xFFFFFF: unpack_frames returns (wire_word >> 8), and the tap
     # hands us the filtered word as the wire word, so the matching 24-bit view
     # of the expectation is the TOP 24 bits of the filtered word. (Masking the
