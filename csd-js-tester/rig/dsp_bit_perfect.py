@@ -252,25 +252,38 @@ def find_delta(cL, cR, uL, uR, W=8192, SPAN=8192):
     verdict comes from scoring EVERY frame afterwards, so a wrong offset
     produces a huge defect count, never a false PASS.
     """
+    # Locate by SIGNATURE, not by a guessed nominal. The first version
+    # searched +-8192 around (n_frames - got_n) -- a nominal I invented -- and
+    # matched nothing, because the real offset on this fixture is set by the
+    # prefill (384,000 frames written before capture opens) plus the 0.25 s
+    # gap: hundreds of thousands of frames, and the device free-runs I2S
+    # before the host plays anything. A window that size cannot be guessed,
+    # so do not guess: the stimulus has no translational self-similarity (the
+    # property the rig was designed for), so ONE 8-word signature identifies
+    # the schedule position exactly.
+    #
+    # Several capture positions are tried because the capture HEAD may be
+    # pre-stream filler (the tap's RX side returns the sticky last word until
+    # TX has produced one), and each candidate must hold up over RUN frames.
     got_n, n_frames = len(cL), len(uL)
-    # Nominal: capture frame i corresponds to schedule frame i + delta. The
-    # sign is DATA, not convention -- the proven preset-0 rig measured
-    # delta = -236 on this DAC, so the search must span both signs (an
-    # earlier draft refused d < 0 and would have VOIDed good runs). The
-    # synthetic known-offset tests in rig/dsp_model_selftest.py pin the
-    # positive side; the hardware run exercises the negative side.
-    base = n_frames - got_n
+    SIG, RUN, TRIES = 8, 2048, 24
     best = (-1, None)
-    for d in range(base - SPAN, base + SPAN + 1):
-        i0 = max(0, -d)                     # first capture index in range
-        i1 = min(got_n, n_frames - d)       # one past the last
-        if i1 - i0 < W:
+    for t in range(TRIES):
+        i0 = int(got_n * (t + 1) / (TRIES + 1))
+        if i0 + RUN > got_n or i0 < 64:
             continue
-        m = int(np.count_nonzero(
-            (cL[i0:i0 + W] == uL[i0 + d:i0 + d + W])
-            & (cR[i0:i0 + W] == uR[i0 + d:i0 + d + W])))
-        if m > best[0]:
-            best = (m, d)
+        cand = np.flatnonzero((uL == cL[i0]) & (uR == cR[i0]))
+        for k in cand[:16]:
+            k = int(k)
+            if k + RUN > n_frames:
+                continue
+            m = int(np.count_nonzero(
+                (cL[i0:i0 + RUN] == uL[k:k + RUN])
+                & (cR[i0:i0 + RUN] == uR[k:k + RUN])))
+            if m > best[0]:
+                best = (m, k - i0)
+        if best[0] >= RUN:
+            break
     return best
 
 
@@ -303,6 +316,68 @@ def build_regions(cL, cR, uL, uR, delta, PROBE=384):
             regions.append((cur, end, delta))
         cur = (end + PROBE) if end > cur else (cur + PROBE)
     return regions
+
+
+
+def report_why_no_match(cL, cR, uL, uR, n_frames, got_n, tx_adv=None):
+    """Name the failure instead of guessing at it.
+
+    A VOID with no explanation is how a rig burns hardware time. Each check
+    below separates two hypotheses that look identical from the outside:
+      * capture == UNFILTERED schedule  -> the DSP never ran on the audio
+        thread. PRESet? cannot rule this out: csd_dsp_get_preset() answers
+        what the HOST POSTED, and the audio thread adopts it on the next
+        stream start; csd_dsp_set_rate() only configures the biquad if that
+        adopted preset is already >= FIR, so a stream started before
+        adoption leaves bq_ready==0 and csd_dsp_frame returns byte-exact
+        forever -- silently, by design ("no degraded-mode bypass" covers a
+        different branch).
+      * capture near-constant           -> tap not recording / RX fell back.
+      * capture is our audio but only a fraction of it matches anywhere ->
+        the audio loop stopped mid-stream (the documented fate of any DSP
+        whose cost breaks the per-LRCLK budget: HandleSampleClock sets
+        syncError, the streaming loop exits, audio stops). The tx witness
+        ratio is the tell: one put per channel per frame is expected.
+    """
+    np.save("/tmp/dsp_cap.npy", np.stack([cL, cR]))
+    print(f"  capture saved: /tmp/dsp_cap.npy ({got_n:,} frames x2 ch)")
+    if tx_adv is not None:
+        puts_per_frame = tx_adv / max(1, got_n)
+        print(f"  tx witness {tx_adv:,} puts = {puts_per_frame:.3f} per captured "
+              f"frame (expect 2.0: L+R per LRCLK frame)")
+        if puts_per_frame < 1.9:
+            print("  <== the device stopped producing frames mid-stream: the "
+                  "audio loop left its streaming loop (syncError) -- a DSP "
+                  "cost problem, not an arithmetic one")
+    for name, arr in (("L", cL), ("R", cR)):
+        uniq, cnt = np.unique(arr[:1 << 20], return_counts=True)
+        top = np.argsort(-cnt)[:3]
+        print(f"  distinct {name} in first 1M: {len(uniq):,}; modal "
+              + ", ".join(f"0x{int(uniq[i]):06X}x{int(cnt[i])}" for i in top))
+        if len(uniq) < 1000:
+            print(f"  <== {name} is near-constant: tap disarmed, or RX fell "
+                  f"back to the mic path")
+    # Control: the unfiltered schedule (the DSP-bypassed hypothesis).
+    rL, rR, _ = O.build_block(n_frames)
+    f2, d2 = find_delta(cL, cR, rL.astype(np.int32), rR.astype(np.int32))
+    print(f"  vs UNFILTERED schedule: best {f2}/2048 at delta={d2}"
+          + ("   <== DSP DID NOT RUN (byte-exact bypass)" if f2 >= 2048 else ""))
+    # Membership: is the capture even OUR audio, at any offset at all?
+    rng = np.random.default_rng(7)
+    pick = rng.choice(got_n, size=min(4096, got_n), replace=False)
+    srt = np.sort(uL)
+    hit = int(np.count_nonzero(
+        np.isin(cL[pick], srt, assume_unique=False)))
+    print(f"  {hit}/4096 sampled capture L values exist SOMEWHERE in the "
+          f"filtered schedule")
+    srt_r = np.sort(rL.astype(np.int32))
+    hit_r = int(np.count_nonzero(np.isin(cL[pick], srt_r)))
+    print(f"  {hit_r}/4096 exist in the UNFILTERED schedule")
+    print(f"  head L[:4]={[hex(int(v)) for v in cL[:4]]} "
+          f"tail L[-4:]={[hex(int(v)) for v in cL[-4:]]}")
+    if hit < 200 and hit_r < 200:
+        print("  <== capture is not this block at all: wrong stream, tap not "
+              "armed, or a stale arming from a previous run")
 
 
 def main():
@@ -448,19 +523,19 @@ def main():
 
     # ---- anchor + regions (unit-tested in rig/dsp_model_selftest.py) ------
     frac, delta = find_delta(cL, cR, uL, uR)
-    if delta is None:
-        sys.exit("VOID: no candidate offset in the search window at all")
-    if frac < 8192:
-        # A partial match is diagnostic, not a verdict: close-but-wrong means
-        # the host port is ALMOST right (wrong rounding semantics -- try
-        # --rounding once), while a scattered low count means the capture
-        # never held the stream. Both are loud failures, never a PASS.
-        sys.exit(f"VOID: best offset matched only {frac}/8192 probe frames "
-                 f"(delta={delta}). Near-miss => suspect the host port "
-                 f"(--rounding once); scattered low => suspect the capture "
-                 f"path. one_shot_block.py at preset 0 is the control that "
-                 f"separates the two.")
-    print(f"  anchor: delta={delta:,} matched {frac}/8192 probe frames exactly")
+    if delta is not None and frac >= 2048:
+        print(f"  anchor: delta={delta:,} matched {frac}/2048 probe frames "
+              f"exactly")
+    else:
+        # No honest anchor against the FILTERED expectation. Identify what the
+        # capture actually IS before blaming anything: each hypothesis below
+        # has a different owner, and all of them are cheap against arrays we
+        # already hold. The capture is saved so the answer survives the run.
+        report_why_no_match(cL, cR, uL, uR, n_frames, got_n,
+                            tx_adv=tx_after - tx_before)
+        sys.exit(f"VOID: no anchor against the filtered expectation "
+                 f"(best {frac}/2048 at delta={delta}). The controls above "
+                 f"name the owner.")
     regions = build_regions(cL, cR, uL, uR, delta)
     scored = sum(b - x for (x, b, _) in regions)
     print(f"  regions: {len(regions)}, {scored:,} of {got_n:,} frames "

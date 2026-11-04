@@ -145,7 +145,7 @@ fuR = _np.array([v & 0xFFFFFF for v in _eR], dtype=_np.int64)
 cL = fuL[SHIFT:]; cR = fuR[SHIFT:]       # what the tap returns, no gap
 frac, delta = find_delta(cL, cR, fuL, fuR)
 check("find_delta recovers the known offset",
-      delta == SHIFT and frac == 8192, f"(got delta={delta} frac={frac})")
+      delta == SHIFT and frac >= 2048, f"(got delta={delta} frac={frac})")
 d_ok = delta if delta is not None else SHIFT
 regs = build_regions(cL, cR, fuL, fuR, d_ok)
 cov = sum(b - x for (x, b, _) in regs)
@@ -161,7 +161,7 @@ kept = sum(b - x for (x, b, _) in regs2)
 check("the drop does not void the whole run", kept >= 0.8 * len(cL),
       f"({kept:,} kept)")
 frac_bad, _ = find_delta(cL, cR, fuL ^ 1, fuR ^ 1)
-check("a corrupted expectation anchors LOUD", frac_bad < 8192,
+check("a corrupted expectation anchors LOUD", frac_bad < 2048,
       f"(best {frac_bad}/8192)")
 print("== 4. END-TO-END synthetic: the rig's own pipeline, known answer ==")
 # Every bug this rig has had so far was host-side and needed no hardware:
@@ -191,7 +191,7 @@ capL = uL5[SHIFT5:].copy()
 capR = uR5[SHIFT5:].copy()
 
 f5, d5 = find_delta(capL, capR, uL5, uR5)
-check("e2e: anchor recovers the offset", d5 == SHIFT5 and f5 == 8192,
+check("e2e: anchor recovers the offset", d5 == SHIFT5 and f5 >= 2048,
       f"(delta={d5} frac={f5})")
 regs5 = build_regions(capL, capR, uL5, uR5, d5 if d5 is not None else SHIFT5)
 sc5 = A.score(capL, capR, O.sent_lookup(uL5, uR5), regs5)
@@ -213,7 +213,7 @@ capLn[: -SHIFTN] = -1; capRn[: -SHIFTN] = -1
 capLn[-SHIFTN:] = uL5[: N5 + SHIFTN]
 capRn[-SHIFTN:] = uR5[: N5 + SHIFTN]
 fN, dN = find_delta(capLn, capRn, uL5, uR5)
-check("e2e: negative offset recovered", dN == SHIFTN and fN == 8192,
+check("e2e: negative offset recovered", dN == SHIFTN and fN >= 2048,
       f"(delta={dN} frac={fN})")
 regsN = build_regions(capLn, capRn, uL5, uR5, dN if dN is not None else SHIFTN)
 scN = A.score(capLn, capRn, O.sent_lookup(uL5, uR5), regsN)
@@ -239,7 +239,7 @@ _once = _np3.array(biquad_stream(_wire.tolist(), _c, _l, "once"), dtype=_np3.int
 uL_bad = (_once.astype(_np3.uint32) >> _np3.uint32(8)).astype(_np3.int32)
 f_bad, d_bad = find_delta(capL, capR, uL_bad, uR5)
 check("e2e: a wrong-port expectation anchors LOW, never clean",
-      f_bad < 8192, f"(best {f_bad}/8192)")
+      f_bad < 2048, f"(best {f_bad}/2048)")
 
 print("== 5. self-consistency: zero input stays zero ==")
 z = biquad_stream([0] * 64, BQ[384000][0], 0, "vpu")
