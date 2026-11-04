@@ -225,7 +225,8 @@ class AlsaXrunTracker:
 # ---------------------------------------------------------------------------
 def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
                 marker_len: int = MARKER_LEN, amp_shift: int = 0,
-                dc_pair=None, pip_period: int = 0):
+                dc_pair=None, pip_period: int = 0,
+                impulse=None, step=None):
     """Return (expected_L, expected_R, bytes) for the block we are about to send.
 
     The bytes ARE the expectation: they are produced once here and both written
@@ -250,6 +251,8 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
     # guard's subject, and weakening them would break anchoring at the very
     # moment the signal gets small.
     if amp_shift:
+        if impulse is not None or step is not None or dc_pair is not None:
+            raise ValueError("amp_shift attenuates the noise stimulus only")
         L = (L >> int(amp_shift))
         R = (R >> int(amp_shift))
     if dc_pair is not None:
@@ -268,6 +271,45 @@ def build_block(n_frames: int, marker_period: int = MARKER_PERIOD,
         # would latch, so a bad choice fails loudly rather than lying.
         L[:] = int(dc_pair[0])
         R[:] = int(dc_pair[1])
+    if impulse is not None or step is not None:
+        # Transient stimuli for impulse/step verification. Base is SILENCE,
+        # not noise: a response window must contain the response and nothing
+        # else. Values must avoid the DoP marker top bytes {0x05, 0xFA} by
+        # construction (same rule as the pips: the guard latches on 0x05 then
+        # 0xFA over 4 frames and BYPASSES the FIR).
+        if impulse is not None and step is not None:
+            raise ValueError("impulse and step are mutually exclusive")
+        L[:] = 0
+        R[:] = 0
+        if impulse is not None:
+            vL, vR, per = (int(v) for v in impulse)
+            for name, v in (("impulse L", vL), ("impulse R", vR)):
+                if not 0 < v < (1 << 24):
+                    raise ValueError(f"{name} must be a nonzero 24-bit value")
+                if (v >> 16) in (0x05, 0xFA):
+                    raise ValueError(f"{name} top byte is a DoP marker")
+            # Offset by half a period: marker blocks start every
+            # marker_period frames and stamp AFTER this block, and
+            # marker_period % per == 0 for the default 131072, which would put
+            # every 6th impulse position INSIDE a marker block -- silently
+            # overwritten by SYNC, so 1/6 of the train would never be played.
+            # At +per/2 the nearest approach to a marker start is per/2 =
+            # 65536 frames, far outside the 4096-frame marker length.
+            pos = np.arange(per // 2, n_frames, per)
+            L[pos] = vL
+            R[pos] = vR
+        else:
+            vL, vR, per = (int(v) for v in step)
+            for name, v in (("step L", vL), ("step R", vR)):
+                if not 0 < v < (1 << 24):
+                    raise ValueError(f"{name} must be a nonzero 24-bit value")
+                if (v >> 16) in (0x05, 0xFA):
+                    raise ValueError(f"{name} top byte is a DoP marker")
+            # Square wave: HIGH for `per` frames, LOW for `per` frames. The
+            # LOW half is the decay; the rise edges are the step response.
+            half = (idx // np.uint64(per)) % np.uint64(2) == np.uint64(0)
+            L[half] = vL
+            R[half] = vR
     if pip_period:
         # Sparse unique landmarks, because a constant stimulus leaves the
         # capture with almost nothing rare, and find_delta anchors on values

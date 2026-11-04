@@ -199,9 +199,18 @@ def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
     else:
         coeffs, lsh = BQ[rate]
         tag = "table"
+    # The key MUST carry the stimulus digest: noise, DC and impulse trains at
+    # the same length are different filter runs, and a shape-only key hands
+    # one run another run's expectation (the stale-pairing failure that made
+    # three sweeps void today). Heads+tails are enough: any stimulus change
+    # that matters changes them, and it is O(8k) to hash.
+    import hashlib
+    stim = hashlib.sha1(uL[:4096].tobytes() + uR[:4096].tobytes()
+                        + uL[-4096:].tobytes() + uR[-4096:].tobytes()
+                        ).hexdigest()[:12]
     # .npy, not JSON: 2 x 23M int64 is ~370 MB and json would take minutes
     # and roughly three times the space to say the same thing.
-    cache = (f"/tmp/dsp_expect_{rate}_{rounding}_{len(uL)}_{tag}.npy")
+    cache = (f"/tmp/dsp_expect_{rate}_{rounding}_{len(uL)}_{tag}_{stim}.npy")
     if os.path.exists(cache):
         arr = np.load(cache)
         return arr[0], arr[1]
@@ -261,6 +270,138 @@ def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
     return eL, eR
 
 
+
+
+
+def _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames):
+    """Impulse/step verification against the asm-verified twin.
+
+    Why alignment here comes from the landmarks, not find_delta: a sparse
+    transient train on silence has no rare-value statistics -- 99.99% of
+    frames are one constant value, so the noise anchor has nothing to lock on
+    and using it produced a garbage delta in an earlier attempt. The positions
+    of the played transients are KNOWN (the rig built them), so alignment is
+    recovered by searching the shift that puts a response at every predicted
+    position -- ~176 simultaneous constraints make that peak razor sharp.
+
+    Why averaging is the whole trick: the loopback adds ~21 LSB of its own
+    noise (measured: DC plateau spread 12.7/20.9), which is the SAME size as
+    the residual that defeated single-shot scoring. Averaging ~176 identical
+    responses cuts it by sqrt(176) ~ 13x to ~1.6 LSB, so the response SHAPE
+    becomes testable two orders of magnitude below the single-shot floor.
+
+    Sign convention (pinned by test, see commit 0ed4ae6): capture[i] pairs
+    with schedule[i + delta]; a negative delta means the capture lags.
+    """
+    kind, (vL, vR, per) = trans
+    W = min(4 * 11500, per - per // 2 - 2048)   # ~4 time constants, stay clear
+    PRE = 1024                                   # pre-roll: noise floor + baseline
+    print(f"  transient score: {kind}, window {PRE}..{W} frames around onset "
+          f"(1 frame = {1e6/rate:.2f} us)")
+
+    M = len(expL)
+    if kind == "impulse":
+        pos = np.arange(per // 2, M, per)
+    else:
+        pos = np.arange(0, M, 2 * per)           # rising edges of the square
+    print(f"  landmarks in schedule: {len(pos):,}")
+
+    results = {}
+    for ch, cap_, exp_, amp in ((0, cL, uL, vL), (1, cR, uR, vR)):
+        # ---- locate delta: shift that detects a response at EVERY landmark.
+        # Detection = max|capture| over the first 64 frames after the predicted
+        # onset exceeds 100 LSB -- 5x the single-sample loopback noise, and a
+        # silence base means nothing else can trigger it.
+        cand = []
+        for d in range(-9000, 257):
+            idx = pos - d                       # capture index of onset
+            ok = (idx >= 1) & (idx + 64 < len(cap_))
+            if ok.sum() < 0.9 * len(pos):
+                continue
+            # Fancy-index each landmark's first 64 capture frames: rows are
+            # (capture onset index) + (0..63). The index arithmetic must
+            # happen INSIDE the subscript -- cap_[idx][:,None] + arange adds
+            # the offset to the VALUE instead, which still "finds" large
+            # numbers and fails silently.
+            w = np.abs(cap_[idx[ok][:, None] + np.arange(64)[None, :]])
+            det = int(np.count_nonzero(w.max(axis=1) > 100))
+            cand.append((det, d))
+        cand.sort(reverse=True)
+        if not cand or cand[0][0] < 0.9 * len(pos):
+            sys.exit(f"PROBE FAILURE ch{ch}: best shift {cand[0] if cand else None} "
+                     f"never detects the response at 90% of landmarks -- the "
+                     f"transients are not reaching the tap; device unmeasured.")
+        delta = cand[0][1]
+        margin = f"{cand[0][0]}/{cand[1][0]} at deltas {cand[0][1]}/{cand[1][1]}"
+        print(f"  ch{ch}: delta={delta} frames ({-delta/rate*1e6:.1f} us "
+              f"{'-lag' if delta < 0 else '+lead'} vs schedule), winner {margin}")
+
+        # ---- average the responses
+        idx = pos - delta
+        ok = (idx - PRE >= 0) & (idx + W + 64 < len(cap_))
+        idx = idx[ok]
+        offs = np.arange(-PRE, W)
+        A = cap_[idx[:, None] + offs[None, :]].astype(np.float64)
+        T = exp_[pos[ok][:, None] + offs[None, :]].astype(np.float64)
+        Am, Tm = A.mean(axis=0), T.mean(axis=0)
+        preA = A[:, :PRE]; preT = T[:, :PRE]
+        noise_pre = float(np.std(preA, axis=0).mean()) / np.sqrt(A.shape[0])
+        d = Am - Tm
+        rms_t = float(np.sqrt((Tm[PRE:] ** 2).mean()))
+        snr = 20 * np.log10(rms_t / max(1e-9, float(np.sqrt((d[PRE:] ** 2).mean()))))
+        peakA, peakT = float(Am.max()), float(Tm.max())
+        print(f"  ch{ch}: n={len(idx):,} averaged; peak measured {peakA:,.0f} "
+              f"vs twin {peakT:,.0f} (played {amp:,}); "
+              f"max|A-T| {np.abs(d).max():.1f}  median {np.median(np.abs(d)):.1f} "
+              f"LSB; SNR {snr:.1f} dB; pre-roll noise/avg {noise_pre:.2f} LSB")
+        # sub-frame check: shifting the twin by +-1 frame must be WORSE
+        d1 = np.abs(Am[PRE:] - np.roll(Tm, 1)[PRE:]).mean()
+        dm1 = np.abs(Am[PRE:] - np.roll(Tm, -1)[PRE:]).mean()
+        d0 = np.abs(d[PRE:]).mean()
+        align_ok = d0 <= d1 and d0 <= dm1
+        print(f"  ch{ch}: integer-frame alignment "
+              f"{'OPTIMAL' if align_ok else 'NOT optimal'} "
+              f"(mean|d| at -1/0/+1 frame: {dm1:.1f}/{d0:.1f}/{d1:.1f})")
+        results[ch] = dict(Am=Am, Tm=Tm, offs=offs, delta=delta, n=len(idx),
+                           peakA=peakA, peakT=peakT, snr=snr, amp=amp,
+                           maxd=float(np.abs(d).max()))
+
+    # ---- plot ----------------------------------------------------------------
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+    ms = (results[0]["offs"] / rate) * 1e3
+    for ch, ax in ((0, axes[0]), (1, axes[1])):
+        r = results[ch]
+        ax.plot(ms, r["Am"], lw=0.9, color="C0",
+                label=f"device (avg of {r['n']:,})")
+        ax.plot(ms, r["Tm"], lw=0.9, color="C3", ls="--", label="twin (asm-verified)")
+        ax.axvline(0, color="k", lw=0.5)
+        ax.axvspan(ms[0], ms[PRE], color="0.9", lw=0)
+        ax.set_yscale("symlog", linthresh=100)
+        ax.set_ylabel("24-bit field LSB")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.set_title(f"{kind} response, ch{'LR'[ch]}  "
+                     f"latency {-r['delta']} frames = {-r['delta']/rate*1e6:.1f} us  |  "
+                     f"peak dev {r['peakA']:,.0f} vs twin {r['peakT']:,.0f}  |  "
+                     f"max|diff| {r['maxd']:.1f} LSB  SNR {r['snr']:.0f} dB",
+                     fontsize=9)
+    axes[1].set_xlabel("ms from onset (shaded = pre-roll, the noise floor)")
+    axes[1].set_xlim(ms[0], min(ms[-1], 30))
+    fig.suptitle(f"CSD DSP preset 2 {kind} response @ {rate} Hz "
+                 f"(amp L 0x{vL:06X} R 0x{vR:06X}, period {per:,} frames)",
+                 fontsize=10)
+    fig.tight_layout()
+    out = f"/tmp/dsp_{kind}_response.png"
+    fig.savefig(out, dpi=130)
+    print(f"  plot: {out}")
+
+    ok = all(r["maxd"] < 20 and abs(r["peakA"] - r["peakT"]) < 10
+             for r in results.values())
+    print(f"  VERDICT {'PASS' if ok else 'FAIL'}: response matches the "
+          f"asm-verified twin {'within' if ok else 'NOT within'} 20 LSB "
+          f"(loopback avg noise ~{noise_pre:.1f} LSB)")
 
 
 def _replay_score(a, expL, expR, rate):
@@ -614,6 +755,23 @@ def main():
                          "drift between generator and firmware) from an "
                          "arithmetic cause. Baseline is scored first and "
                          "printed; every hypothesis must be read against it.")
+    ap.add_argument("--transient", choices=["impulse", "step"], default=None,
+                    help="impulse/step verification instead of the noise "
+                         "block: plays a sparse impulse train (or square "
+                         "wave) on silence, scores the response against the "
+                         "asm-verified twin, and writes a PNG. Alignment "
+                         "comes from the known landmark positions, NOT from "
+                         "find_delta -- a sparse transient train has no "
+                         "rare-value statistics to anchor on.")
+    ap.add_argument("--trans-amp", default="0x400002,0x280003", metavar="L,R",
+                    help="24-bit stimulus amplitude per channel (signed 24-bit "
+                         "field). Values and silence must avoid the DoP marker "
+                         "top bytes {0x05,0xFA}; the builder rejects them.")
+    ap.add_argument("--trans-period", type=int, default=131072,
+                    help="frames between impulses (or square-wave half "
+                         "period). Must exceed 5 time constants of the "
+                         "shelf's pole (~11,500 samples each) so each "
+                         "response decays before the next landmark.")
     ap.add_argument("--dc", default=None, metavar="L,R",
                     help="constant stimulus (hex 24-bit, e.g. 0x123456,0x345612) "
                          "instead of noise: isolates the recursion, since the "
@@ -660,10 +818,33 @@ def main():
         print(f"  stimulus: DC L=0x{dc_pair[0]:06X} R=0x{dc_pair[1]:06X} "
               f"(top bytes avoid DoP); unique landmark pips every "
               f"{CHUNK_FRAMES:,} frames")
+    trans = None
+    if a.transient:
+        try:
+            tl, tr = a.trans_amp.split(",")
+            vL, vR = int(tl, 16), int(tr, 16)
+        except ValueError:
+            sys.exit("--trans-amp wants L,R as hex 24-bit, e.g. 0x400002,0x280003")
+        if vL == vR:
+            sys.exit("--trans-amp channels must differ: equal values cannot "
+                     "detect a channel cross-wire")
+        if a.transient == "impulse":
+            trans = ("impulse", (vL, vR, a.trans_period))
+        else:
+            trans = ("step", (vL, vR, a.trans_period))
+        print(f"  stimulus: {a.transient} L=0x{vL:06X} R=0x{vR:06X} every "
+              f"{a.trans_period:,} frames ({a.trans_period/rate*1000:.1f} ms), "
+              f"base silence; pole time constant ~{11500:,} samples so "
+              f"{a.trans_period // 11500} time constants between landmarks")
     expL, expR, block = O.build_block(n_frames, amp_shift=a.amp_shift,
                                       dc_pair=dc_pair,
                                       pip_period=(CHUNK_FRAMES if dc_pair
-                                                  else 0))
+                                                  else 0),
+                                      impulse=(trans[1] if trans
+                                               and trans[0] == "impulse"
+                                               else None),
+                                      step=(trans[1] if trans
+                                            and trans[0] == "step" else None))
     print(f"  block {n_frames:,} frames, markers every {MARKER_PERIOD:,}")
 
     # Vectorised: a Python list over 23M frames cost ~1 GB and is what got
@@ -824,6 +1005,10 @@ def main():
     # every path that produced it, stamped with the run that made it.
     np.save(f"/tmp/dsp_cap_run_{int(a.amp_shift)}_{int(time.time())}.npy",
             np.stack([cL, cR]))
+
+    if trans:
+        _transient_score(a, cL, cR, expL, expR, uL, uR, rate, trans, n_frames)
+        return
 
     # ---- anchor + regions (unit-tested in rig/dsp_model_selftest.py) ------
     delta, mass, n_spike, n_pairs = find_delta(cL, cR, uL, uR)
