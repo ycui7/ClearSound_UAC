@@ -184,13 +184,24 @@ def derive_sync(uL, uR, rate, need=1024):
     return None
 
 
-def filtered_expectation(uL, uR, rate, rounding):
+def filtered_expectation(uL, uR, rate, rounding, coeffs_override=None):
     """int32 words the DSP will see (v24 << 8, signed) -> filtered int32 words.
-    Cached: the loop is sequential (IIR), so re-running costs minutes."""
-    coeffs, lsh = BQ[rate]
+    Cached: the loop is sequential (IIR), so re-running costs minutes.
+
+    coeffs_override=(coeffs, lsh) filters with an ALTERNATIVE coefficient set
+    (used by --replay's detune sweep). The cache key MUST carry the set: the
+    first version keyed only (rate, rounding, len), so a swept run would have
+    read back the nominal-table array from cache and scored every hypothesis
+    against the same wrong expectation."""
+    if coeffs_override is not None:
+        coeffs, lsh = coeffs_override
+        tag = "_".join(str(int(c)) for c in coeffs) + f"_lsh{int(lsh)}"
+    else:
+        coeffs, lsh = BQ[rate]
+        tag = "table"
     # .npy, not JSON: 2 x 23M int64 is ~370 MB and json would take minutes
     # and roughly three times the space to say the same thing.
-    cache = (f"/tmp/dsp_expect_{rate}_{rounding}_{len(uL)}.npy")
+    cache = (f"/tmp/dsp_expect_{rate}_{rounding}_{len(uL)}_{tag}.npy")
     if os.path.exists(cache):
         arr = np.load(cache)
         return arr[0], arr[1]
@@ -238,6 +249,105 @@ def filtered_expectation(uL, uR, rate, rounding):
     os.remove(inf); os.remove(outf)
     return eL, eR
 
+
+
+
+def _replay_score(a, expL, expR, rate):
+    """Score a saved capture against alternative coefficient sets, in-process.
+
+    Why this lives INSIDE the rig rather than as a standalone script: three
+    offline attempts each broke on capture/schedule bookkeeping -- pairing a
+    new capture with an old saved schedule, feeding find_delta a wire word
+    where it expects the 24-bit field, and anchoring against the RAW schedule
+    (the flat control, 4/572,956) instead of the filtered one. The rig already
+    owns the correct domains and the deterministic block; reusing its code
+    removes the whole bug class instead of re-deriving it per script.
+
+    delta is located once at eps=0 and then HELD FIXED: it is a timing
+    property of the run, not a function of the coefficients, and letting it
+    float per eps would let each hypothesis silently re-anchor itself."""
+    import importlib.util as _il
+    here = os.path.dirname(os.path.abspath(__file__))
+    gen_path = os.path.join(here, "..", "..", "tools", "dsp", "gen_biquad.py")
+    spec_ = _il.spec_from_file_location("gen_biquad", gen_path)
+    gb = _il.module_from_spec(spec_)
+    spec_.loader.exec_module(gb)
+    # sanity: the generator must reproduce the shipped table, or the sweep is
+    # comparing the device against a filter nobody ever built
+    c_chk, l_chk = gb.shelf_coeffs(rate)
+    if list(c_chk) != list(BQ[rate][0]) or l_chk != BQ[rate][1]:
+        sys.exit(f"replay: generator disagrees with the shipped table at "
+                 f"{rate} Hz: {c_chk} lsh={l_chk}")
+    arr = np.load(a.replay)
+    cL = arr[0].astype(np.int32)
+    cR = arr[1].astype(np.int32)
+    got_n = int(arr.shape[1])
+    del arr
+    print(f"replay {a.replay}: {got_n:,} frames x2 ch; block "
+          f"{len(expL):,} frames (same flags as the live run)")
+
+    eps_list = [0.0]
+    if a.sweep_ppm:
+        eps_list += [float(x) * 1e-6 for x in a.sweep_ppm.split(",") if x.strip()]
+
+    delta0 = None
+    results = []
+    for j, eps in enumerate(eps_list):
+        if eps:
+            cb, lb = gb.shelf_coeffs(rate * (1.0 + eps))
+            if list(cb) == list(BQ[rate][0]) and lb == BQ[rate][1]:
+                print(f"  eps={eps*1e6:+7.1f} ppm  coeffs quantise "
+                      f"identically -- invisible to the integer engine")
+                continue
+            co = (cb, lb)
+        else:
+            co = None
+        eL, eR = filtered_expectation(expL.astype(np.int32),
+                                      expR.astype(np.int32), rate,
+                                      a.rounding, coeffs_override=co)
+        uL = (eL.astype(np.uint32) >> np.uint32(8)).astype(np.int32)
+        uR = (eR.astype(np.uint32) >> np.uint32(8)).astype(np.int32)
+        del eL, eR
+        if delta0 is None:
+            delta0, mass0, sp0, pr0 = find_delta(cL, cR, uL, uR)
+            if delta0 is None or mass0 < 0.002:
+                sys.exit(f"PROBE FAILURE: capture will not anchor against the "
+                         f"rebuilt schedule (mass "
+                         f"{100*(mass0 or 0):.3f}%). The capture and the "
+                         f"stimulus differ; check --minutes/--amp-shift match "
+                         f"the live run. No verdict.")
+            print(f"  anchor: delta={delta0} mass={100*mass0:.2f}% "
+                  f"spike={sp0:,}/{pr0:,}")
+        n = min(got_n, len(uL) - delta0)
+        i = np.arange(n, dtype=np.int64)
+        meds, exs = [], []
+        for cap_, exp_ in ((cL, uL), (cR, uR)):
+            d = np.abs(cap_[i].astype(np.int64)
+                       - exp_[i + delta0].astype(np.int64))
+            meds.append(float(np.median(d)))
+            exs.append(float(np.mean(d == 0)) * 100)
+        med, ex = max(meds), min(exs)
+        results.append((med, eps))
+        print(f"  eps={eps*1e6:+7.1f} ppm  median|d|={med:9.0f}  "
+              f"exact={ex:6.3f}%")
+        if j == 0:
+            # MUST-PASS: eps=0 must reproduce what the live run printed
+            # (median ~21 on the amp0 capture). A harness that cannot repeat
+            # a known number may not report a sweep.
+            if not (5 <= med <= 60):
+                sys.exit(f"MUST-PASS FAILED: eps=0 median {med:.0f}, expected "
+                         f"~21. Replay harness is broken; sweep void.")
+    results.sort()
+    med_b, eps_b = results[0]
+    med0 = next(m for m, e in results if e == 0.0)
+    print(f"  best: eps={eps_b*1e6:+.1f} ppm median|d|={med_b:.0f} "
+          f"(baseline {med0:.0f})")
+    if med_b < 0.3 * med0:
+        print(f"  ==> the residual IS a detuned shelf: the device clock sits "
+              f"~{-eps_b*1e6:+.0f} ppm off {rate} Hz")
+    else:
+        print("  ==> no detune collapses the residual; sample-clock error is "
+              "not the explanation")
 
 
 def find_delta(cL, cR, uL, uR, min_mass=0.002):
@@ -430,6 +540,21 @@ def main():
     ap.add_argument("--rounding", choices=["vpu", "once"], default="vpu")
     ap.add_argument("--mixer", action="store_true")
     ap.add_argument("--preset", type=int, default=2)
+    ap.add_argument("--replay", metavar="NPY", default=None,
+                    help="score a saved capture (np.stack([cL,cR]) as written "
+                         "by a prior run) instead of streaming the device. "
+                         "The rig rebuilds the schedule with the SAME flags "
+                         "(--minutes, --amp-shift) -- never pair a capture "
+                         "with files saved by another run. Host-only: no "
+                         "device contact.")
+    ap.add_argument("--sweep-ppm", default=None,
+                    help="comma list of design-rate offsets in ppm; with "
+                         "--replay, score the capture against shelf "
+                         "coefficients generated at rate*(1+eps) for each. "
+                         "Tests whether the residual is a detuned filter "
+                         "(device clock off nominal). eps=0 runs first and "
+                         "MUST reproduce the known residual or the sweep "
+                         "aborts.")
     ap.add_argument("--amp-shift", type=int, default=0,
                     help="attenuate the stimulus noise by 2**-N before the DAC. "
                          "Absolute per-step effects (state quantization, an "
@@ -500,6 +625,10 @@ def main():
     # expectation makes the rest of this rig work unchanged -- the 24-bit score
     # reduces to what one_shot_block measured, and the strict block compares
     # full 32-bit words, which is the new information.
+    if a.replay:
+        _replay_score(a, expL, expR, rate)
+        return
+
     if a.preset == 0:
         print("  preset 0: expectation = the words SENT (identity bypass).")
         print("  PASS here requires the STRICT 32-bit compare to be clean, so")
