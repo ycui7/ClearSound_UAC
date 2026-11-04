@@ -12,6 +12,33 @@
   <Packages>
     <Package id="0" Type="XS3-UnA-1024-QF60A">
       <Nodes>
+        <!-- Core clock: 600MHz, the part's rated speed (C24/I24 row; this board
+             is a C32 die, rated f(MAX)=800MHz per the XU316 datasheet ordering
+             table and the XK-EVK-XU316 board manual).
+
+             Held at 600MHz by owner directive (2026-11-04): qualify 384 kHz at
+             the rated clock with the mixer OUT of the path before adopting a
+             faster clock. Set SystemFrequency="800MHz" only to reproduce the
+             diagnostic that showed the clock was the missing budget:
+               capture fill at 384 kHz, shipping shape MIXER=1 MAX_MIX_COUNT=2
+                 preset 2   0.637 (600MHz) -> 0.851 (800MHz)
+                 preset 0   0.764 (600MHz) -> 0.9995 (800MHz)
+               MIXER=0, preset 0: 0.9995 at 600MHz -- the mixer relay inside
+               audio()'s 781-tick half-frame deadline is the dominant term, so
+               the software fix is to shorten that relay, not to raise the clock.
+             Rejected as fixes (one boot each, runtime levers only): priority
+             thread on the audio core 0.6374, on mixer1 0.6374, tap
+             instrumentation removed 0.639, generator compiled out 0.6389.
+
+             Package note: this file says XS3-UnA-1024-QF60A while the board
+             manual says FB265, so do not treat it as an authoritative device
+             description. Pin map IS correct for the bench board: HEAD carries
+             main's map (BCLK=1A, LRCLK=1B, DAC_DATA=1C), identical to
+             archive_revBB/ClearSoundDac_revBB.xn -- the mvp rotation
+             (BCLK=1B, LRCLK=1C, DAC_DATA=1A, the one that silences the bench
+             DAC at ~-87 dBFS) lived in merge commit 71c79b0 and is NOT in this
+             file. (An earlier note here claimed the opposite; it had the two
+             maps inverted. Verify against AGENTS.md before acting on either.) -->
         <Node Id="0" InPackageId="0" Type="XS3-L16A-1024" Oscillator="24MHz" SystemFrequency="600MHz" ReferenceFrequency="100MHz">
           <Boot>
             <Source Location="bootFlash"/>
