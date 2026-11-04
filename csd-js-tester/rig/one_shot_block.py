@@ -287,7 +287,7 @@ def sent_lookup(expL, expR):
 # ---------------------------------------------------------------------------
 # The two dumb pipes. No analysis in either.
 # ---------------------------------------------------------------------------
-def arm_device():
+def arm_device(mixer_declared=False):
     """Every gate the proven rig applies, before a single frame is played.
 
     Reused rather than re-derived, because each of these was learned the
@@ -313,23 +313,31 @@ def arm_device():
     if got.split(",")[0].strip() != "0":
         die(f"DSP preset is {got!r}, not 0 -- the FIR rewrites every sample, "
             f"so the device would not be bit-exact with itself by construction")
+    # MIXer:GAIN? is PRODUCTION SURFACE: csd_diag_scpi.c:1012-1019 lists it among
+    # the commands that "stay in every build", and its table row carries no
+    # #if MIXER guard. So it answers on MIXER=0 builds too and CANNOT reveal the
+    # build shape. An earlier version branched on "row absent -> no mixer in this
+    # build"; that premise never held, and the branch before it -- a startswith
+    # against ("err", "") -- was dead code, since "" is a prefix of every string,
+    # so no version of this gate ever actually ran.
+    #
+    # Shape is therefore DECLARED, not inferred: the caller knows which .xe it
+    # loaded and what flags built it. --mixer makes unity a hard gate; without it
+    # the value is printed as information only, because on a MIXER=0 build nothing
+    # scales the stream digitally and a mailbox word nobody writes must not be
+    # able to block a passing run.
     got = scpi("MIXer:GAIN?")
-    # NOTE: an earlier version tested `got.lower().startswith(("err", ""))`,
-    # which is TRUE for every string -- "" is a prefix of all strings -- so this
-    # gate NEVER RAN and every run, including MIXER=1 builds, printed "NO MIXER
-    # IN THIS BUILD". A gate that silently skips is worse than no gate: it reads
-    # as verified. Detect a missing row by an actual error/empty reply instead.
-    missing = (not got) or got.lower().startswith(("err", "undefined", "unknown"))
-    if not missing:
+    if mixer_declared:
         require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
         got = scpi("MIXer:GAIN?")
         if got.split(",")[0].strip() != "32768":
             die(f"mixer host gain is {got!r}, not Q15 unity 32768 -- the stream "
                 f"reaching I2S is scaled, so it cannot match what we sent")
-        print(f"  mixer host gain = unity ({got})")
+        print(f"  mixer host gain = unity ({got}) [MIXER=1 declared: enforced]")
     else:
-        print(f"  mixer host gain: row absent ({got!r}) -- nothing scales the "
-              "stream digitally; codec readback below is the remaining gate")
+        print(f"  mixer host gain ({got}) [informational: build not declared "
+              "MIXER=1; if it is a MIXER=1 build, pass --mixer or a scaled "
+              "stream slips past this gate]")
     import base64
     for reg, mask, why in ((0x07, 0x00000001, "system mute off (bit0)"),
                            (0x0F, 0x00FFFFFF, "digital vol L = 0 dB"),
@@ -516,6 +524,10 @@ def main(argv=None):
     ap.add_argument("--probe-stride", type=int, default=A.PROBE_STRIDE,
                     help="frames between offset probes; must stay well under "
                          "48*8 to see a single dropped packet boundary")
+    ap.add_argument("--mixer", action="store_true",
+                    help="declare a MIXER=1 build: pins and enforces mixer host "
+                         "gain at Q15 unity. MIXer:GAIN? is production surface "
+                         "and cannot reveal build shape, so shape is declared.")
     ap.add_argument("--skip-arm", action="store_true",
                     help="do not apply the device gates/arm the tap (a run "
                          "without them is unfalsifiable; use only when the "
@@ -561,7 +573,7 @@ def main(argv=None):
               "silence, and the tx_frames witness below is the only thing "
               "standing between that and a false verdict.")
     else:
-        arm_device()
+        arm_device(mixer_declared=a.mixer)
     # Arm as late as possible and read the witness immediately: every `xrun
     # --io` reload resets the tap, so arming is part of THIS run's proof and
     # cannot be inherited from whatever ran before it.
