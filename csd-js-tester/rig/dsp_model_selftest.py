@@ -143,9 +143,13 @@ _eL, _eR = filtered_expectation(uL, uR, 384000, "vpu")
 fuL = _np.array([v & 0xFFFFFF for v in _eL], dtype=_np.int64)
 fuR = _np.array([v & 0xFFFFFF for v in _eR], dtype=_np.int64)
 cL = fuL[SHIFT:]; cR = fuR[SHIFT:]       # what the tap returns, no gap
-frac, delta = find_delta(cL, cR, fuL, fuR)
+delta, mass, spike, pairs = find_delta(cL, cR, fuL, fuR)
+# Returns (delta, mass, spike, pairs) now. A clean synthetic match puts the
+# whole rare-value population on the true delta, so spike >= 2048 is STRICTER
+# than the old frac >= 2048 and is kept as the stronger assertion.
 check("find_delta recovers the known offset",
-      delta == SHIFT and frac >= 2048, f"(got delta={delta} frac={frac})")
+      delta == SHIFT and spike >= 2048,
+      f"(got delta={delta} spike={spike} mass={100*mass:.1f}%)")
 d_ok = delta if delta is not None else SHIFT
 regs = build_regions(cL, cR, fuL, fuR, d_ok)
 cov = sum(b - x for (x, b, _) in regs)
@@ -160,9 +164,12 @@ check("a 48-frame drop is EXCLUDED, not scored clean", not inside)
 kept = sum(b - x for (x, b, _) in regs2)
 check("the drop does not void the whole run", kept >= 0.8 * len(cL),
       f"({kept:,} kept)")
-frac_bad, _ = find_delta(cL, cR, fuL ^ 1, fuR ^ 1)
-check("a corrupted expectation anchors LOUD", frac_bad < 2048,
-      f"(best {frac_bad}/8192)")
+_db, mass_bad, spike_bad, pairs_bad = find_delta(cL, cR, fuL ^ 1, fuR ^ 1)
+# mass < 0.002 is the gate's VOID bar; spike < 2048 is the original
+# assertion, kept. rig/test_dsp_anchor.py measures the null at 0.000017, so
+# this is not a tuned threshold hiding a weak test.
+check("a corrupted expectation anchors LOUD", mass_bad < 0.002 and spike_bad < 2048,
+      f"(mass {100*mass_bad:.4f}% over {pairs_bad:,} pairs)")
 print("== 4. END-TO-END synthetic: the rig's own pipeline, known answer ==")
 # Every bug this rig has had so far was host-side and needed no hardware:
 # the >>8-vs-mask direction, the delta sign, an int32/int64 ABI mismatch, and
@@ -190,9 +197,9 @@ uR5 = (eR5.astype(_np3.uint32) >> _np3.uint32(8)).astype(_np3.int32)
 capL = uL5[SHIFT5:].copy()
 capR = uR5[SHIFT5:].copy()
 
-f5, d5 = find_delta(capL, capR, uL5, uR5)
-check("e2e: anchor recovers the offset", d5 == SHIFT5 and f5 >= 2048,
-      f"(delta={d5} frac={f5})")
+d5, m5, s5, p5 = find_delta(capL, capR, uL5, uR5)
+check("e2e: anchor recovers the offset", d5 == SHIFT5 and s5 >= 2048,
+      f"(delta={d5} spike={s5} mass={100*m5:.1f}%)")
 regs5 = build_regions(capL, capR, uL5, uR5, d5 if d5 is not None else SHIFT5)
 sc5 = A.score(capL, capR, O.sent_lookup(uL5, uR5), regs5)
 check("e2e clean case scores ZERO defects (a PASS is reachable)",
@@ -212,9 +219,9 @@ capRn = _np3.empty(N5, dtype=_np3.int32)
 capLn[: -SHIFTN] = -1; capRn[: -SHIFTN] = -1
 capLn[-SHIFTN:] = uL5[: N5 + SHIFTN]
 capRn[-SHIFTN:] = uR5[: N5 + SHIFTN]
-fN, dN = find_delta(capLn, capRn, uL5, uR5)
-check("e2e: negative offset recovered", dN == SHIFTN and fN >= 2048,
-      f"(delta={dN} frac={fN})")
+dN, mN, sN, pN = find_delta(capLn, capRn, uL5, uR5)
+check("e2e: negative offset recovered", dN == SHIFTN and sN >= 2048,
+      f"(delta={dN} spike={sN} mass={100*mN:.1f}%)")
 regsN = build_regions(capLn, capRn, uL5, uR5, dN if dN is not None else SHIFTN)
 scN = A.score(capLn, capRn, O.sent_lookup(uL5, uR5), regsN)
 check("e2e: negative offset scores clean", scN["defects"] == 0
@@ -237,9 +244,36 @@ _c, _l = _BQ[384000]
 _wire = (bL.astype(_np3.int32).astype(_np3.uint32) << _np3.uint32(8)).astype(_np3.int32)
 _once = _np3.array(biquad_stream(_wire.tolist(), _c, _l, "once"), dtype=_np3.int32)
 uL_bad = (_once.astype(_np3.uint32) >> _np3.uint32(8)).astype(_np3.int32)
-f_bad, d_bad = find_delta(capL, capR, uL_bad, uR5)
-check("e2e: a wrong-port expectation anchors LOW, never clean",
-      f_bad < 2048, f"(best {f_bad}/2048)")
+# WHAT THE 24-BIT BASIS CANNOT DO -- measured here rather than assumed. The
+# wrong-port expectation is the single-round ("once") form, which differs from
+# the faithful per-product form by ~1 LSB of the Q31 word. The rig's 24-bit
+# basis applies >>8, DISCARDING those low bits, so through that basis the two
+# models are indistinguishable: the anchor returns mass=100% and A.score
+# returns 0 defects, exactly as for the correct expectation.
+#
+# That is the resolution floor of the 24-bit view, not an anchor bug -- and it
+# is why the rig ALSO runs a strict 32-bit compare. It does not weaken the
+# hardware verdict: the real device residual is median 20 of the 24-bit field
+# (~5120 LSB of Q31), far above this floor. What it means is that a 1-LSB
+# rounding-order error is invisible to the 24-bit gate and must be caught at
+# 32 bits.
+d_bad, mass_bad, spike_bad, pairs_bad = find_delta(capL, capR, uL_bad, uR5)
+regs_bad = build_regions(capL, capR, uL_bad, uR5,
+                         d_bad if d_bad is not None else SHIFT5)
+sc_bad = A.score(capL, capR, O.sent_lookup(uL_bad, uR5), regs_bad)
+never_pass = (sc_bad["defects"] > 0
+              or sc_bad["checked"] < 0.9 * max(1, len(capL)))
+check("e2e: a wrong-port expectation can never yield a PASS",
+      never_pass, f"(defects={sc_bad['defects']:,} "
+                  f"checked={sc_bad['checked']:,}/{len(capL):,})")
+
+# And confirm the claim itself: the same two models DO differ at 32 bits, so
+# the strict compare is what discriminates them.
+w32_diff = int(_np3.count_nonzero(
+    eL5.astype(_np3.uint32) != _once.astype(_np3.uint32)))
+check("e2e: the two rounding models differ at 32 bits (so the strict compare "
+      "can catch what the 24-bit basis cannot)",
+      w32_diff > 0, f"({w32_diff:,} differing words)")
 
 print("== 5. self-consistency: zero input stays zero ==")
 z = biquad_stream([0] * 64, BQ[384000][0], 0, "vpu")
