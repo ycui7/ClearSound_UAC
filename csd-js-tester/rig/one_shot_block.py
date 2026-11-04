@@ -314,7 +314,13 @@ def arm_device():
         die(f"DSP preset is {got!r}, not 0 -- the FIR rewrites every sample, "
             f"so the device would not be bit-exact with itself by construction")
     got = scpi("MIXer:GAIN?")
-    if got and not got.lower().startswith(("err", "")):
+    # NOTE: an earlier version tested `got.lower().startswith(("err", ""))`,
+    # which is TRUE for every string -- "" is a prefix of all strings -- so this
+    # gate NEVER RAN and every run, including MIXER=1 builds, printed "NO MIXER
+    # IN THIS BUILD". A gate that silently skips is worse than no gate: it reads
+    # as verified. Detect a missing row by an actual error/empty reply instead.
+    missing = (not got) or got.lower().startswith(("err", "undefined", "unknown"))
+    if not missing:
         require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
         got = scpi("MIXer:GAIN?")
         if got.split(",")[0].strip() != "32768":
@@ -322,7 +328,7 @@ def arm_device():
                 f"reaching I2S is scaled, so it cannot match what we sent")
         print(f"  mixer host gain = unity ({got})")
     else:
-        print("  mixer host gain: NO MIXER IN THIS BUILD -- nothing scales the "
+        print(f"  mixer host gain: row absent ({got!r}) -- nothing scales the "
               "stream digitally; codec readback below is the remaining gate")
     import base64
     for reg, mask, why in ((0x07, 0x00000001, "system mute off (bit0)"),

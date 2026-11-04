@@ -768,7 +768,16 @@ def main():
         # readback below (regs 0x0F/0x10 = 0 dB, 0x07 unmuted, 0x03 analog max) is
         # the gate that still applies, and it stays mandatory either way.
         got = scpi("MIXer:GAIN?")
-        if got and not got.lower().startswith(("err", "")):
+        # NOTE: this line read `not got.lower().startswith(("err", ""))` until
+        # 2026-11-04. "" is a prefix of EVERY string, so the condition was
+        # always False and the unity-gain gate NEVER RAN -- every run, MIXER=1
+        # builds included, printed "NO MIXER IN THIS BUILD". A gate that
+        # silently skips is worse than no gate: it reads as verified, and it
+        # was accidentally correct on MIXER=0 builds, which is why it survived.
+        # A missing row is now detected by an actual error/empty reply.
+        missing = (not got) or got.lower().startswith(
+            ("err", "undefined", "unknown"))
+        if not missing:
             require("MIXer:GAIN:HOST 32768", what="mixer host gain to unity")
             got = scpi("MIXer:GAIN?")
             if got.split(",")[0].strip() != "32768":
