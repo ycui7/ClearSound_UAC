@@ -5,18 +5,12 @@
  */
 #include "csd_power_state.h"
 #include "csd_gen.h"
+#include "csd_power.h"      /* the platform half of the idle-power contract */
 
 /* ------------------------------ TILE[1]: stream witness -------------------- */
 
 static volatile unsigned pw_host_activity = 0u;
 static volatile unsigned pw_host_frames   = 0u;
-
-/* DIAGNOSTIC (temporary): what are the words the witness keeps counting when
- * nothing is playing? min/max/last + how many DISTINCT values, so the bench
- * can tell a constant fill word from a live stream from stale buffer content
- * without a logic analyser. */
-static volatile unsigned pw_dbg_min = 0xFFFFFFFFu, pw_dbg_max = 0u, pw_dbg_last = 0u,
-                         pw_dbg_distinct = 0u, pw_dbg_prev = 0xFFFFFFFFu;
 
 void csd_pw_note_host_sample(unsigned ch, int sample)
 {
@@ -28,21 +22,37 @@ void csd_pw_note_host_sample(unsigned ch, int sample)
 }
 unsigned csd_pw_host_activity(void) { return pw_host_activity; }
 
-void csd_pw_dbg_reset(void)
-{
-    pw_dbg_min = 0xFFFFFFFFu; pw_dbg_max = 0u; pw_dbg_last = 0u;
-    pw_dbg_distinct = 0u; pw_dbg_prev = 0xFFFFFFFFu;
-}
-unsigned csd_pw_dbg_word(unsigned which)
-{
-    switch (which) {
-        case 0u: return pw_dbg_min;
-        case 1u: return pw_dbg_max;
-        case 2u: return pw_dbg_last;
-        default: return pw_dbg_distinct;
-    }
-}
 unsigned csd_pw_host_frames(void)   { return pw_host_frames; }
+
+/* csd_power's witness: "has real audio arrived since the last ask?". Sits with
+ * the counters it reads, so the cursor cannot drift from the thing counted.
+ *
+ * Edge-consuming by contract, which is what lets a teardown ask "did audio
+ * return while we were busy?" and get a truthful answer rather than "audio was
+ * playing at some point". Note it reads the SAME counter the trace prints, so
+ * the print and the decision cannot disagree.
+ *
+ * What counts as real is decided by csd_pw_note_host_sample: non-zero, and not
+ * the buffer path's underfill word. An LRCLK that toggles with a silent bus is
+ * not a stream -- measured with the box quiet, this counter sat frozen at
+ * 868140 while pw_host_frames climbed to 12.4 M in the same 10 s window. */
+unsigned csd_pw_audio_arrived(void)
+{
+    static unsigned cursor = 0u;
+    unsigned a = pw_host_activity;
+    if (a == cursor) return 0u;
+    cursor = a;
+    return 1u;
+}
+
+/* No word census here. A previous cut exposed min/max/last/distinct getters
+ * that NOTHING ever wrote -- csd_pw_note_host_sample does not touch them -- so
+ * every 'PWTRACE words min=0x...' line the bench printed was a pair of
+ * initialisers dressed as a measurement. Deleting them rather than completing
+ * them: act-vs-frames already separates 'streaming' from 'clock alive, bus
+ * silent', which is the only question that was ever answered from them. If a
+ * real census is wanted, it must be written in note_host_sample and proven to
+ * change on a known-good tone before anyone quotes it. */
 
 /* ------------------------------ TILE[1]: DSP bypass ------------------------ */
 

@@ -113,8 +113,4 @@ unsigned csd_pw_trim_boot_should_write(unsigned q31);
 #define CSD_PW_CMD_VOL_RESTORE  0x43u  /* saved level back after re-init    */
 #define CSD_PW_CMD_AMP_ON       0x44u  /* AMP_EN high -- LAST in the wake   */
 
-/* DIAGNOSTIC (temporary) */
-void csd_pw_dbg_reset(void);
-unsigned csd_pw_dbg_word(unsigned which);   /* 0 min, 1 max, 2 last, 3 distinct */
-
 #endif /* __csd_power_state_h__ */

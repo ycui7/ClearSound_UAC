@@ -1,120 +1,132 @@
-/* csd_power -- ordered idle-power state machine (TODO item 7).
+/* csd_power -- the ordered idle-power sequences (TODO item 7).
  *
- * Owner directive 2026-11-04. No audio stream for > 5 min -> power down in
- * this order: amplifier, DAC, DSP+mixer. On stream return, in this order:
- * DSP+mixer (if enabled), DAC, amplifier last (deassert SUSPEND_N). DAC wake
- * means a FULL re-initialisation of the boot sequence, not an un-mute, with
- * volume restored to the pre-shutdown value, and volume driven to minimum
- * BEFORE the amplifier is dropped (pop suppression).
+ * Owner directive 2026-11-04. No audio stream for > 5 min -> bring the chain
+ * down amplifier-first. On stream return -> DSP/mixer first, then a FULL codec
+ * re-init, then volume restore, then the amplifier LAST (SUSPEND_N). Volume
+ * goes to minimum BEFORE the amplifier drops (pop suppression).
  *
- * WHY A SEPARATE PURE-C MODULE
- * The whole feature is a state machine plus an action queue. Keeping it free
- * of xcore headers means the ordering -- the part that can hurt a listener's
- * ears and a DAC -- is testable on the host in milliseconds, the same
- * argument that made csd_vol_mailbox.c a C file. The firmware side only
- * supplies witnesses and executes actions; it holds no policy.
+ * SHAPE, AND WHY IT IS THIS SMALL (owner, 2026-11-05: "i was thinking just a
+ * well designed and tested sequence of actions to disable amp and re-enable
+ * amp")
+ * Two states and two sequences. No queue, no drain, no in-flight states. The
+ * earlier cut modelled this as a 4-state machine with an 8-deep action ring
+ * drained one step per 0.5 s poll, to keep a wake request from interleaving
+ * with a shutdown. That hazard does not exist: only ONE task ever runs a
+ * sequence, so a sequence cannot interleave with itself, and running it
+ * straight through gives the same guarantee with no state to get wrong. The
+ * ring was machinery for a problem the executor never had -- and one of its
+ * transitions (activity arriving during the up drain) went untested and latched
+ * the box ON forever, which is how it was found.
  *
- * THE WITNESS (this is the part that is easy to get wrong)
- * A running I2S clock is NOT evidence of a stream: the ES9219Q DPLL locks on
- * clock alone with no samples on the bus. So activity is a NON-ZERO received
- * sample, counted where samples are actually pulled from the host
- * (csd_mb_get_host_nonzero, fed by lib_xua mixer1 GetSamplesFromHost). A
- * paused stream, a host that stopped sending ISO packets, and a muted codec
- * all freeze that counter, which is the correct answer for each.
- * csd_power_note_clock_alive() exists ONLY so a wiring mistake that trusts
- * the clock has somewhere to land and fails a test (T2) instead of silently
- * burning idle power forever.
+ * THE WITNESS (the part that is easy to get wrong)
+ * A running I2S clock is NOT a stream: the ES9219Q DPLL locks on clock alone
+ * with nothing on the bus. Activity is therefore a NON-ZERO DAC-bound sample,
+ * counted where the host stream is actually pulled (csd_pw_note_host_sample in
+ * csd_power_state.c, fed from lib_xua's mixer read), with the buffer path's
+ * non-zero underfill word excluded -- a stuck constant is not audio. Proven on
+ * silicon, not asserted: with the box quiet the activity counter sat frozen at
+ * 868140 while the frame counter climbed to 12.4 M in the same window
+ * (2026-11-05), so silence cannot keep this box awake.
+ *
+ * The previous cut also carried two deliberately-empty witness hooks
+ * (note_clock_alive, note_frame_silence) whose only purpose was to give a
+ * wrong wiring somewhere to fail a test. Both are gone: nothing in this build
+ * feeds a clock or an all-zero frame to the idle decision, so the rule now
+ * holds by absence rather than by an empty function. If someone later wants an
+ * alt-0 fast trigger (note_stream_state, which had no caller), the honest place
+ * for it is here as another injected predicate, with a test -- not a hook that
+ * nothing calls.
+ *
+ * HOW IT IS TESTED WITHOUT A BOARD
+ * This file includes no xcore header and calls no firmware function. The two
+ * things it needs from outside -- perform one step, and ask whether audio has
+ * arrived -- are injected (csd_pw_ops_t). tests/test_csd_power.c records every
+ * step a sequence emits and answers the activity poll however a case needs,
+ * including "audio returned in the middle of teardown" and "audio was already
+ * flowing when the wake ran", which the old suite never drove.
  *
  * THREADING
- * Exactly one task (the tile[1] power poll task) calls tick, the note functions, and next_action --
- * task. No locks, no atomics: this module has a single reader and a single
- * writer by construction. Do not call it from the audio thread -- it is
- * frame-budget territory, and the witnesses are already counted for us.
+ * Exactly one task calls csd_power_poll. No locks, no atomics: single reader,
+ * single writer by construction. Never call it from the audio thread -- it is
+ * frame-budget territory, and the codec boot script it triggers blocks.
  */
 #ifndef __csd_power_h__
 #define __csd_power_h__
 
-/* How often the firmware executor advances the clock. The executor rides an
- * existing 0.5 s grid, so this is 0.17% of the timeout -- no new timer. */
+/* How often the assistant advances the clock. It rides an existing 0.5 s grid,
+ * so this is 0.17 % of the timeout -- no new timer. */
 #ifndef CSD_PW_TICK_MS
 #define CSD_PW_TICK_MS (500u)
-unsigned csd_power_idle_ms_dbg(void);   /* DIAGNOSTIC (temporary) */
-unsigned csd_power_dbg_flags(void);     /* bit0 activity_seen, bit1 stream_stopped, bits 8+ state */
-
 #endif
 
-/* 5 minutes, per the owner. Compile-tunable so a bench can prove the
- * sequence in seconds: -DCSD_PW_IDLE_MS=5000. */
+/* 5 minutes, per the owner. Compile-tunable so a bench can prove the sequences
+ * in seconds: -DCSD_PW_IDLE_MS=20000. */
 #ifndef CSD_PW_IDLE_MS
 #define CSD_PW_IDLE_MS (300000u)
 #endif
 
 typedef enum csd_pw_state {
-    CSD_PW_STATE_ON = 0,   /* everything powered, audio flowing or not yet idle */
-    CSD_PW_STATE_WAIT_DOWN,/* idle expired; the DOWN action queue is draining */
-    CSD_PW_STATE_WAIT_UP,  /* the UP action queue is draining */
-    CSD_PW_STATE_OFF       /* amp+DAC+DSP down; wakes on the next activity */
+    CSD_PW_STATE_ON = 0,   /* chain up; the only state that counts idle time  */
+    CSD_PW_STATE_OFF       /* amp + DAC + DSP down; wakes on real activity    */
 } csd_pw_state_t;
 
-/* Actions are REQUESTS to the firmware executor, in the order the owner
- * specified. The queue is single-flight: nothing is produced while a
- * sequence is mid-drain, so a stream that returns during shutdown completes
- * the shutdown and then wakes -- a half-torn-down codec is never left
- * standing, and the pop-suppression rule is never skipped. */
+/* The steps, in the order the owner specified. The assistant performs them;
+ * this module decides WHICH and in what ORDER, which is the part worth a test.
+ * Values are unchanged from the previous cut so old traces stay readable. */
 typedef enum csd_pw_action {
     CSD_PW_ACT_NONE = 0,
-    /* down */
-    CSD_PW_ACT_AMP_VOL_MIN,/* volume to minimum  (must precede AMP_OFF) */
-    CSD_PW_ACT_AMP_OFF,    /* amplifier disable                          */
-    CSD_PW_ACT_DAC_OFF,    /* DAC down (mute + soft reset)               */
-    CSD_PW_ACT_DSP_OFF,    /* DSP + mixer bypass        (if enabled)     */
-    /* up */
-    CSD_PW_ACT_DSP_ON,     /* DSP + mixer re-enable     (if enabled)     */
-    CSD_PW_ACT_DAC_REINIT, /* FULL boot re-init, NOT an un-mute          */
-    CSD_PW_ACT_VOL_RESTORE,/* prior volume re-applied   (after re-init)  */
-    CSD_PW_ACT_AMP_ON      /* amplifier last: deassert SUSPEND_N         */
+    /* down: amplifier, DAC, DSP+mixer (volume floor first -- pop suppression) */
+    CSD_PW_ACT_AMP_VOL_MIN,/* volume to minimum  (must precede AMP_OFF)       */
+    CSD_PW_ACT_AMP_OFF,    /* amplifier disable                                */
+    CSD_PW_ACT_DAC_OFF,    /* DAC down (mute + hold in reset)                  */
+    CSD_PW_ACT_DSP_OFF,    /* DSP + mixer bypass        (if enabled)           */
+    /* up: DSP+mixer, FULL re-init, volume, amplifier LAST */
+    CSD_PW_ACT_DSP_ON,     /* DSP + mixer re-enable     (if enabled)           */
+    CSD_PW_ACT_DAC_REINIT, /* full boot re-init, NOT an un-mute                */
+    CSD_PW_ACT_VOL_RESTORE,/* prior volume re-applied   (after re-init)        */
+    CSD_PW_ACT_AMP_ON      /* amplifier last: deassert SUSPEND_N               */
 } csd_pw_action_t;
 
+/* THE TWO THINGS THIS MODULE NEEDS FROM THE PLATFORM.
+ * Declared here, defined by the firmware (csd_power_hooks.xc and
+ * csd_power_state.c) and replaced by stubs in the host test. They are plain
+ * externs rather than function pointers in a struct on purpose: xl1 bounds
+ * every tile's stack at link time and will not price an indirect call without
+ * [[fptrgroup]] on both the struct field and every callee (see the firmware
+ * skill's stack-bound section), and a direct call has no such requirement. A
+ * prototype costs nothing; an analyser workaround costs a build system.
+ *
+ * Both run in the assistant's context and MAY block -- that task has no
+ * deadline (the codec boot script blocks for PLL settle and up to 20 chip-ID
+ * retries, and nothing may block in the audio path, which is exactly why the
+ * sequences live here and not in the mixer). */
+
+/* Perform one step of a sequence. Called in the order the sequences below
+ * request; must not reorder, merge or skip a step. */
+void csd_pw_execute(unsigned act);
+
+/* Non-zero if a real (non-zero, non-underfill) DAC-bound sample has arrived
+ * since the previous call. Edge-consuming by contract: a second call in the
+ * same poll slot reports only NEW audio, which is what lets a teardown ask
+ * "did audio return while we were busy?". */
+unsigned csd_pw_audio_arrived(void);
+
 /* Build-time fact: was the DSP/mixer compiled in? Owner: "dsp, mixer start
- * first, if they are enabled". Called once at boot before init. */
+ * first, if they are enabled". Set it before init. */
 void csd_power_set_dsp_enabled(int enabled);
 
-/* Boot. Idempotent: calling it again re-arms the ON state and clears any
- * queued actions. */
+/* Boot. Idempotent: re-arms the ON state with a fresh timer. */
 void csd_power_init(void);
 
-/* Advance time by dt_ms. Call from a slow poll, never from the audio path. */
-void csd_power_tick(unsigned dt_ms);
+/* THE WHOLE DECISION, once per poll grid slot. Advances the idle timer by
+ * dt_ms and runs a sequence when one is due. A sequence always runs to
+ * completion inside this call, which is what makes a half-torn-down codec
+ * unrepresentable -- and if audio arrives while a teardown is executing, the
+ * wake runs immediately after it, never in the middle. */
+void csd_power_poll(unsigned dt_ms);
 
-/* WITNESS: a non-zero sample was received from the host since the last call.
- * Called from the poll task when the host-nonzero counter has advanced. */
-void csd_power_note_frame_activity(void);
-
-/* WITNESS (inert by design): a frame arrived whose content was ALL ZERO.
- * Digital silence is not audio: a host streaming zeros (or a muted codec)
- * must time out exactly like an absent stream, or an unattended muted DAC
- * idles forever. Present so the poll task can report 'frame seen, empty'
- * distinctly from 'no frame seen' for diagnostics; it must never feed the
- * idle decision. Host test T11 fails the moment anyone makes it count. */
-void csd_power_note_frame_silence(void);
-
-/* WITNESS (inert by design): the I2S clock is toggling. This MUST NOT affect
- * the idle decision -- see the witness rule above. Present so the wiring has
- * one obvious place to put a clock-derived signal and be wrong loudly. */
-void csd_power_note_clock_alive(void);
-
-/* WITNESS: USB SET_INTERFACE alt-setting change from the host (1 = streaming
- * alt, 0 = alt 0 == stream stop). alt 0 arms the shutdown immediately: the
- * host said it stopped, and waiting another 5 minutes for a codec that is
- * already drawing idle power is not what the owner asked for. */
-void csd_power_note_stream_state(int input_active, int output_active);
-
-/* Query for the executor and diagnostics (SCPI reads this). */
+/* Diagnostics (the trace print and SCPI read these). */
 csd_pw_state_t csd_power_state(void);
-
-/* Pop the next action for the executor. Returns CSD_PW_ACT_NONE when the
- * queue is empty. The executor performs it and calls again; a single-flight
- * invariant means only one sequence is ever in flight. */
-unsigned csd_power_next_action(void);
+unsigned csd_power_idle_ms_dbg(void);
 
 #endif /* __csd_power_h__ */
