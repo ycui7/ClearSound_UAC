@@ -21,6 +21,7 @@
 #include "csd_version.h"
 #include "csd_identity.h"
 #include "csd_gen.h"
+#include "csd_power.h"          /* POWER:TIMEout, owner case 14 */
 /* L/R trim persistence (TODO 3) is reached through csd_diag.h's proxy calls,
  * never by including csd_trim_store.h: that header's entry points drive the
  * tile[0] SQI ports and may only be called by the tile[0] codec server. */
@@ -1232,11 +1233,67 @@ static scpi_result_t vol_trim_set(scpi_t *context, unsigned which_right)
          * reads SYST:ERR? to tell "saved" from "set but not journalled". */
         SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
     }
+    /* Actuate the per-channel term. Ordering matters: the journal above is what
+     * publishes the pair to tile[0], and the applier reads it from there. Ask
+     * before journal and the registers get the PREVIOUS trim. This is the only
+     * way regs 15/16 move on a trim set -- writing them from here instead would
+     * put a second writer on a register the tile[0] applier owns and dedupes. */
+    csd_diag_vol_reapply();
     return SCPI_RES_OK;
 bad:
     SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
     (void)why;
     return SCPI_RES_ERR;
+}
+
+/* ---- POWER:TIMEout -- owner case 14, directive 2026-11-05 -----------------
+ * Semantics are the owner's, verbatim: 0 enters power saving immediately and
+ * stays there; a negative value keeps the box powered up indefinitely; any
+ * other positive value is the timeout in seconds; the default is 300 s. Every
+ * value OTHER than 0 is journalled and re-applied at power up -- 0 is transient
+ * by spec, so a reboot must never leave the box asleep.
+ *
+ * The setter only ASKS. A sequence runs to completion inside csd_power_poll and
+ * exactly one task owns that (csd_power.h); running a teardown from this task
+ * would put two executors on one codec. A set of 0 therefore takes effect on the
+ * next 0.5 s tick, which is immediate to a human and keeps the invariant true.
+ */
+static SCPI_FPTR_CMD scpi_result_t power_timeout_set(scpi_t *context)
+{
+    char     txt[24];
+    int32_t  sec;
+
+    if (!param_text(context, txt, sizeof txt, TRUE)) goto bad;
+    if (!parse_snum(txt, strlen(txt), &sec))         goto bad;
+    if (sec < -1)    sec = -1;            /* any negative means "never"       */
+    if (sec > 86400) goto bad;            /* 24 h ceiling; above is a typo    */
+
+    csd_power_set_timeout_sec((int)sec);
+
+    /* Persist anything other than 0. The record carries the trim pair too, so
+     * the current pair is passed through -- tile[0] must not read this tile's
+     * mailbox (that exact mistake journalled zeros while seq climbed). A failed
+     * journal is reported in the error queue and does NOT undo the live value:
+     * "set but not saved" must never look like "saved", and must never look
+     * like "rejected" either. */
+    if (sec != 0) {
+        if (!csd_diag_pw_timeout_save((int)sec, csd_mb_get_trim())) {
+            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        }
+    }
+    return SCPI_RES_OK;
+bad:
+    SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    return SCPI_RES_ERR;
+}
+
+static SCPI_FPTR_CMD scpi_result_t power_timeout_q(scpi_t *context)
+{
+    /* Read the RUNTIME value, not the journalled one: what the box is doing now
+     * is the question a rig can act on. They differ only after a set of 0, which
+     * is deliberately not persisted. */
+    SCPI_ResultInt32(context, (int32_t) csd_power_get_timeout_sec());
+    return SCPI_RES_OK;
 }
 
 static SCPI_FPTR_CMD scpi_result_t vol_trim_left(scpi_t *context)
@@ -1331,6 +1388,7 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_load(scpi_t *context)
      * is "adopt what is in flash", and adoption now means the chip, not
      * only the mailbox. */
     csd_mb_put_trim(packed);
+    csd_diag_vol_reapply();   /* adoption must reach the chip, not just the mailbox */
     {
         unsigned q31 = csd_trim_master_trim_q31(packed);
         for (unsigned ti = 0; ti < 4u; ti++) {
@@ -1773,6 +1831,12 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "VOLume:TRIM:RIGHT",       .callback = vol_trim_right  },
     { .pattern = "VOLume:TRIM?",            .callback = vol_trim_q      },
     { .pattern = "VOLume:TRIM:STATus?",     .callback = vol_trim_status_q },
+    /* Idle-power timeout (owner case 14): a production control, not a debug
+     * probe -- the owner's spec requires a host to set and read it, so these
+     * rows sit OUTSIDE the release gate, beside the trim rows for the same
+     * reason. */
+    { .pattern = "POWER:TIMEout",           .callback = power_timeout_set },
+    { .pattern = "POWER:TIMEout?",          .callback = power_timeout_q   },
     { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
 #ifndef SPECIALTYCIRCUITS_RELEASE
     /* Debug-only rows (TODO item 5): gone in release builds together with

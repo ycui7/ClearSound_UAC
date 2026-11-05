@@ -93,6 +93,14 @@ int csd_diag_reg_read(unsigned reg, unsigned *val);
  * See csd_diag_regs.xc for why the store must not publish it itself. */
 int csd_diag_trim_load(unsigned *packed_out);
 int csd_diag_trim_save(unsigned packed);
+/* Owner case 14 (2026-11-05): idle-power timeout, journalled in the same record
+ * as the trim pair, so the save takes both. sec follows csd_power.h semantics
+ * (-1 never, 0 now, >0 seconds); get() returns the persisted value, or 300. */
+int csd_diag_pw_timeout_save(int sec, unsigned packed);
+int csd_diag_pw_timeout_get(void);
+/* Re-run tile[0]'s single volume applier so a trim change reaches regs 15/16.
+ * Requests recomputation; it never writes a volume register itself. */
+void csd_diag_vol_reapply(void);
 unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..6, see csd_trim_store.h */
 
 /* Unit identity, forwarded to the tile[0] owner for the same reason register

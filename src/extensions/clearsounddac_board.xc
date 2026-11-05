@@ -344,6 +344,18 @@ static void vol_apply_digital(int ch, int aCom, client interface i2c_master_if i
     int total = volHostDl8[ch] + volBtnDb8 - aCom;
     unsigned reg = (ch == 0) ? ES9219Q_VOL_CTRL_LO : ES9219Q_VOL_CTRL_HI;
     int code = (total <= 0) ? (-total + 64) / 128 : 0;   /* 0.5 dB/LSB, round */
+    /* Per-channel trim, added HERE because this function is the sole writer of
+     * regs 15/16 -- a second writer anywhere else races this dedupe cache and
+     * the cache then swallows writes it believes already applied.
+     *
+     * The term is the channel's trim MINUS what both channels share: MASTER
+     * TRIM is one word driven by the deeper channel, so writing the full trim
+     * here too would attenuate the common part twice. Equal trims therefore
+     * leave code untouched, which is why this cannot move the 0 dB ladder
+     * (FF FF FF 7F) that the master path is verified against. Hardware evidence
+     * for why it must exist: with regs 15/16 never written, a LEFT-only trim
+     * moved BOTH channels ~6 dB (measured 2026-11-05). */
+    code += (int) csd_trim_channel_vol_step(csd_trim_applied_packed(), (unsigned) ch);
     if (code > 255) code = 255;
     if (volRegValidD[ch] && volRegLastD[ch] == (unsigned)code) {
 #ifdef CSD_PW_TRACE
@@ -778,9 +790,23 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c[i] <: regVal;
                 }
+                else if (cmd == AUDIOHW_CMD_VOL_REAPPLY)
+                {
+                    /* Recompute and re-write the volume registers through the
+                     * ONE applier. Called after a trim change: the per-channel
+                     * trim term is an input to vol_apply_digital, and without
+                     * this nudge regs 15/16 would not move until the host volume
+                     * happened to change -- the trim would publish, log, and do
+                     * nothing audible. No reply word: the requester does not
+                     * branch on it, and adding one would make the two ends
+                     * disagree on message count for this command. */
+                    vol_apply_all(i2c);
+                }
                 else if (cmd == AUDIOHW_CMD_TRIM_LOAD ||
                          cmd == AUDIOHW_CMD_TRIM_SAVE ||
-                         cmd == AUDIOHW_CMD_TRIM_STAT)
+                         cmd == AUDIOHW_CMD_TRIM_STAT ||
+                         cmd == AUDIOHW_CMD_PW_TIMEOUT_GET ||
+                         cmd == AUDIOHW_CMD_PW_TIMEOUT_SAVE)
                 {
                     /* L/R trim persistence (TODO item 3). This branch exists
                      * because quadflashlib drives PORT_SQI_* with synchronous
@@ -838,6 +864,33 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         unsigned packed = 0u;      /* plain local: channel
                                                     * operators take a variable */
                         c[i] :> packed;
+                        unsigned ok = (unsigned) csd_trim_journal_now(packed);
+                        c[i] <: ok;
+                    }
+                    else if (cmd == AUDIOHW_CMD_PW_TIMEOUT_GET)
+                    {
+                        /* Owner case 14. The store is only truthful after a
+                         * load, and the assistant may ask before the diagnostic
+                         * task has issued TRIM_LOAD -- answering the compile-time
+                         * default in that case would be mistaken for "flash said
+                         * 300". boot_load is idempotent by its own contract, so
+                         * asking here is cheap and removes the ordering hazard. */
+                        if (csd_trim_status_word(1u) == 0u) (void) csd_trim_boot_load();
+                        unsigned v = (unsigned) csd_trim_pw_timeout_get();
+                        c[i] <: v;
+                    }
+                    else if (cmd == AUDIOHW_CMD_PW_TIMEOUT_SAVE)
+                    {
+                        /* The trim pair arrives as an ARGUMENT for the same
+                         * reason TRIM_SAVE takes one: tile[0] reading the
+                         * tile[1] mailbox journalled zeros while seq climbed.
+                         * Timeout and trims go out in ONE record, so a partial
+                         * failure can never leave the two settings disagreeing. */
+                        int sec = 0;
+                        unsigned packed = 0u;
+                        c[i] :> sec;
+                        c[i] :> packed;
+                        csd_trim_pw_timeout_set(sec);
                         unsigned ok = (unsigned) csd_trim_journal_now(packed);
                         c[i] <: ok;
                     }

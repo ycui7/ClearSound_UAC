@@ -302,6 +302,45 @@ unsigned csd_trim_master_trim_q31(unsigned packed)
     return q31;
 }
 
+/* Per-channel attenuation for the codec's OWN channel volume registers
+ * (ES9219Q_VOL_CTRL_LO/HI, regs 15/16), in the chip's 0.5 dB steps.
+ *
+ * WHY THIS EXISTS (case 10, measured 2026-11-05): MASTER TRIM is a single word
+ * shared by both channels, so the only thing it can express is what the two
+ * channels have IN COMMON. csd_trim_master_trim_q31() collapses L/R with
+ * min() for exactly that reason, which is why setting LEFT alone moved BOTH
+ * channels ~6 dB on the bench: there was nowhere else for the value to go.
+ * Datasheet v1.3: "Each output channel has its own attenuation circuit. The
+ * attenuation for each channel is controlled independently", 0..-127 dB in
+ * 0.5 dB steps, 0 = 0 dB. So the decomposition is forced, not chosen:
+ *
+ *   master trim (regs 17-20) = the deepest common attenuation  (unchanged,
+ *                              ladder-verified: 0 dB writes FF FF FF 7F)
+ *   reg 15 (CH1) / reg 16 (CH2) = the EXTRA beyond common, i.e. the difference
+ *                              between the two channels, on the shallower one
+ *
+ * Equal trims therefore still travel the verified master path with regs 15/16
+ * at 0, so this cannot regress the ladder that took a day to prove.
+ *
+ * QUANTISATION IS HONEST, NOT A SHORTCUT: the SCPI interface is 0.125 dB and
+ * the per-channel hardware step is 0.5 dB, so the L/R difference is rounded to
+ * the nearest half dB. Below half a decibel this chip cannot make the channels
+ * differ at all; a rig asserting finer per-channel resolution than 0.5 dB is
+ * asserting something the silicon does not do. */
+unsigned csd_trim_channel_vol_step(unsigned packed, unsigned right)
+{
+    int l      = (int)(short)(packed & 0xFFFFu);   /* 8.8 dB grid */
+    int r      = (int)(short)(packed >> 16);
+    int common = (l < r) ? l : r;                  /* deepest channel */
+    int mine   = right ? r : l;
+    int extra  = mine - common;                    /* >= 0 by construction */
+
+    if (extra < 0) extra = 0;
+    unsigned steps = (unsigned)((extra + 16) / 32);   /* 0.125 dB -> 0.5 dB */
+    if (steps > 254u) steps = 254u;                   /* -127 dB is the floor */
+    return steps;
+}
+
 /* ---- release gate (TODO items 5+6, directive 2026-11-01) -----------------
  * Everything below this line EXCEPT the per-source gain word is bench
  * instrumentation: counters and peak-houses that only the debug SCPI block

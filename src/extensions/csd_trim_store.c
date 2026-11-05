@@ -85,8 +85,14 @@
                                      * the XEF magic, so a record can never
                                      * be mistaken for a boot block by
                                      * anything that scans flash. */
-#define TRIM_VERSION  1u
-#define TRIM_SLOT_BYTES   32u       /* 8 words: hdr(4) + payload(2) + spare(2) */
+/* v2 (owner case 14, 2026-11-05): the record also carries the idle-power
+ * timeout, so one 32 B slot persists the whole settings pair set and there is
+ * one checksum, one seq and one validity gate instead of two stores that can
+ * disagree. v1 records fail the version gate and fall back to the documented
+ * defaults (0 dB / 0 dB, 300 s), which is the specified behaviour for "no valid
+ * persistence found" -- and there are no field units to lose. */
+#define TRIM_VERSION  2u
+#define TRIM_SLOT_BYTES   32u       /* 8 words: hdr(4) + payload(3) + spare(1) */
 #define TRIM_MAX_SLOTS    128u      /* 4 KiB sector / 32 */
 
 /* Clock block handle: INJECTED by the tile[0] server, never hardcoded here.
@@ -123,19 +129,27 @@ void csd_trim_set_clkblk(unsigned clk) { tr_clkblk = clk; }
 
 typedef struct {
     uint32_t magic;
-    uint32_t version_len;           /* version << 16 | payload words (2) */
+    uint32_t version_len;           /* version << 16 | payload words (3) */
     int32_t  trim_l_88;             /* 8.8 dB, 0 .. -8192 */
     int32_t  trim_r_88;
     uint32_t seq;                   /* monotone; newest wins */
-    uint32_t chk;                   /* sum of the five words above it */
-    uint32_t rsvd[2];
+    int32_t  pw_timeout_s;          /* owner case 14: -1 never, >0 seconds.
+                                     * 0 is never journalled (owner: 0 is
+                                     * transient by spec), but the field can
+                                     * hold it without breaking the gate. */
+    uint32_t chk;                   /* sum of the six words above it */
+    uint32_t rsvd;
 } trim_slot_t;                        /* 32 bytes */
 
 static uint32_t slot_checksum(const trim_slot_t *s)
 {
     const uint32_t *w = (const uint32_t *)s;
     uint32_t c = 0;
-    for (unsigned i = 0; i < 5u; i++) c += w[i];
+    /* Six words, not five: the timeout sits before chk, so a bit flip in it
+     * invalidates the record exactly like a flip in a trim. Nothing in this
+     * store is allowed to be trusted unchecked -- that is how a torn write
+     * becomes a silent wrong volume. */
+    for (unsigned i = 0; i < 6u; i++) c += w[i];
     return c;
 }
 
@@ -143,8 +157,12 @@ static int slot_valid(const trim_slot_t *s)
 {
     if (s->magic != TRIM_MAGIC) return 0;
     if ((s->version_len >> 16) != TRIM_VERSION) return 0;
-    if ((s->version_len & 0xFFFFu) != 2u) return 0;
+    if ((s->version_len & 0xFFFFu) != 3u) return 0;
     if (s->chk != slot_checksum(s)) return 0;
+    /* Range gate before trust: an absurd timeout (a corrupt word read as
+     * "sleep in 4 billion seconds", or a negative that is not the -1 the
+     * owner defined) must invalidate the record rather than install itself. */
+    if (s->pw_timeout_s < -1 || s->pw_timeout_s > 86400) return 0;
     /* Payload contract, re-checked on load: a record that parses but
      * violates the range/grid must not become the volume path's truth. */
     if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return 0;
@@ -164,6 +182,36 @@ static volatile unsigned tr_st_seq       = 0;   /* newest seq seen/written */
 static volatile unsigned tr_st_err       = 0;   /* last failure code */
 static volatile unsigned tr_st_load_n    = 0;   /* boot loads completed */
 static volatile unsigned tr_st_save_n    = 0;   /* successful saves */
+
+/* Idle-power timeout carried in the SAME record (owner case 14, so one
+ * checksum and one seq cover both settings and they can never disagree).
+ * The owner's 300 s default lives here until a valid record replaces it; the
+ * power module keeps its own compile-time default and is told this value at
+ * boot, so neither module has to import the other's constants. */
+static volatile int32_t tr_pw_timeout_s = 300;
+
+/* The trim pair that tile[0] most recently saw, published for the ONE writer of
+ * the codec's channel-volume registers (vol_apply_digital in board.xc). It is
+ * the value this store journalled or adopted -- never read from the tile[1]
+ * mailbox, which is exactly what a tile[0] must not do (that bug journalled
+ * zeros while seq climbed). Updated at every journal and every adopt, so it can
+ * never disagree with what the record says. */
+static volatile unsigned tr_applied_packed = 0u;
+
+unsigned csd_trim_applied_packed(void) { return tr_applied_packed; }
+
+void csd_trim_pw_timeout_set(int sec)
+{
+    /* Normalised here, once: the owner's spec says any negative means "never",
+     * so -5000 is stored as the canonical -1 rather than as a number that
+     * get() would later have to explain. The 24 h ceiling turns an absurd value
+     * into a visible clamp instead of a box that never sleeps for a year. */
+    if (sec < -1)   sec = -1;
+    if (sec > 86400) sec = 86400;
+    tr_pw_timeout_s = (int32_t)sec;
+}
+
+int csd_trim_pw_timeout_get(void) { return (int)tr_pw_timeout_s; }
 
 /* No per-field accessors on purpose: these statics are read by the tile[0]
  * server and crossed to tile[1] one word at a time through
@@ -588,6 +636,12 @@ unsigned csd_trim_boot_load(void)
                         |  ((unsigned)(uint32_t)best->trim_l_88 & 0xFFFFu);
             tr_st_seq    = seq;
             tr_st_loaded = 1u;
+            /* Adopt the persisted timeout only from a record that passed every
+             * gate (magic, version, payload count, checksum, range) -- an
+             * unvalidated adopt is how a corrupt word becomes boot behaviour. */
+            tr_pw_timeout_s = best->pw_timeout_s;
+            tr_applied_packed = (unsigned)(((unsigned short)best->trim_r_88) << 16)
+                              | (unsigned short)best->trim_l_88;
         } else {
             tr_st_loaded = 2u;                    /* connected, nothing valid */
         }
@@ -664,12 +718,18 @@ int csd_trim_journal_now(unsigned packed)
     unsigned seq = newest + 1u;
     trim_slot_t *s = (trim_slot_t *)(sector + tr_next_slot * TRIM_SLOT_BYTES);
     s->magic       = TRIM_MAGIC;
-    s->version_len = (TRIM_VERSION << 16) | 2u;
+    s->version_len = (TRIM_VERSION << 16) | 3u;
     s->trim_l_88   = (int32_t)(short)(packed & 0xFFFFu);
     s->trim_r_88   = (int32_t)(short)(packed >> 16);
     s->seq         = seq;
+    /* The timeout is written with every journal entry, from the value set by
+     * csd_trim_pw_timeout_set() (or adopted from the record at boot). Writing
+     * it here rather than in its own entry is what keeps trim and timeout from
+     * ever disagreeing after a partial failure. */
+    s->pw_timeout_s = tr_pw_timeout_s;
+    tr_applied_packed = packed;          /* publish for the single register writer */
     s->chk         = slot_checksum(s);
-    s->rsvd[0] = 0u; s->rsvd[1] = 0u;
+    s->rsvd        = 0u;
 
     int ok = rewrote ? tr_rewrite_sector(sector, &res)
                      : tr_append_slot(tr_next_slot, sector, &res);

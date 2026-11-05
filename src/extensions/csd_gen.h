@@ -302,8 +302,19 @@ void     csd_mb_put_trim(unsigned packed);   /* posts trim-dirty too     */
 unsigned csd_mb_get_trim_dirty(void);        /* boot/config-pass refresh */
 void     csd_mb_clear_trim_dirty(void);
 unsigned csd_trim_master_trim_q31(unsigned packed);  /* the ONE conversion */
+/* Per-channel extra beyond the common attenuation, in the codec's 0.5 dB steps
+ * for regs 15 (CH1) / 16 (CH2). Master trim is one shared word, so the L/R
+ * DIFFERENCE has nowhere else to live -- see the function comment. */
+unsigned csd_trim_channel_vol_step(unsigned packed, unsigned right);
 /* MASTER TRIM base register (ES9219Q regs 17..20 == 0x11..0x14). Named
  * here rather than pulling es9219q.h across the mailbox boundary. */
+/* Regs 15/16: the chip's INDEPENDENT per-channel attenuation circuits
+ * (datasheet v1.3: 0..-127 dB in 0.5 dB steps, 0 = 0 dB). Named here beside
+ * CSD_TRIM_REG_BASE because together they are the whole volume register set this
+ * driver owns, and the diagnostic TU writes both without pulling in the codec
+ * header. Master trim (0x11..0x14) is ONE shared word; these are per channel. */
+#define CSD_VOL_CH1_REG    0x0Fu
+#define CSD_VOL_CH2_REG    0x10u
 #define CSD_TRIM_REG_BASE 0x11u
 /* Byte order of the 32-bit MASTER TRIM across regs 17..20: SETTLED by
  * measurement on 2026-11-05 -- reg 0x11 holds the LEAST significant byte.

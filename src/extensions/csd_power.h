@@ -115,6 +115,29 @@ unsigned csd_pw_audio_arrived(void);
  * first, if they are enabled". Set it before init. */
 void csd_power_set_dsp_enabled(int enabled);
 
+/* ---- idle timeout, owner's semantics (case 14, directive 2026-11-05) ------
+ *   0        enter power saving IMMEDIATELY and stay there until audio returns
+ *   negative NEVER enter power saving; stay powered up indefinitely
+ *   positive timeout in seconds
+ * Default is CSD_PW_IDLE_MS (300 s). Any value other than 0 is persisted by
+ * the caller (the QSPI journal) and fed back in through
+ * csd_power_timeout_restore() at power up; 0 is transient by the owner's spec,
+ * so a reboot must not leave the box asleep.
+ *
+ * Setters only REQUEST: a sequence runs to completion inside csd_power_poll,
+ * which exactly one task calls, so running a teardown from the SCPI task would
+ * put two executors on the same codec. A set of 0 therefore takes effect on the
+ * next poll tick -- CSD_PW_TICK_MS (0.5 s) later, which is immediate for a
+ * human at a terminal and keeps the single-executor invariant load-bearing.
+ */
+void csd_power_set_timeout_sec(int sec);
+int  csd_power_get_timeout_sec(void);
+
+/* Boot path only: adopt the persisted value without the side effects of a
+ * live set (no immediate trigger). Out-of-range values are the caller's
+ * problem; this stores what it is given. */
+void csd_power_timeout_restore(int sec);
+
 /* Boot. Idempotent: re-arms the ON state with a fresh timer. */
 void csd_power_init(void);
 

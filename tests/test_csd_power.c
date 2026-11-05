@@ -99,6 +99,10 @@ static void reset_build(int dsp_enabled)
     nrec = 0; asks = 0; live = 0u; flip_after_step = 0; steps_seen = 0;
     quiet_after_asks = 0; quiet_base = 0;
     csd_power_set_dsp_enabled(dsp_enabled);
+    /* The timeout is RUNTIME state now (case 14), and csd_power_init() does
+     * not touch it -- without this every test after the first that set a
+     * timeout would inherit it and measure the previous case's window. */
+    csd_power_timeout_restore((int)(CSD_PW_IDLE_MS / 1000u));
     csd_power_init();
 }
 
@@ -329,6 +333,88 @@ int main(void)
     flip_after_step = 4;          /* so the firing slot also re-wakes */
     poll(1);
     CK(asks == 2, "T13 exactly two asks in the slot that tears down and re-wakes");
+
+    /* ---- owner's case-14 timeout semantics (directive 2026-11-05) ----------
+     * Three regimes, each able to fail on its own: 0 = sleep now and stay
+     * asleep, negative = never sleep, positive = that many seconds. A module
+     * that only implemented the positive case would pass everything above. */
+
+    /* T15: the default is the owner's 300 s (scaled by the build's IDLE_MS). */
+    reset_build(1);
+    CK(csd_power_get_timeout_sec() == (int)(CSD_PW_IDLE_MS / 1000u),
+       "T15 default timeout is the compile-time default");
+
+    /* T16: 0 tears the chain down on the NEXT tick -- not after a full window. */
+    reset_build(1);
+    csd_power_set_timeout_sec(0);
+    script_quiet(); poll(1);
+    expect_seq(DOWN_4, 4, "T16 set 0 tears down on the next tick");
+    CK(csd_power_state() == CSD_PW_STATE_OFF, "T16 OFF immediately after set 0");
+
+    /* T17: and it stays asleep indefinitely while silent -- the timeout must
+     * not quietly re-arm itself -- then wakes on real audio. */
+    nrec = 0; script_quiet(); poll(500);
+    CK(nrec == 0 && csd_power_state() == CSD_PW_STATE_OFF,
+       "T17 set 0 stays asleep indefinitely while silent");
+    script_live(); poll(1);
+    expect_seq(UP_4, 4, "T17 set 0 still wakes on real audio");
+
+    /* T18: negative never sleeps, however long the box is silent. */
+    reset_build(1);
+    csd_power_set_timeout_sec(-1);
+    script_quiet(); poll((CSD_PW_IDLE_MS / CSD_PW_TICK_MS) * 2u);
+    CK(nrec == 0, "T18 negative never powers down");
+    CK(csd_power_state() == CSD_PW_STATE_ON, "T18 stays ON under negative");
+    CK(csd_power_get_timeout_sec() == -1, "T18 readback reports the negative setting");
+    /* The observable difference from merely casting to unsigned -- which also
+     * never fires, and is why deleting the guard is otherwise an EQUIVALENT
+     * mutant: csd_pw_audio_arrived() consumes its edge, so a box that must
+     * never sleep must not spend the witness. T18b asserts that directly. */
+    reset_build(1);
+    csd_power_set_timeout_sec(-1);
+    script_live();  poll((CSD_PW_IDLE_MS / CSD_PW_TICK_MS) * 2u);
+    CK(asks == 0, "T18b negative never polls the edge-consuming witness");
+    CK(nrec == 0 && csd_power_state() == CSD_PW_STATE_ON,
+       "T18c negative holds the box up even with audio flowing");
+    /* Leaving the negative regime must return the module to normal behaviour,
+     * not leave it stuck: stop the audio, wait the window, it tears down; audio
+     * returns, it wakes. A guard that returned from the wrong place would fail
+     * here rather than in T18. */
+    csd_power_set_timeout_sec(1);
+    script_quiet(); poll((1000u / CSD_PW_TICK_MS) + 2u);
+    expect_seq(DOWN_4, 4, "T18d leaves the negative regime and times out normally");
+    script_live(); poll(1);
+    expect_seq(UP_4, 4, "T18e wakes after leaving the negative regime");
+
+    /* T19: a positive value means exactly that many seconds, counted from the
+     * set (not from the last sample), and fires no earlier. */
+    reset_build(1);
+    csd_power_set_timeout_sec(5);
+    script_quiet(); poll((5000u / CSD_PW_TICK_MS) - 1u);
+    CK(nrec == 0, "T19 does not fire before the set timeout");
+    poll(1);
+    expect_seq(DOWN_4, 4, "T19 fires at the set timeout");
+
+    /* T21: a live set() DOES restart the countdown -- without a case that has
+     * already spent some of the window, "set" and "restore" are the same
+     * function as far as the suite is concerned and either could be deleted. */
+    reset_build(1);
+    script_quiet(); poll(4u);                      /* 2 s already idle */
+    csd_power_set_timeout_sec(5);                  /* must measure from NOW */
+    poll((5000u / CSD_PW_TICK_MS) - 1u);           /* 4.5 s after the set */
+    CK(nrec == 0, "T21 live set restarts the countdown (no early fire)");
+    poll(1);
+    expect_seq(DOWN_4, 4, "T21 fires a full window after the set");
+
+    /* T20: the boot restore path must adopt the value WITHOUT restarting the
+     * countdown, or a restore landing late would silently extend the window.
+     * Distinguishes restore() from set(), which does restart. */
+    reset_build(1);
+    csd_power_set_timeout_sec(5);
+    script_quiet(); poll(4u);                      /* 2 s of the 5 s spent */
+    csd_power_timeout_restore(5);
+    poll((5000u / CSD_PW_TICK_MS) - 4u);           /* remaining 3 s */
+    expect_seq(DOWN_4, 4, "T20 restore does not restart the countdown");
 
     printf("%s: checks=%d fails=%d (IDLE_MS=%u TICK_MS=%u)\n",
            fails ? "FAIL" : "PASS", checks, fails,

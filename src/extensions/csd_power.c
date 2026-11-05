@@ -21,6 +21,13 @@ static csd_pw_state_t state = CSD_PW_STATE_ON;
 static unsigned idle_ms;
 static int dsp_enabled = 1;
 
+/* Owner's case-14 semantics live here, as one signed number:
+ *   < 0  never sleep        0  sleep now       > 0  seconds
+ * Keeping it a single int (not a flag plus a timer) means there is exactly one
+ * place that decides whether the box may sleep, and the host test drives all
+ * three regimes through it. Default is the owner's 300 s. */
+static int timeout_sec = (int)(CSD_PW_IDLE_MS / 1000u);
+
 /* csd_pw_execute() and csd_pw_audio_arrived() are the platform's, declared in
  * the header; the host test links its own recorder and script. */
 static void perform(unsigned a) { csd_pw_execute(a); }
@@ -66,6 +73,21 @@ static void sequence_up(void)
 void csd_power_set_dsp_enabled(int enabled)     { dsp_enabled = enabled ? 1 : 0; }
 void csd_power_init(void)                       { state = CSD_PW_STATE_ON; idle_ms = 0u; }
 
+void csd_power_set_timeout_sec(int sec)
+{
+    timeout_sec = sec;
+    /* Measure from the moment the owner asked, not from the last sample: a set
+     * of 0 must fire on the next tick, and a set of 30 must mean 30 s from now
+     * rather than 30 s minus whatever had already elapsed. */
+    idle_ms = 0u;
+}
+
+int  csd_power_get_timeout_sec(void)            { return timeout_sec; }
+
+/* Boot-only: adopt the persisted value without resetting the idle clock, so a
+ * restore that lands after the first tick cannot silently extend the window. */
+void csd_power_timeout_restore(int sec)         { timeout_sec = sec; }
+
 void csd_power_poll(unsigned dt_ms)
 {
     /* No executor guard needed: csd_pw_execute() is a plain extern, so a
@@ -75,6 +97,13 @@ void csd_power_poll(unsigned dt_ms)
      * pointer version had to check for at runtime, the linker checks for us. */
 
     if (state == CSD_PW_STATE_ON) {
+        /* Negative asks "never sleep" (owner case 14). Checked FIRST and
+         * returned from before the witness is polled: csd_pw_audio_arrived()
+         * is edge-consuming by contract, and draining it while the box has no
+         * intention of sleeping would throw away the very edge that a later
+         * positive setting needs to wake on. */
+        if (timeout_sec < 0) return;
+
         /* Sparse real audio holds the box up indefinitely: any genuine sample
          * restarts the clock (host test T4). All-zero frames and a live LRCLK
          * never count -- the witness that decides this excludes the buffer
@@ -82,7 +111,12 @@ void csd_power_poll(unsigned dt_ms)
          * the frame counter climbed past 12 M in the same window. */
         if (audio_arrived()) { idle_ms = 0u; return; }
 
-        if (idle_ms + dt_ms >= CSD_PW_IDLE_MS) {
+        /* timeout_sec == 0 makes the limit 0, so the very next tick tears the
+         * chain down: "immediately", without this function ever running a
+         * sequence outside its single owning task. */
+        unsigned limit_ms = (unsigned)timeout_sec * 1000u;
+
+        if (idle_ms + dt_ms >= limit_ms) {
             sequence_down();
             /* Audio may have returned WHILE the teardown executed -- the
              * channel sends and the codec re-init both block. Honour it now:

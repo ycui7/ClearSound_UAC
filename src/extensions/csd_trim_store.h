@@ -58,8 +58,24 @@ void csd_trim_set_clkblk(unsigned clk);
 unsigned csd_trim_boot_load(void);
 
 /* Journal the CURRENT mailbox trim pair. Returns 1 on success, 0 on any
- * flash failure -- which is latched into the status words, never silent. */
+ * flash failure -- which is latched into the status words, never silent.
+ * The idle-power timeout travels with it: the record carries both, so a
+ * partially failed write cannot leave the two settings disagreeing. */
 int csd_trim_journal_now(unsigned packed);
+
+/* ---- idle-power timeout, persisted in the same record (owner case 14) -----
+ * Semantics belong to csd_power.h (-1 = never, >0 = seconds; 0 is transient by
+ * the owner's spec and is deliberately never journalled). Set the value, then
+ * journal it with csd_trim_journal_now(); get() returns the value adopted from
+ * the newest valid record at boot, or the 300 s default. Range: -1..86400;
+ * anything outside it makes the record invalid rather than being adopted. */
+void csd_trim_pw_timeout_set(int sec);
+int  csd_trim_pw_timeout_get(void);
+
+/* The trim pair this store last journalled or adopted, for tile[0]'s single
+ * writer of the codec channel-volume registers. Never read the tile[1] mailbox
+ * from tile[0] to get this. */
+unsigned csd_trim_applied_packed(void);
 
 /* Factory 64-bit unique serial from the QSPI die (Winbond 4Bh). Returns 1 on
  * success; on failure returns 0 and leaves the reason in csd_flash_serial_err()

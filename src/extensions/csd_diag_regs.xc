@@ -88,6 +88,45 @@ int csd_diag_trim_load(unsigned *packed_out)
 
 /* SAVE takes the pair as an argument for the same reason: tile[0] must never
  * read the tile[1] mailbox to find out what to journal. */
+/* Owner case 14: the idle-power timeout is persisted in the SAME journal
+ * record as the trims, so saving it takes the trim pair too -- tile[0] must
+ * not read the tile[1] mailbox, and one record cannot half-fail. */
+int csd_diag_pw_timeout_save(int sec, unsigned packed)
+{
+    unsigned ok;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_PW_TIMEOUT_SAVE;
+        uc_audiohw_diag <: (unsigned) sec;
+        uc_audiohw_diag <: packed;
+        uc_audiohw_diag :> ok;
+    }
+    return ok ? 1 : 0;
+}
+
+/* Ask tile[0] to re-run its single volume applier. Used after a trim change:
+ * the per-channel term of the trim is an INPUT to that applier (it is the only
+ * writer of regs 15/16), so publishing the trim is not enough -- nothing would
+ * rewrite the registers until the host volume happened to move. Going through
+ * the applier rather than writing the registers here is deliberate: a second
+ * writer would race the applier's dedupe cache, which then swallows writes it
+ * believes are already applied. */
+void csd_diag_vol_reapply(void)
+{
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_VOL_REAPPLY;
+    }
+}
+
+int csd_diag_pw_timeout_get(void)
+{
+    unsigned v = 300u;                     /* documented default, not a guess */
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_PW_TIMEOUT_GET;
+        uc_audiohw_diag :> v;
+    }
+    return (int) v;                        /* -1 (never) arrives as 0xFFFFFFFF */
+}
+
 int csd_diag_trim_save(unsigned packed)
 {
     unsigned ok;
