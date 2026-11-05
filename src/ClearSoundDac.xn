@@ -16,10 +16,12 @@
              is a C32 die, rated f(MAX)=800MHz per the XU316 datasheet ordering
              table and the XK-EVK-XU316 board manual).
 
-             Held at 600MHz by owner directive (2026-11-04): qualify 384 kHz at
-             the rated clock with the mixer OUT of the path before adopting a
-             faster clock. Set SystemFrequency="800MHz" only to reproduce the
-             diagnostic that showed the clock was the missing budget:
+             DEFAULT IS 800MHz by owner directive (2026-11-05), which supersedes
+             the 2026-11-04 directive that held this at 600MHz pending
+             qualification. The 600MHz hold is kept as history because the
+             diagnostic that justified the change is the measurement below: the
+             clock, not the code, was the missing budget.
+             Set SystemFrequency="600MHz" to reproduce the held state. Evidence:
                capture fill at 384 kHz, shipping shape MIXER=1 MAX_MIX_COUNT=2
                  preset 2   0.637 (600MHz) -> 0.851 (800MHz)
                  preset 0   0.764 (600MHz) -> 0.9995 (800MHz)
@@ -39,7 +41,7 @@
              DAC at ~-87 dBFS) lived in merge commit 71c79b0 and is NOT in this
              file. (An earlier note here claimed the opposite; it had the two
              maps inverted. Verify against AGENTS.md before acting on either.) -->
-        <Node Id="0" InPackageId="0" Type="XS3-L16A-1024" Oscillator="24MHz" SystemFrequency="600MHz" ReferenceFrequency="100MHz">
+        <Node Id="0" InPackageId="0" Type="XS3-L16A-1024" Oscillator="24MHz" SystemFrequency="800MHz" ReferenceFrequency="100MHz">
           <Boot>
             <Source Location="bootFlash"/>
           </Boot>
