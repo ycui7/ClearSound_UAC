@@ -56,6 +56,67 @@ or repeated wake/play streams.
 - both kills **plus** `xrun --io --xscope` image reload (`rig/load_xe.sh`): **recovered**
   (L-drive -37.7 / -80.4, R-drive -79.9 / -37.7, corr 0.036), then case 08 PASS.
 
+## Register investigation (2026-11-05, same image) - codec CONFIG hypothesis killed
+
+Two source reads proposed ES9219Q reg `0x02` `MIXING_N_AUTOMUTE_CONFIG` with
+`CH1_MIX_SEL=01` (routes channel-2 data to DAC1) as the latch, which fits the symptom on
+paper. Measured on the latched board, it is wrong.
+
+Working baseline (`REGister:READ?`, base64 path):
+`0x01=8C 0x02=34 0x03=40 0x07=00 0x0A=02 0x0D=00 0x0F=00 0x10=00 0x1B=C4 0x1D=00 0x40=89 0x41=01 0x48=02 0x4D=03 0x86=C0`
+
+Latched state, same reads:
+`0x01=8C 0x02=34 0x03=40 0x07=00 0x0A=02 0x0D=00 0x0F=00 0x10=00 0x1B=C4 0x1D=00 0x40=88 0x41=00 0x48=02 0x4D=02 0x86=C0`
+
+**Exactly three deltas, all clock/status bits:**
+
+| reg | working | latched | meaning |
+|---|---|---|---|
+| `0x40` CHIP_STATUS | `0x89` | `0x88` | clock-lock bit0 lost |
+| `0x41` | `0x01` | `0x00` | status lost |
+| `0x4D` LOCK_STATUS | `0x03` | `0x02` | lock bit0 lost |
+
+Every routing suspect is unchanged: `0x01=0x8C`, `0x02=0x34` with `CH1_MIX_SEL=00` (the
+hypothesised `0x05`/`0x01` was never present), `0x0D=0x00` mono-clear, and `0x0F/0x10=0x00`
+in both states, so there is no attenuation delta either.
+
+Single-write discriminator while latched, re-measuring separation after each write:
+
+| write | readback | L-only (micL/micR) | R-only | corr |
+|---|---|---|---|---|
+| `0x02=0x34` | `0x34` | -102.1 / -94.0 | -26.5 / -25.6 | +0.9990 |
+| `0x0D=0x00` | `0x00` | -94.2 / -93.8 | -26.6 / -25.7 | +0.9989 |
+| `0x01=0x8C` | `0x8C` | -98.3 / -92.8 | -26.3 / -25.5 | +0.9990 |
+| `0xC0=0x01` soft reset | `0x00` | -95.0 / -90.8 | -96.7 / -94.5 | chip dead, reload required |
+
+No routing write restored separation. The soft reset proves the read path reflects live
+silicon (registers visibly move), so the register equality is genuine and not shadow RAM.
+
+**Where that leaves the mechanism.** A codec that cannot resolve LRCLK framing cannot
+distinguish slot 1 from slot 2: a left-only stream puts zero into both outputs, a right-only
+stream puts the same word into both, coherently at +6 dB - which is exactly the measured
+asymmetry, without any register being misconfigured. The fault is therefore in the I2S
+clock/framing interface feeding the codec, upstream of every readable register.
+
+Complication to resolve, not hand-wave: the DUT's own builtin ADC path (`hw:3,0`, same chip)
+still returns a usable 1 kHz tone while latched (-113 dBFS on R-drive, vs -119 dBFS working),
+so some clocking survives. Either lock bit0 is not what it appears, or the ADC and DAC sides
+differ in how they derive framing.
+
+Corrections to assumptions held earlier in this investigation:
+
+- boot `0x02` is `0x34`, **not** `0x04` (bits 5:4 set - automute config region)
+- boot `0x0D` is `0x40`; `0x00` is the post-`AudioHwConfig` value, so "AudioHwInit writes
+  `0x0D=0x00`" was wrong
+- `.85` build shape is `PCM_DSP_EN=1 CSD_DIAG_MIDI=1 CSD_DSP_PRESET_DEFAULT=2 CSD_GEN_EN=1
+  CSD_GEN_INSTRUMENT MIXER=1 MAX_MIX_COUNT=2` (`release/RELEASE-2026.11.01.85.md:19-20`), so
+  the mixer and its boot-once tables ARE live - reading defaults out of `xua_defs.h` gives
+  `MIXER=0` and is not the release shape
+- `POWER:TIMEout?` is rejected on `.85`: `-113,'Undefined header'`
+
+Board left: recovered by image reload, case 08 PASS -
+`L-only: micL -22.1 micR -65.0 (isolation +42.8 dB) | R-only: micL -63.0 micR -21.0 (isolation +42.0 dB)`.
+
 ## Open questions for the fix
 
 - What in step 2 latches it: the S32_LE raw stream, the sample-rate/format transition away from
