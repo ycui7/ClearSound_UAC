@@ -126,44 +126,112 @@ def alsa_cards():
     return out
 
 
+# --- accepted capture sensors -------------------------------------------------
+# Two sensors are accepted. They are NOT interchangeable in what they can prove,
+# so the kind actually used is printed with every verdict:
+#
+#   calibrated     miniDSP E.A.R.S. (USB 2b32; card name "E.A.R.S Gain: 36dB").
+#                  Known 36 dB capsule gain, measurement flat, so absolute dBFS
+#                  readings are comparable with the release note.
+#   uncalibrated   bench stereo mic -- Avnera/Mangotek USB-C audio adapter
+#                  (USB 170d:0546; card name "USB-C male connector audio adap").
+#                  Fixed, UNKNOWN capsule gain and no capture-volume control at
+#                  all. Every rule in verdict() is a DIFFERENCE between two
+#                  captures, so this sensor can still decide those rules. What it
+#                  cannot support is an absolute SPL claim, and the report says
+#                  that instead of silently borrowing E.A.R.S. calibration.
+#
+# Match on the punctuation-stripped card name: the probe announces itself as
+# "E.A.R.S Gain: 36dB", and the dots defeat a plain "ears" substring test, which
+# once made this file report a present, enumerated probe as missing.
+CAPTURE_SENSORS = (
+    ("ears",         ("earsgain", "minidsp", "usbaudioears"), "calibrated"),
+    ("bench-stereo", ("audioadap", "adap"),                   "uncalibrated"),
+)
+# Tokens that belong to the PLAYBACK device. A capture sensor must not carry
+# any of them. Without this rule the "ears" spelling matched Cl**ears**ound,
+# the matrix recorded the DAC itself as the microphone, and arecord then failed
+# on a playback-only card ("Sample format non available: S32_LE") -- a confusing
+# hardware error that was really a device-selection bug. "E.A.R.S Gain" is
+# matched as the joined spelling "earsgain", which cannot occur in ClearSound.
+PLAYBACK_TOKENS = ("clearsound", "xmos", "uac2", "dac")
+AUDIBLE_MIN_SNR = 6.0        # dB of stimulus over the capture's own floor, or
+                             # the probe is not hearing the DAC at all
+_PLAYBACK_NORM = tuple(t for t in (x.lower() for x in PLAYBACK_TOKENS))
+CAPTURE_SENSOR = ["unknown"]  # set by find_ears_card(); read by the report
+NOT_RUN = [False]             # set by verdict(); probe-failure, not a verdict
+
+
+def _norm(name):
+    return "".join(c for c in name.lower() if c.isalnum())
+
+
+def capture_sensor():
+    """Which sensor the last run used, with its calibration class."""
+    return CAPTURE_SENSOR[0]
+
+
+def sensor_kind(name):
+    """Classify a card name so an explicitly chosen card cannot overclaim."""
+    low = _norm(name)
+    if any(t in low for t in _PLAYBACK_NORM):
+        return f"UNRECOGNISED sensor ({name}) -- that is the playback device"
+    for label, pats, kind in CAPTURE_SENSORS:
+        if any(_norm(x) in low for x in pats):
+            return f"{label} ({kind})"
+    return f"UNRECOGNISED sensor ({name})"
+
+
 def find_ears_card(explicit=None):
-    """Resolve the E.A.R.S. capture card.
+    """Resolve the capture card, accepting either accepted sensor.
 
     Card numbers are assignment order, not identity -- they move when anything
     else is plugged in or when the DAC re-enumerates (every load does), so an
     auto-detected number is safer than a remembered one, and a remembered one
     is safer than a hard-coded constant.
+
+    E.A.R.S. wins when both sensors are present, because it is the calibrated
+    one. A --ears card number that matches neither known sensor is still used,
+    but is labelled UNRECOGNISED and the premise gate in verdict() decides
+    whether it can hear anything at all.
     """
     cards = alsa_cards()
     if explicit is not None:
         if explicit not in cards:
             raise SystemExit(f"--ears {explicit} is not a sound card. Present: {cards}")
+        CAPTURE_SENSOR[0] = sensor_kind(cards[explicit])
         return explicit
-    for num, name in cards.items():
-        # The card announces itself as "E.A.R.S Gain: 36dB" -- the dots break
-        # a plain "ears" substring test, which made this function report a
-        # present, enumerated probe as missing. Strip punctuation before
-        # matching; keep "minidsp" for the vendor-line spelling.
-        low = "".join(c for c in name.lower() if c.isalnum())
-        if "ears" in low or "minidsp" in low:
-            return num
+    for label, pats, kind in CAPTURE_SENSORS:
+        for num, name in sorted(cards.items()):
+            low = _norm(name)
+            if any(t in low for t in _PLAYBACK_NORM):
+                continue        # that is the playback device, never the mic
+            if any(_norm(x) in low for x in pats):
+                CAPTURE_SENSOR[0] = f"{label} ({kind})"
+                return num
     raise SystemExit(
-        "No E.A.R.S. capture card found. Present cards:\n  "
+        "No accepted capture sensor found. Accepted sensors:\n"
+        "  calibrated   miniDSP E.A.R.S.   -- lsusb | grep -i 2b32\n"
+        "  uncalibrated bench stereo mic   -- lsusb | grep -i 170d:0546\n"
+        "Present cards:\n  "
         + "\n  ".join(f"card {k}: {v}" for k, v in sorted(cards.items()))
-        + "\nThe miniDSP probe must be on USB for the acoustic gate to run. "
-          "Per the rig notes it should also be on a DIFFERENT USB controller "
-          "than the DAC, or case A will fail on electrical pickup.\n"
-          "Check: lsusb | grep -i 2b32 ; arecord -l")
+        + "\nPer the rig notes the mic must sit on a DIFFERENT USB controller than "
+          "the DAC, or case A fails on electrical pickup.")
 
 
 def find_dac_card(explicit=None):
     cards = alsa_cards()
     if explicit is not None:
         return explicit
+    # The playback card's name depends on the BUILD SHAPE: the debug image
+    # announces "XMOS AUDIO XMOS UAC2.0", the SPECIALTYCIRCUITS_RELEASE image
+    # announces "ClearSound DAC (UAC2.0)" (card label DACUAC20). Matching only
+    # the XMOS spelling made every release-shape gate report "no DAC found".
     for num, name in cards.items():
-        if "XMOS" in name and "UAC2" in name.upper():
+        up = name.upper()
+        if "UAC2" in up and any(k in up for k in ("XMOS", "CLEARSOUND", "SPECIALTYCIRCUITS")):
             return num
-    raise SystemExit(f"No XMOS UAC2.0 playback card found. Present: {cards}")
+    raise SystemExit(f"No ClearSound/XMOS UAC2.0 playback card found. Present: {cards}")
 
 
 def numid_by_name(card, needle, index=0):
@@ -522,6 +590,28 @@ def verdict(results):
     FL = lambda c, ch: results[c][ch].floor
     lines, ok = [], True
 
+    # --- premise: is this sensor hearing the DAC at all? ---------------------
+    # Every rule below is a difference between two captures. If the reference
+    # case does not lift the stimulus above the capture's own noise floor, those
+    # differences are all measuring the floor, and a FAIL there is a statement
+    # about the microphone, not about the firmware. A probe that cannot work
+    # must report probe failure and never a verdict -- the same rule that makes a
+    # null alignment probe exit nonzero instead of printing "0 0".
+    ref_peak = max(L("B_both", "L"), L("B_both", "R"))
+    ref_floor = max(FL("B_both", "L"), FL("B_both", "R"))
+    if ref_peak - ref_floor < AUDIBLE_MIN_SNR:
+        NOT_RUN[0] = True
+        lines.append(("!", False,
+            f"PROBE CANNOT HEAR THE DAC: 1 kHz reads {ref_peak:+.1f} dBFS against a "
+            f"{ref_floor:+.1f} dBFS capture floor (SNR {ref_peak - ref_floor:+.1f} dB, "
+            f"need >= {AUDIBLE_MIN_SNR:.0f}) on sensor {capture_sensor()}. Cases B..G "
+            "would only measure the noise floor, so NO firmware verdict is issued. "
+            "Move the mic against the speaker, raise DAC output, or use the "
+            "calibrated E.A.R.S."))
+        for tag, passed, msg in lines:
+            print(f"VERDICT [{tag}] {'PASS' if passed else 'FAIL'}  {msg}")
+        return False, lines
+
     # --- A is the gate -------------------------------------------------------
     # Compare streamed all-zero samples against NOTHING streamed (A0), not
     # against the capture's own noise floor. This rig carries a ~1 kHz component
@@ -649,7 +739,9 @@ def self_test():
 # --------------------------------------------------------------------- main ---
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ears", type=int, help="E.A.R.S. card number (auto-detected if omitted)")
+    ap.add_argument("--ears", type=int,
+                    help="capture card number; either the calibrated miniDSP E.A.R.S. "
+                         "or the uncalibrated bench stereo mic (auto-detected if omitted)")
     ap.add_argument("--dac", type=int, help="DAC card number (auto-detected if omitted)")
     ap.add_argument("--secs", type=int, default=3)
     ap.add_argument("--keep", help="directory for WAVs (kept for post-mortem)")
@@ -661,11 +753,12 @@ def main():
     ears = find_ears_card(a.ears)
     results, tmp = run_matrix(dac, ears, a.secs, a.keep)
     ok, _ = verdict(results)
-    print(f"\nWAVs kept in {tmp}")
-    print("ACOUSTIC GATE:", "PASS" if ok else "FAIL")
+    print(f"\nsensor: {capture_sensor()}")
+    print(f"WAVs kept in {tmp}")
+    print("ACOUSTIC GATE:", "NOT RUN" if NOT_RUN[0] else ("PASS" if ok else "FAIL"))
     print("\nFirmware is not qualified until this prints PASS. The MIDI matrix "
           "(hw_acceptance.py) proves the control path only.")
-    return 0 if ok else 1
+    return 0 if ok else (2 if NOT_RUN[0] else 1)
 
 
 if __name__ == "__main__":
