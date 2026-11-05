@@ -5,6 +5,20 @@ the `clearsound-dac-xmos` skill; action log in `../LOG.md` (ub-mode).
 Release: `release/` + tag. Current: `v2026.11.01.85` (app 302bb22, DFU bin
 md5 e944e3cc50bc631878b9959855fbfc53). Previous: `v2026.11.01.31`.
 
+## Bit-perfect tap: ships in the release, armed only by MIDI
+
+The loopback tap MUST be compiled into release images (owner directive
+2026-11-05), so field verification is possible on shipping firmware. It is inert
+by default -- `csd_mb_loop_en` is a file-static and therefore starts at zero --
+and the only way to arm it is the MIDI SCPI row `DEBUG:LOOPback 1`, which sits
+outside the release gate on purpose. So `-DCSD_LOOPBACK_TAP` belongs in the
+release flag set next to `-DSPECIALTYCIRCUITS_RELEASE`.
+
+Two invariants, because an armed tap rewrites the stream: `take()` returns the
+zero-initialised `csd_mb_loop_tx[ch]` while armed, so an image left armed
+delivers literal zeros to the host; and a release must never arm it at boot.
+Anything that arms the tap disarms it on every exit path, failures included.
+
 ## Release rule (directive 2026-11-01)
 
 For each release, test BOTH builds: the debug build (no
