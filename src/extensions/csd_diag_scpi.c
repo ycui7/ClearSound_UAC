@@ -1249,6 +1249,31 @@ bad:
     return SCPI_RES_ERR;
 }
 
+/* ---- PERSISTence:SAVE -- owner case 4 --------------------------------------
+ * The journal's WRITE side existed (every VOLume:TRIM set journalled) but there
+ * was no way for a rig to ask for a save explicitly, so case 4 could not prove
+ * that a written pair reaches QSPI and survives a LOAD -- the suite reported it
+ * as TODO naming this exact gap.
+ *
+ * It takes no argument on purpose. The values to persist are the ones the
+ * mailbox already holds, and tile[0] must not read that mailbox itself (that
+ * mistake journalled zeros while the sequence number climbed), so the setter's
+ * tile[1] side passes the pair down as an argument. A save of "whatever the
+ * host last set" is the only contract that cannot half-persist.
+ */
+static SCPI_FPTR_CMD scpi_result_t persist_save(scpi_t *context)
+{
+    if (!csd_diag_trim_save(csd_mb_get_trim())) {
+        /* Distinguished from a rejected parameter on purpose: the value stands
+         * for this power cycle, only its persistence failed. SYSTem:ERRor:NEXT?
+         * is how the rig tells "saved" from "set but not journalled" -- silence
+         * here would let a dead QSPI partition look like a working save. */
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
 /* ---- POWER:TIMEout -- owner case 14, directive 2026-11-05 -----------------
  * Semantics are the owner's, verbatim: 0 enters power saving immediately and
  * stays there; a negative value keeps the box powered up indefinitely; any
@@ -1838,6 +1863,7 @@ static const scpi_command_t csd_commands[] = {
      * probe -- the owner's spec requires a host to set and read it, so these
      * rows sit OUTSIDE the release gate, beside the trim rows for the same
      * reason. */
+    { .pattern = "PERSISTence:SAVE",        .callback = persist_save    },
     { .pattern = "POWER:TIMEout",           .callback = power_timeout_set },
     { .pattern = "POWER:TIMEout?",          .callback = power_timeout_q   },
     { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
