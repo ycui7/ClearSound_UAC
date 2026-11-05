@@ -56,8 +56,12 @@
 #define ES9219Q_AUTOMUTE_LEVEL					(0x05)
 #define ES9219Q_AUTOMUTE_CONFIG_MUTE_ON			(1 << 6)    /* 2'b01: mute on automute */
 #define ES9219Q_ANALOG_AUTOMUTE_HOLD			(0 << 5)    /* DON'T yank reg 3 to -22 dB */
-#define ES9219Q_AUTOMUTE_TIMER_FAST			(1 << 4)    /* no x8 stretch of the time */
-#define ES9219Q_MIX_SEL_DEFAULTS				(0x04)    /* CH2_MIX=01, CH1_MIX=00 (reset) */
+/* The automute/mixing VALUE literals (AUTOMUTE_TIMER_FAST, MIX_SEL_DEFAULTS)
+ * were removed by owner directive 2026-11-05: nothing in this project may put
+ * the DAC's CH1_MIX_SEL/CH2_MIX_SEL fields into a state that routes one I2S
+ * slot to both channels, and the old MIX_SEL_DEFAULTS literal (0x04) was wrong
+ * anyway -- the chip's measured reset value here is 0x02=0x34. The register
+ * ADDRESSES above stay defined because they are read back and refused on write. */
 
 #define ES9219Q_DOP_N_VOL_RAMP_RATE				(0x06)
 #define ES9219Q_DOP_N_VOL_RAMP_RATE_VALUE			((7 << 4) | 2)

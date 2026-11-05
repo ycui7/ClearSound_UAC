@@ -1519,16 +1519,21 @@ void csd_AudioHwInit(const csd_config_t &config)
     DAC_REGWRITE    (ES9219Q_AMP_CONFIG,                    (uint8_t)(ES9219Q_AMP_PDB_SS | ES9219Q_AMP_MODE) ); 
     DAC_REGWRITE    (ES9219Q_ANALOG_VOL_CTRL,               ((0b010 << 5) | (AnalogVolume & 0x1F)));
 
-    /* Automute: DISABLED per user directive (2026-10-31). It never fixed
-     * case A -- the artifact scales with unmuted exposure and survives the
-     * automute state (0x48=0x32 asserted, first stream still popped; rig/
-     * case_a_timing.py, rig/automute_ab.py, rig/first_stream_pop.py).
-     * Left commented, with the reasoning, per the dead-code rule:
-     *
-     *   DAC_REGWRITE(ES9219Q_MIXING_N_AUTOMUTE_CONFIG, MUTE_ON|ANALOG_HOLD|TIMER_FAST|MIX_SEL_DEFAULTS);
-     *   DAC_REGWRITE(ES9219Q_AUTOMUTE_TIME,  128);
-     *   DAC_REGWRITE(ES9219Q_AUTOMUTE_LEVEL, 104);
-     */
+    /* NO channel-mixing or automute writes, by owner directive 2026-11-05.
+     * Reg 0x02 (MIXING_N_AUTOMUTE_CONFIG) carries CH1_MIX_SEL/CH2_MIX_SEL, and
+     * those fields route one I2S slot to both DAC channels -- a codec that is
+     * told to mix one channel onto both reproduces the right slot on both
+     * outputs and goes silent on a left-only stream. Nothing here may put the
+     * DAC into that state, so the former writes (0x02 with MIX_SEL_DEFAULTS,
+     * 0x04 automute time 128, 0x05 automute level 104) are REMOVED rather than
+     * left commented, and reg 0x02/0x04/0x05 are additionally refused at the
+     * SCPI REGister:WRITE choke point in csd_diag_regs.xc. The chip runs these
+     * registers on its own reset defaults (measured boot 0x02=0x34, which is
+     * NOT the 0x04 the old MIX_SEL_DEFAULTS literal claimed).
+     * Earlier context, kept because it explains why automute was useless here:
+     * automute never fixed case A -- the artifact scales with unmuted exposure
+     * and survives the automute state (0x48=0x32 asserted, first stream still
+     * popped; rig/case_a_timing.py, rig/first_stream_pop.py). */
     DAC_REGWRITE    (ES9219Q_GPIO12_CONFIG,                 ((3 << 4) | 1) ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_LO,                   UserVolummeL ); //GPIO2 CLK out, GPIO1 lock status
     DAC_REGWRITE    (ES9219Q_VOL_CTRL_HI,                   UserVolummeR ); //GPIO2 CLK out, GPIO1 lock status

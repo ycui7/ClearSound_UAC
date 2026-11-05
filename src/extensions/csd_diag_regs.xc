@@ -242,6 +242,39 @@ int csd_diag_reg_write(unsigned reg, unsigned val)
 {
     if (reg > 0xFFu || val > 0xFFu) return 0;
 
+    /* Refused registers, by owner directive 2026-11-05: the DAC's channel
+     * mixing is not ours to touch.
+     *
+     *   0x02 MIXING_N_AUTOMUTE_CONFIG  CH1_MIX_SEL/CH2_MIX_SEL route one I2S
+     *                                  slot to BOTH DAC channels. Writing it is
+     *                                  how a bench step can silently produce
+     *                                  "left input dead, right input on both
+     *                                  outputs" while every host control still
+     *                                  reads nominal.
+     *   0x04 / 0x05 AUTOMUTE_TIME/LEVEL  same register family, same reason, and
+     *                                  automute was proven inert for the pop
+     *                                  artifact anyway.
+     *   0xC0 SOFT_RESET                  not mixing, but it belongs here for
+     *                                  the same class of hazard: this build has
+     *                                  no codec power-on-reset path (nothing
+     *                                  asserts the reset GPIO; csd_AudioHwInit
+     *                                  only releases it), so a soft reset that
+     *                                  does not come back is unrecoverable
+     *                                  without pulling the supply. Measured:
+     *                                  one 0xC0 write left the chip at all-zero
+     *                                  registers and both outputs silent
+     *                                  through two stamp-proven .xe reloads,
+     *                                  USBDEVFS_RESET, format changes and a
+     *                                  codec re-init.
+     *
+     * Reads stay open -- refusing them would hide the state we need to see.
+     * Return 0 makes the SCPI layer push a hardware error rather than pretend
+     * the write landed. */
+    if (reg == 0x02u || reg == 0x04u || reg == 0x05u || reg == 0xC0u)
+    {
+        return 0;
+    }
+
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_REGWR;
         uc_audiohw_diag <: reg;
