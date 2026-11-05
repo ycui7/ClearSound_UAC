@@ -162,3 +162,60 @@ still open (raw power cycle, trim survival across a DFU update).
 - Gate: acoustic (rig mix + mute) across a full shutdown/wake cycle, plus
    verification that wake restores trim, mute state, LED tier and DSP
    preset exactly as before.
+
+## Acceptance suite gaps (added 2026-11-05, owner's 14-case list)
+
+Suite: `csd-js-tester/rig/csd_suite.py`. Each case reports PASS / FAIL /
+NOT-RUN / TODO. NOT-RUN indicts the fixture, never the firmware; TODO names
+the missing dependency. Items below are the dependencies.
+
+1. **POWER:TIMEout control + persistence (case 14).** No such SCPI header
+   exists (`POWER:` appears 0 times in the image). Owner semantics: `0` =
+   sleep now and stay asleep, negative = never sleep, positive = seconds,
+   default 300 s; any non-zero value is stored in persistence and applied at
+   power-up. Needs: `POWER:TIMEout?` / `POWER:TIMEout <sec>`, a runtime
+   timeout in `csd_power.c`, and a field in the QSPI journal record
+   (`csd_trim_store.c`, bump `CSD_TRIM_REC_VERSION` and invalidate v1).
+2. **No persistence save command (case 4).** The journal read side is live
+   (`VOLume:TRIM:STATus?` = 1048576,1,1,197,0,2,2; writing -96,-24 counts
+   reads back -96,-24) but there is no header that commits a written pair to
+   flash. Add `PERSISTence:SAVE`. Case 04 then stops being a TODO.
+   Do not detect command existence by "did it time out" -- ask
+   `SYSTem:ERRor:NEXT?`, and drain the FIFO before trusting an entry: a stale
+   `-113` from an earlier probe once blamed the wrong command entirely.
+3. **L/R trim not independent (case 10, REAL FAIL).** Setting LEFT to -48
+   counts (-6 dB) moved BOTH channels ~5.4 dB; RIGHT-only moved both ~6.0 dB.
+   The case now dumps regs 0x0F/0x10 (channel volume) and 0x11..0x14 (master
+   trim) after each leg -- read that to localise it. Suspect both per-channel
+   trims land in MASTER TRIM. Units are counts of 0.125 dB, signed, 0..-256;
+   asking in dB is a harness bug, not a firmware one.
+4. **Volume applied twice (case 09, REAL FAIL).** Control declares 0..192 over
+   -48..0 dB (0.25 dB/count). Measured full(192) -21.0 dBFS -> 96 gave -69.5
+   dBFS: a 48.5 dB drop for a 24 dB ask. Case now samples three points and
+   prints the codec CH1/CH2 volume regs at each. Suspect the two channel
+   controls summing into one register, or the stage applying twice.
+5. **Bit-perfect unmeasurable (cases 6/7).** `DEBUG:LOOPback?` reports the tap
+   enabled with `tx_frames=0`, and SCPI stops answering entirely while a
+   stream is active (the gate's arm/clear commands return nothing). Consequence:
+   the gate captures all zeros and scores it as a result. The suite now refuses
+   to run the gate unless the tap delivers frames. Root cause to chase: diag
+   task starvation on tile[0] under load (census: 5/8 threads, 27/32 chanends).
+   `DEBUG:MIXer:FRAMES?`/`HWCfg?` are release-gated out, so a debug-shape image
+   may be required to instrument this.
+6. **Built-in mic (case 11).** Capture opens (S32_LE, 48k) but is a structured
+   stream, not acoustic: spectral flatness 0.33/0.36, autocorrelation 0.93/0.96,
+   dominant line +35.6 dB. That is the diagnostic stamp path, matching the
+   standing finding. Confirm against the schematic whether an ADC/mic is fitted
+   at all; if not, case 11 must be gated on hardware presence instead of
+   failing forever. A distinct-value count cannot tell these apart -- a frame
+   counter also has many distinct values.
+7. **DFU twice (case 5).** Gated behind `--allow-dfu`: flashing is not
+   authorised on this bench (owner directive 2026-11-05, RAM-only). Implement
+   flash -> verify audio -> flash again -> verify audio; the second pass is the
+   one that proves the new image's own DFU class still enumerates.
+8. **idle_power_cycle.py expectations vs the simplified sequences (case 14).**
+   Rig reports "reg15/16 unchanged at T1 -- the down sequence did not run".
+   Check whether `sequence_down()` still drives channel volume to the floor;
+   the pre-simplification state machine did. Either restore the step or fix the
+   rig's premise -- but decide deliberately, do not let a stale instrument
+   define the verdict.
