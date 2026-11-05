@@ -237,19 +237,37 @@ unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
  * rule for reg 3; a true per-channel trim would need USE_SHARED_VOLUME=0
  * (reg 27) plus datasheet work and is deliberately NOT assumed.
  *
- * Scale: csd_trim_counts_to_mult_q29 is Q2.29 (2^29 = unity, the same
- * scale the pre-directive mixer multiply used -- gate-verified acoustics,
- * reproduced by construction). Q31 = Q2.29 >> 2 is exact (low 2 bits of a
- * Q2.29 unity are zero at this grid); capped to 0x7FFFFFFF per datasheet. */
+ * Scale: csd_trim_counts_to_mult_q29 is Q2.29 (2^29 = unity) and stays in the
+ * MIXER domain -- csd_mix_apply_trim() consumes that word. The CODEC domain is
+ * different: datasheet Register 17-20 is signed with full scale 32'h7FFFFFFF,
+ * so the codec word is the Q2.29 value shifted LEFT by 2 and clamped (see
+ * csd_trim_master_trim_q31). The two domains must not share a unity constant:
+ * conflating them is what silenced the board. The old comment here called the
+ * >>2 mapping "gate-verified acoustics" -- it never was; the acoustic gate was
+ * failing on this very register the whole time. */
 unsigned csd_trim_reg_byte(unsigned q31, unsigned idx)
 {
-    /* See csd_gen.h: byte order across regs 17..20 is settled by
-     * rig/trim_reg_probe.py leg 5, NOT by reasoning about the header.
-     * Default: reg 17 holds the MOST significant byte. */
-#ifdef CSD_TRIM_BYTES_SWAPPED
-    return (q31 >> (8u * idx)) & 0xFFu;            /* reg 17 = LSB          */
+    /* Byte order across regs 17..20 was MEASURED on silicon 2026-11-05, not
+     * reasoned from the header (the old MSB-first default was a guess and it
+     * silenced the board: see LOG.md 2026-11-05 and the ladder in
+     * csd-js-tester/rig/trim_boot_gate.py).
+     *
+     * Datasheet ES9219 v1.3 Register 17-20 is a [31:0] field, and the chip's
+     * multi-byte convention puts the LOW register on the LOW bits -- proven by
+     * the adjacent volume pair ([7:0] VOLUME_CH1 on reg 15, [15:8] VOLUME_CH2
+     * on reg 16) and by this file's own ES9219Q_VOL_CTRL_LO/HI naming. So
+     * reg 0x11 == MASTER_TRIM[7:0].
+     *
+     * Acoustic evidence: writing the datasheet unity word FF FF FF 7F gives a
+     * monotonic 0/-3/-6/-12/-20/-30 dB ladder; the same word written MSB-first
+     * (7F FF FF FF) reads -101.8 dBFS at the 1 kHz bin -- 74 dB down, i.e.
+     * inaudible. An MSB-first decoder cannot produce that.
+     *
+     * CSD_TRIM_BYTES_MSB_FIRST exists only to reproduce the refuted build. */
+#ifdef CSD_TRIM_BYTES_MSB_FIRST
+    return (q31 >> (8u * (3u - idx))) & 0xFFu;     /* reg 17 = MSB (refuted) */
 #else
-    return (q31 >> (8u * (3u - idx))) & 0xFFu;     /* reg 17 = MSB          */
+    return (q31 >> (8u * idx)) & 0xFFu;            /* reg 17 = LSB (silicon)  */
 #endif
 }
 
@@ -271,7 +289,15 @@ unsigned csd_trim_master_trim_q31(unsigned packed)
     if (common < -CSD_TRIM_MAX88) common = -CSD_TRIM_MAX88;
     int counts = common / 32;                      /* 8.8 grid -> 0.125 dB steps */
     unsigned q29 = csd_trim_counts_to_mult_q29(counts);
-    unsigned q31 = q29 >> 2;
+    /* Q2.29 -> codec Q31 is a shift LEFT by 2, clamped. The datasheet defines
+     * MASTER_TRIM as a 32-bit SIGNED value whose full scale is 32'h7FFFFFFF
+     * ("Defaults to full-scale (32'h7FFFFFFF)"), so unity in the codec domain
+     * is 2^31-1 -- not 2^29. The previous `q29 >> 2` mapped 0 dB to
+     * 0x08000000 (= -30 dB as a Q31 fraction); with the MSB-first byte-order
+     * guess on top, the chip received 0x00000008 and the analog output was
+     * -168 dB, i.e. silent. Verified against the datasheet ladder in
+     * rig/trim_boot_gate.py: 0 dB now writes FF FF FF 7F and is audible. */
+    unsigned q31 = (q29 >= 0x20000000u) ? 0x7FFFFFFFu : (q29 << 2);
     if (q31 > 0x7FFFFFFFu) q31 = 0x7FFFFFFFu;
     return q31;
 }

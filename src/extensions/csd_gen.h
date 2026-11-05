@@ -305,16 +305,18 @@ unsigned csd_trim_master_trim_q31(unsigned packed);  /* the ONE conversion */
 /* MASTER TRIM base register (ES9219Q regs 17..20 == 0x11..0x14). Named
  * here rather than pulling es9219q.h across the mailbox boundary. */
 #define CSD_TRIM_REG_BASE 0x11u
-/* Byte order of the 32-bit MASTER TRIM across regs 17..20 is a MEASURED
- * question, not a header detail: datasheet v1.3 gives the value semantics
- * and the -1 dB example but no bit-to-register map, and the es9219q.h
- * comments ("byte 0 of master trim" on reg 0x11) read MSB-first while a
- * little-endian reading is equally arguable. Default = reg 0x11 holds the
- * MOST significant byte (the example 0x721482BF is byte-meaningful that
- * way). rig/trim_reg_probe.py leg 5 settles it empirically: apply -12 dB
- * trim, then compare null depth under both orders (-DCSD_TRIM_BYTES_
- * SWAPPED); the order giving the expected null is the silicon's. Until
- * that leg runs, do not re-reason this from the header. */
+/* Byte order of the 32-bit MASTER TRIM across regs 17..20: SETTLED by
+ * measurement on 2026-11-05 -- reg 0x11 holds the LEAST significant byte.
+ * Datasheet v1.3 gives value semantics (signed, full scale 32'h7FFFFFFF,
+ * -1 dB = 0x721482BF, which evaluates to exactly -1.000 dB as Q31) but no
+ * bit-to-register map; the chip's convention comes from the adjacent volume
+ * pair ([7:0] VOLUME_CH1 = reg 15, [15:8] VOLUME_CH2 = reg 16) and from this
+ * project's own ES9219Q_VOL_CTRL_LO/HI names. Acoustic ladder in
+ * csd-js-tester/rig/trim_boot_gate.py: unity as FF FF FF 7F is audible and
+ * monotonic over 0..-30 dB; the same word as 7F FF FF FF is -101.8 dBFS at
+ * the 1 kHz bin (74 dB down = inaudible). The former MSB-first default was a
+ * header guess and it muted the product; -DCSD_TRIM_BYTES_MSB_FIRST exists
+ * only to reproduce that build. Do not re-reason this from the header. */
 /* Byte idx (0 = reg 17) of the Q31 word, order behind the ifdef above.
  * DEFINED IN csd_gen_mailbox.c (a plain function, not a header inline: no
  * static-inline precedent in this codebase and XC's parser has rejected
