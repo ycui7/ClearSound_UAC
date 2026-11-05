@@ -226,6 +226,41 @@ the missing dependency. Items below are the dependencies.
    route to the floor. Re-run the rig before restoring any step: the premise may
    simply have been stale.
 
+11. **Built-in mic returns digital silence -- case 11 is a bring-up item, not a
+    regression, and not a "stamp pattern" either.**
+    Measured on a clean boot with `rig/mic_probe.py`: 96,000 samples per channel
+    contain exactly ONE distinct value; rms is digital zero; the "top peaks" are
+    an artefact of a constant signal. Both channels identical. So the ADC is not
+    delivering samples at all -- it is not producing a pattern, and it is not
+    producing noise.
+
+    Evidence that removes two wrong theories:
+      * Not a regression from the bit-perfect work: the known-good release
+        (346fe14), run with the CURRENT fixture, gives the same result.
+      * Not the loopback tap: the signature is unchanged with the tap verified
+        disarmed.
+      * The rig's earlier "autocorr 0.93 / dominant line +36 dB / rms -88 dBFS"
+        was measured in a DEGRADED device state, and arecord could not even open
+        the capture stream there ("Unable to install hw params" at 48 k and at
+        384 k, with no playback running). After a fresh `xrun` load the stream
+        opens normally. So that reading described a stuck board, not a microphone.
+
+    Owner's information (2026-11-05): the mic ADC has NO control registers and
+    starts streaming as soon as MCLK is up -- so there is nothing to configure on
+    the ADC, and exact zeros mean it is not being clocked or its DOUT is not
+    reaching the port. Nothing in `src/` configures a capture clock domain, and
+    `ES9219Q_INPUT_SELECT` (reg 0x01) is written by nobody.
+
+    NEEDED FROM OWNER: the capture clock plan -- which pin supplies MCLK/BCLK/LRCLK
+    to the mic ADC, and whether the codec generates them (its GPIO clock-out, cf.
+    the "GPIO2 CLK out, GPIO1 lock status" note beside the codec init writes) or
+    the XMOS drives them. With that, this is a small bring-up; without it the fix
+    is guesswork against a register-less part.
+
+    Also worth its own look: the capture stream becoming unopenable after heavy
+    384 kHz playback and power-save cycles (separate defect, reproducible within a
+    long session, cleared by reloading the image).
+
 9. **Bit-perfect tap has no audio-path call sites -- case 06 cannot pass.**
    `csd_mb_loop_put()`, `csd_mb_loop_put_site()` and `csd_mb_loop_take()` are
    defined in `csd_gen_mailbox.c` and read by the SCPI side, but are called by
