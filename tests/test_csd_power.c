@@ -3,7 +3,7 @@
  * implementation (ub-mode): each assertion is a contract the firmware
  * wiring relies on, so green is evidence, not decoration.
  *
- *   gcc -O2 -I src/extensions tests/test_csd_power.c \
+ *   gcc -O2 -DCSD_IDLE_POWER -I src/extensions tests/test_csd_power.c \
  *       src/extensions/csd_power.c -o /tmp/tpower && /tmp/tpower
  *
  * THE WITNESS RULE (the burned-week lesson): a free-running I2S clock proves

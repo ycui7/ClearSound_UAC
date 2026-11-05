@@ -10,6 +10,12 @@
  */
 #include "csd_power.h"
 
+/* Whole feature is compile-gated: without the flag this TU contributes no code,
+ * so a build that does not ask for idle power is unchanged. The host test
+ * compiles with -DCSD_IDLE_POWER. */
+#ifdef CSD_IDLE_POWER
+
+
 #define PW_Q_MAX 8   /* longest sequence is 4 down + 4 up, with headroom */
 
 static unsigned q[PW_Q_MAX];
@@ -175,3 +181,26 @@ unsigned csd_power_next_action(void)
     if (q_head >= PW_Q_MAX) q_head = 0u;
     return a;
 }
+
+
+/* The DBG getters read feature state, so they must sit INSIDE the guard:
+ * csd_power.c is globbed into every build by XMOS_REGISTER_APP, so at the
+ * file tail they referenced undeclared statics and the feature-free release
+ * build failed to compile (measured 2026-11-05). */
+unsigned csd_power_idle_ms_dbg(void) { return idle_ms; }
+
+/* DIAGNOSTIC (temporary): the two flags that gate the ON-state decision.
+ * Printed because the bench saw idle stuck at 0 with the witness frozen,
+ * which this file's logic says cannot happen -- so one of these two is not
+ * what the code path implies, and only the value can say which. */
+unsigned csd_power_dbg_flags(void)
+{
+    return (activity_seen ? 1u : 0u) | (stream_stopped ? 2u : 0u) |
+           ((unsigned)state << 8);
+}
+#endif /* CSD_IDLE_POWER */
+
+
+/* Empty TU is not strictly legal C; this keeps the file well-formed when
+ * the feature is compiled out. */
+typedef int csd_pw_unused_t;

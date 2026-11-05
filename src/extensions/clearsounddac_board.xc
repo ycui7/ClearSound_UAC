@@ -18,12 +18,16 @@ extern "C" {
 #if PCM_DSP_EN
 #include "csd_dsp.h"
 #ifdef CSD_GEN_EN
-#include "csd_gen.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
+#include "csd_gen.h"
+#include "csd_power_state.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
 #include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
                              * caller -- the SQI ports live on this tile. See
                              * csd_trim_store.h. */
 #endif
-#include "csd_vol_mailbox.h" /* chanend diet 2026-11-04: ep0 (tile[0]) posts
+#include "csd_vol_mailbox.h"
+#ifdef CSD_IDLE_POWER
+#include "csd_power.h"
+#endif /* chanend diet 2026-11-04: ep0 (tile[0]) posts
                               * host volume/mute here; this task drains it in
                               * its select loop. Same tile, so a static is
                               * visible to both -- see csd_vol_mailbox.h. */
@@ -244,6 +248,17 @@ static int      volBtnDb8     = 0;            /* button offset, 8.8 dB */
 static unsigned volRegLastD[2]  = {0, 0};     /* dedupe for regs 15/16 */
 static unsigned volRegValidD[2] = {0, 0};
 static unsigned volRegLastA  = 0;             /* dedupe for reg 3 (analog) */
+#ifdef CSD_IDLE_POWER
+/* Owner hard requirement: 'volume must be restored to the value held before
+ * shutdown'. vol_apply_host_request OVERWRITES volHostDl8[], so driving to
+ * minimum for pop suppression destroys the prior level unless it is copied
+ * out first -- and vol_apply_all() on the way back up recomputes those same
+ * registers from those same words, so without this save the box returns
+ * permanently at -64 dB. Declared with the volume state it protects because
+ * the pop step and the restore both live in this task. */
+static int      pw_vol_saved[2]     = {0, 0};
+static unsigned pw_vol_saved_valid  = 0u;
+#endif
 static unsigned volRegValidA = 0;
 
 static void vol_clamp_button(void)
@@ -289,8 +304,24 @@ static int vol_analog_common(void)
 static void vol_apply_analog(int aCom, client interface i2c_master_if i2c)
 {
     unsigned regValueA = (unsigned)((-aCom) >> 8) & 0x1F;
-    if (volRegValidA && volRegLastA == regValueA) return;
+    if (volRegValidA && volRegLastA == regValueA) {
+#ifdef CSD_PW_TRACE
+        /* DIAGNOSTIC (temporary): the whole point of the wake path's
+         * invalidation call. A full codec re-init leaves the CHIP at its
+         * defaults while volRegLastA still holds the pre-shutdown value, so
+         * without csd_pw_invalidate_volume_caches() this branch is taken, the
+         * write is skipped as a no-op, and the box wakes at default gain
+         * forever while logging 'volume restored'. Printing the skip turns
+         * that silent failure into a line in the log. */
+        debug_printf("CSD_PW vol SKIP analog (cache says 0x%x)\n", regValueA);
+#endif
+        return;
+    }
     volRegLastA = regValueA; volRegValidA = 1;
+#ifdef CSD_PW_TRACE
+    debug_printf("CSD_PW vol WRITE analog reg3 -> 0x%x\n",
+                 (0b010 << 5) | regValueA);
+#endif
     ES9219Q_REGWRITE(ES9219Q_ANALOG_VOL_CTRL, ((0b010 << 5) | regValueA), i2c);
 }
 
@@ -302,7 +333,20 @@ static void vol_apply_digital(int ch, int aCom, client interface i2c_master_if i
     unsigned reg = (ch == 0) ? ES9219Q_VOL_CTRL_LO : ES9219Q_VOL_CTRL_HI;
     int code = (total <= 0) ? (-total + 64) / 128 : 0;   /* 0.5 dB/LSB, round */
     if (code > 255) code = 255;
-    if (volRegValidD[ch] && volRegLastD[ch] == (unsigned)code) return;   /* dedup */
+    if (volRegValidD[ch] && volRegLastD[ch] == (unsigned)code) {
+#ifdef CSD_PW_TRACE
+        /* DIAGNOSTIC (temporary): the write below prints VOLWR when it
+         * happens; this prints when the DEDUP swallows it. After a full codec
+         * re-init the chip is back at default while volRegLastD still holds
+         * the pre-shutdown code, so a missing
+         * csd_pw_invalidate_volume_caches() shows up as exactly two of these
+         * lines at wake and no VOLWR -- i.e. 'volume restored' logged, gain
+         * never returned. These registers are write-only (they read back 0),
+         * so this log, not a register read, is the evidence. */
+        debug_printf("CSD_PW vol SKIP digital ch%d (cache says %d)\n", ch, code);
+#endif
+        return;   /* dedup */
+    }
     volRegLastD[ch]  = (unsigned)code;
     volRegValidD[ch] = 1;
     ES9219Q_REGWRITE(reg, (unsigned)code, i2c);
@@ -332,6 +376,14 @@ static void vol_apply_host_request(unsigned channel, int valueA, int valueDL,
                                    client interface i2c_master_if i2c)
 {
     if (channel < 2) {
+#ifdef CSD_IDLE_POWER
+        /* A genuine host change supersedes the saved pre-shutdown level: if
+         * the host moves volume while we are powered down, that is the
+         * level it wants when we come back, not the stale one. Invalidating
+         * here is what keeps 'restore the prior value' from meaning
+         * 'restore a value the host has since replaced'. */
+        if (csd_power_state() != CSD_PW_STATE_ON) pw_vol_saved_valid = 0u;
+#endif
         /* Keep the FULL host request per channel (analog + digital halves of
          * ep0's split). The mixer must be able to re-partition the total
          * itself, because the analog half is one shared register:
@@ -365,6 +417,120 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
     }
 }
 
+#ifdef CSD_IDLE_POWER
+/* ---- Idle-power executor (TODO item 7, owner directive 2026-11-04) -------
+ * Rides the LED 0.5 s grid in this task, deliberately:
+ *   - This task owns EVERY actuator: I2C to the codec, the 8D reset word that
+ *     carries AMP_EN/DAC_MUTE_N, and the volume state that must come back
+ *     after a re-init. Executing anywhere else would need a second writer for
+ *     each, which is how the single-writer invariants in this file die.
+ *   - It must NEVER block. The tile[1] audio core's DAC_REGWRITE lands in
+ *     this same select; a wait here deadlocks the I2C path it depends on. So
+ *     the one action that blocks (the codec boot script, hundreds of ms of
+ *     PLL-lock retries) is REQUESTED from the tile[1] power task and awaited
+ *     by holding the queue -- never by waiting in this select.
+ *   - 0.5 s granularity on a 300 s timeout is 0.17% error, so no new timer and
+ *     no new thread on a tile already at 7/8.
+ * Sequencing authority lives in csd_power.c (host-tested); this is policy-
+ * free actuation only. ------------------------------------------------------ */
+/* dB8 total for the pre-shutdown volume minimum: the deepest level the
+ * internal law admits (same floor the button clamp uses), so the last thing
+ * the listener could hear is at least 64 dB down before the amp drops. */
+static void pw_volume_to_minimum(client interface i2c_master_if i2c)
+{
+    if (!pw_vol_saved_valid) {          /* first drop since the last restore */
+        pw_vol_saved[0] = volHostDl8[0];
+        pw_vol_saved[1] = volHostDl8[1];
+        pw_vol_saved_valid = 1u;
+    }
+    vol_apply_host_request(0, VOL_INTERNAL_MIN_DB8, 0, i2c);
+    vol_apply_host_request(1, VOL_INTERNAL_MIN_DB8, 0, i2c);
+}
+
+/* Every codec register write is deduped against a cache of what the chip
+ * last held. A full re-init resets the CHIP behind that cache, so the caches
+ * must be invalidated or the restore is skipped as a no-op and the box comes
+ * up at default gain -- the exact failure the owner warned about. */
+static void pw_invalidate_vol_cache(void)
+{
+    volRegValidA = 0;
+    volRegValidD[0] = volRegValidD[1] = 0;
+}
+
+
+/* Called from the LED 0.5 s case. */
+/* Command receiver. The POLICY is not here: it lives on tile[1] with its
+ * witnesses (a C static is not shared across tiles -- measured on hardware
+ * 2026-11-05), so this server only executes actuator commands. Nothing here
+ * decides when to sleep; everything here does what it is told, in the order
+ * it is told, because a dedicated chanend preserves message order.
+ *
+ * These are exactly the five things this server owns and no one else may
+ * touch: GPIO 8D (amplifier enable, codec mute/reset) through the single LED
+ * renderer, the codec system-mute register, and the volume registers, all of
+ * which it is the sole writer of after boot. */
+static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
+{
+    switch (cmd) {
+        case CSD_PW_CMD_VOL_MIN:
+            /* Pop rule: drive the level down while the DAC is STILL powered,
+             * before the amplifier drops. Same partition as every other
+             * volume change (shared analog reg + per-channel digital). */
+            pw_volume_to_minimum(i2c);
+            break;
+        case CSD_PW_CMD_AMP_OFF:
+            /* AMP_EN = 8D bit5 low. Kept inside gpio_8d_reset so the LED
+             * renderer, the sole port writer, composes it with its own bits. */
+            gpio_8d_reset &= ~0x20u;
+            led_render();
+            break;
+        case CSD_PW_CMD_DAC_OFF:
+            ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE), i2c);
+            /* DAC_MUTE_N = 8D bit4 low, and hold the codec in reset. */
+            gpio_8d_reset &= ~0x30u;
+            led_render();
+            break;
+        case CSD_PW_CMD_VOL_RESTORE:
+            /* Ordering is guaranteed by the channel, so the codec has already
+             * been re-initialised by the time this arrives -- and that is
+             * precisely why the dedupe caches must be invalidated here: every
+             * codec register is back at its default while the caches still
+             * believe the old values are in place, so without this the
+             * restore is skipped as a no-op and the box comes up at default
+             * gain.
+             *
+             * The pre-shutdown level goes back FIRST: the appliers derive the
+             * registers from volHostDl8[], which the pop-suppression step
+             * overwrote. Restoring the caches without restoring the state
+             * yields -64 dB forever -- the bug this block exists to prevent,
+             * and the reason the owner made it a hard requirement. */
+            if (pw_vol_saved_valid) {
+                volHostDl8[0] = pw_vol_saved[0];
+                volHostDl8[1] = pw_vol_saved[1];
+                pw_vol_saved_valid = 0u;
+            }
+            pw_invalidate_vol_cache();
+            vol_apply_all(i2c);
+            vol_apply_host_mute(host_muted, i2c);
+            break;
+        case CSD_PW_CMD_AMP_ON:
+            /* LAST: deassert the amplifier (owner: SUSPEND_N last). */
+            gpio_8d_reset |= 0x20u;
+            led_render();
+            break;
+        default:
+            break;
+    }
+}
+#endif /* CSD_IDLE_POWER */
+
+/* No power parameter: the assistant's actuator commands ride index 2 of the
+ * c_audiohw[] array (see the spawn site below) and are recognised by their
+ * 0x40..0x4F command band in the generic `case c[int i]` dispatch. That array's
+ * send/receive pairing is bench-proven; a private scalar chan was tried first
+ * and never paired (2026-11-05: server heartbeat alive, 'server recv' never
+ * printed once, assistant blocked at its first send). */
 [[combinable]] void AudioHwRemoteTile0(chanend c[n], unsigned n, client interface i2c_master_if i2c)
 {
     /* ---- Volume mixer (bring-over a5bc0ed, adapted): this task is the SOLE
@@ -474,6 +640,14 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
      * Cursors are consumer-local; the seqlock check runs HERE in XC because
      * the module's getters are scalar-only (XC cannot pass C pointers).
      * MUTE first, then volume per channel -- the post order ep0 guarantees. */
+#ifdef CSD_IDLE_POWER
+    /* Idle power: 'enabled' means built in, per the owner's wake rule
+     * (dsp/mixer start first IF they are enabled). init is idempotent and
+     * belongs here: this task owns every actuator, so it owns arming. */
+    csd_power_set_dsp_enabled(PCM_DSP_EN);
+    csd_power_init();
+#endif
+
     timer vol_mb_tmr;
     unsigned vol_mb_now;
     unsigned mb_seen_mute = 0, mb_seen_vol[2] = {0, 0};
@@ -509,6 +683,9 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
             }
             break;
 
+#ifdef CSD_IDLE_POWER
+#endif
+
             case led_tmr when timerafter(led_now) :> void:
             {
                 if (led_state == LED_ST_CHIPID_FAIL || led_state == LED_ST_BYPASS) {
@@ -519,12 +696,49 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
                         led_state = (led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF;
                     }
                 }
+#ifdef CSD_PW_TRACE
+                {   /* DIAGNOSTIC (temporary): prove this select is reached,
+                     * i.e. the server is not stuck inside another case. */
+                    static unsigned hb = 0;
+                    if ((++hb % 2u) == 1u) debug_printf("PWTRACE server alive t=%u\n", hb);
+                }
+#endif
                 led_now += 50000000;              /* 0.5 s @ 100 MHz */
                 led_render();
+#ifdef CSD_IDLE_POWER
+#endif
             }
             break;
 
             case c[int i] :> unsigned cmd:
+#ifdef CSD_PW_TRACE
+                {   /* DIAGNOSTIC (temporary): is this dispatch reached at all,
+                     * and on which array index? Proves whether c_audiohw[2] is
+                     * wired like the bench-proven [0]/[1] or is dead. Printed
+                     * sparingly: REGWR traffic is heavy. */
+                    static unsigned ch_seen[8] = {0,0,0,0,0,0,0,0};
+                    if (i < 8u && (++ch_seen[i] % 200u) == 1u) {
+                        debug_printf("PWTRACE chan recv i=%u cmd=%u n=%u\n", i, cmd, (unsigned)n);
+                    }
+                }
+#endif
+#ifdef CSD_IDLE_POWER
+                /* Idle-power actuator commands (TODO item 7) arrive on index 2
+                 * from the tile[1] assistant. Recognised by their 0x40..0x4F
+                 * band, which is disjoint from AUDIOHW_CMD_* (an enum from 0),
+                 * so one dispatch serves both protocols without a second
+                 * receive case. Executed inline: five bounded register/GPIO
+                 * writes, no blocking, the select stays live -- the assistant
+                 * may block HERE sending the next command and this same select
+                 * services its boot-script I2C, so never block in this case. */
+                if (cmd >= CSD_PW_CMD_VOL_MIN && cmd <= CSD_PW_CMD_AMP_ON) {
+#ifdef CSD_PW_TRACE
+                    debug_printf("PWTRACE server recv cmd=%u\n", cmd);
+#endif
+                    pw_execute_cmd(cmd, i2c);
+                    break;
+                }
+#endif
                 if (cmd == AUDIOHW_CMD_PLLREGWR)
                 {
                     unsigned regAddr, regValue;
@@ -824,6 +1038,7 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
 
 }
 
+
 void csd_AudioHwRemote(chanend c[])
 {
     i2c_master_if i2c[1];
@@ -844,12 +1059,33 @@ void csd_AudioHwRemote(chanend c[])
              * generically for any c[i] it selects on, so this adds no
              * server-side code and, more importantly, no second I2C client --
              * the task at c[1] shares the one bus owner instead of racing it. */
+            #ifdef CSD_IDLE_POWER
+            /* n=3: index 2 carries the idle-power actuator commands from the
+             * tile[1] assistant (TODO item 7). Riding c_audiohw[] rather than a
+             * dedicated chan is deliberate -- this array's send/receive pairing
+             * is bench-proven (uc_audiohw1 REGWR/REGRD, uc_audiohw_diag SCPI),
+             * and a fresh scalar chan silently never paired on the first try
+             * (measured 2026-11-05: server heartbeat alive, 'server recv'
+             * never printed once, assistant blocked at its first send). */
+            AudioHwRemoteTile0(c, 3, i2c[0]);
+#else
             AudioHwRemoteTile0(c, 2, i2c[0]);
+#endif
         }
     }
 }
 
-unsafe chanend uc_audiohw1; // audio core to i2c 
+unsafe chanend uc_audiohw1; // audio core to i2c
+#ifdef CSD_IDLE_POWER
+/* Idle power (TODO item 7): the tile[1] assistant's command channel.
+ * One-way, assistant -> server. A dedicated chanend (not another index of
+ * c_audiohw[]) for the same reason uc_audiohw_diag is one: the power
+ * protocol has its own message words and its own receive site, and
+ * sharing the audio core's channel would let a power command be read by
+ * the wrong case. Bound to c_audiohw[2] in src/core/user_main.h. */
+unsafe chanend uc_power;
+#endif
+
 // unsafe chanend uc_audiohw2;  //i2c hardware volume control from lib_xua
 // retired 2026-11-04 chanend diet: ep0 and this server are BOTH tile[0];
 // volume/mute now ride csd_vol_mailbox.c (same-tile seqlock statics), so the
@@ -1229,21 +1465,17 @@ void csd_AudioHwInit(const csd_config_t &config)
      * Semantics and byte order: single implementation upstream, see
      * csd_trim_master_trim_q31 / csd_trim_reg_byte (csd_gen.h) comments. */
     {
-        static unsigned trimRegLast = 0u;
-        static unsigned trimRegValid = 0u;
+        /* Cache lives in C (csd_pw_trim_boot_should_write): this function is now
+         * also called by the idle-power re-init task on another par branch,
+         * and function-scope statics are shared objects to the checker. */
         unsigned packed = csd_mb_get_trim();
-        if (!trimRegValid || csd_mb_get_trim_dirty()) {
-            unsigned q31 = csd_trim_master_trim_q31(packed);
-            if (!trimRegValid || trimRegLast != q31) {
-                for (unsigned ti = 0; ti < 4u; ti++) {
-                    unsigned tb = csd_trim_reg_byte(q31, ti);
-                    DAC_REGWRITE(ES9219Q_MASTER_TRIM_BYTE0 + ti, (uint8_t)tb);
-                }
-                trimRegLast = q31;
-                trimRegValid = 1u;
-                debug_printf("TRIMWR boot packed:0x%x q31:0x%x\n", packed, q31);
+        unsigned q31 = csd_trim_master_trim_q31(packed);
+        if (csd_pw_trim_boot_should_write(q31)) {
+            for (unsigned ti = 0; ti < 4u; ti++) {
+                unsigned tb = csd_trim_reg_byte(q31, ti);
+                DAC_REGWRITE(ES9219Q_MASTER_TRIM_BYTE0 + ti, (uint8_t)tb);
             }
-            csd_mb_clear_trim_dirty();
+            debug_printf("TRIMWR boot packed:0x%x q31:0x%x\n", packed, q31);
         }
     }
     //DAC_REGWRITE    (ES9219Q_GENERAL_CONFIG,              TBD ); 
@@ -1311,6 +1543,14 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * a 44.1k file can reach the endpoint as 48k and AudioHwConfig never
      * runs. Writer: audiohub core; reader: tile[1] SCPI. */
     csd_mb_note_hwcfg(samFreq, mClk);
+#endif
+#ifdef CSD_IDLE_POWER
+    /* The assistant on this tile needs the MCLK the last real configuration
+     * used, to hand the codec boot script. It cannot read csd_dsp_get_rate()
+     * itself: that accessor takes the address of this branch's statics and it
+     * is a different par branch, so the branch checker refuses the image.
+     * Publishing here is one store, and the writer stays this task. */
+    csd_pw_note_rate(mClk);
 #endif
     sw_pll_fixed_clock(mClk);   /* lib_sw_pll pinned v2.4.1 (see note in AudioHwInit) */
 

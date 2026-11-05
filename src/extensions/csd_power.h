@@ -34,6 +34,15 @@
 #ifndef __csd_power_h__
 #define __csd_power_h__
 
+/* How often the firmware executor advances the clock. The executor rides an
+ * existing 0.5 s grid, so this is 0.17% of the timeout -- no new timer. */
+#ifndef CSD_PW_TICK_MS
+#define CSD_PW_TICK_MS (500u)
+unsigned csd_power_idle_ms_dbg(void);   /* DIAGNOSTIC (temporary) */
+unsigned csd_power_dbg_flags(void);     /* bit0 activity_seen, bit1 stream_stopped, bits 8+ state */
+
+#endif
+
 /* 5 minutes, per the owner. Compile-tunable so a bench can prove the
  * sequence in seconds: -DCSD_PW_IDLE_MS=5000. */
 #ifndef CSD_PW_IDLE_MS

@@ -15,6 +15,13 @@
 #include <button_debounce.h>
 
 void AudioHwRemote(chanend c[]);
+#ifdef CSD_IDLE_POWER
+/* Tile[1] idle-power policy task (csd_power_hooks.xc). Takes the endpoint as
+ * an ARGUMENT rather than through a global chanend: an unbound chanend blocks
+ * a send forever instead of faulting, which is how the first cut hung
+ * (2026-11-05: 'sending 64' printed, 'send completed' never did). */
+void csd_PowerAssistantTask(unsafe chanend c_pw);
+#endif
 
 extern unsafe chanend uc_audiohw1;
 extern unsafe chanend uc_audiohw2;  //hardware volume control from lib_xua_mod
@@ -70,7 +77,7 @@ extern unsafe chanend uc_audiohw_diag;
  * re-pointed to the shifted slot below or it silently binds the wrong end.
  * Acceptance: xobjdump --resources tile[0] chanend bound drops by 4 (one
  * dead pair + the volume pair) and SCPI REG?/VOLume:TRIM? still answer. */
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[2]; \
+#define USER_MAIN_DECLARATIONS              chan c_audiohw[3]; \
                                             chan xscope_data_in;
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
@@ -112,6 +119,26 @@ extern unsafe chanend uc_audiohw_diag;
  * Cost: +1 thread on tile[0], and this task OWNS the xscope_data_in chanend
  * (a chanend belongs to one thread -- with process_xscope gone there is no
  * double-owner). Verify with xobjdump --resources, do not assume. */
+#ifdef CSD_IDLE_POWER
+/* Tile[1] policy task: the idle-power state machine, the stream-witness read,
+ * the codec boot re-init (it blocks -- this task has no deadline) and the
+ * actuator commands. +1 thread on tile[1], zero on the contended tile[0].
+ *
+ * A MACRO on purpose: a preprocessor directive cannot appear inside a macro
+ * body, so the condition lives here with #ifdef OUTSIDE the definitions and is
+ * spliced into USER_MAIN_CORES by name. (A #define whose body ends in '\' also
+ * splices the following line into itself, which silently turned this into an
+ * empty macro the first time -- no trailing backslash here; the continuation
+ * belongs at the USE site below.)
+ *
+ * The endpoint is converted in the tile[1] par scope, inside unsafe{}, exactly
+ * like the proven `uc_audiohw1 = (chanend) c_audiohw[0];`. No global, no bind
+ * statement, so there is no way to reach the task with an unbound chanend. */
+#define CSD_PW_TILE1_ENTRY                  unsafe { csd_PowerAssistantTask((chanend) c_audiohw[2]); }
+#else
+#define CSD_PW_TILE1_ENTRY
+#endif
+
 #define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
                             on tile[1]: {\
                                             par\
@@ -120,6 +147,7 @@ extern unsafe chanend uc_audiohw_diag;
                                                     uc_audiohw1 = (chanend) c_audiohw[0];\
                                                     uc_audiohw_diag = (chanend) c_audiohw[1];\
                                                 }\
+                                                CSD_PW_TILE1_ENTRY\
                                             }\
                                         }\
     \

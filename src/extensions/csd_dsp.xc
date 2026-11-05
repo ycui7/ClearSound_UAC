@@ -17,6 +17,7 @@
  * csd_gen.xc; including it here as well would emit a second copy into a
  * tile's 512 KB of reserved memory. See the header comment in csd_gen.h. */
 #include "csd_gen.h"
+#include "csd_power_state.h"
 #endif
 #include "csd_dsp_coeffs.h"
 #include "csd_dsp_core.h"
@@ -377,6 +378,40 @@ void csd_dsp_set_preset(unsigned p)
  * the bug behind "PRESet accepted, PRESet? answers boot default forever"). */
 static void csd_dsp_apply_pending_preset(void)
 {
+#ifdef CSD_IDLE_POWER
+    /* Idle-power DSP bypass (TODO item 7), adopted HERE because the engine
+     * belongs to this thread. csd_gen_mailbox.c documents why the server may
+     * not post presets to us directly.
+     *
+     * LAST-APPLIED tracking, not edge detection: the request is a level, so
+     * if both transitions land between two frames the level we last acted on
+     * still differs from the level requested and we correct it. A pure
+     * edge-triggered read could strand the filter off with power nominally
+     * on -- audible, silent, and invisible to every query. */
+    {
+        static unsigned pw_applied = 0;             /* 0 = running normally */
+        unsigned pw_req = csd_pw_dsp_bypass_requested();
+        if (pw_req != pw_applied) {
+            if (pw_req) {
+                csd_pw_save_preset(csd_dsp.preset); /* save live preset once */
+                csd_vol_store(&csd_dsp_preset_req, 0u);
+            } else {
+                unsigned sv = csd_pw_take_saved_preset();
+                /* Do NOT clobber a preset the host posted while we were
+                 * bypassed: if the request word moved off 0 after we wrote
+                 * it, that is a real host command and it wins. (The
+                 * diagnostic thread only ever posts through
+                 * csd_dsp_set_preset, so anything non-zero here is the
+                 * host's intent, never our own bypass residue.) */
+                if (sv != CSD_PW_PRESET_NONE &&
+                    csd_vol_load(&csd_dsp_preset_req) == 0u) {
+                    csd_vol_store(&csd_dsp_preset_req, sv);
+                }
+            }
+            pw_applied = pw_req;
+        }
+    }
+#endif
     unsigned p = csd_vol_load(&csd_dsp_preset_req);
     if (p == CSD_DSP_PRESET_NONE || p == csd_dsp.preset) return;
     csd_dsp.preset = p;
@@ -442,6 +477,25 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * where no sample is mid-computation. Only this thread writes csd_dsp.
      * See csd_dsp_set_preset for why the diagnostic thread may not. */
     csd_dsp_apply_pending_preset();
+
+#ifdef CSD_IDLE_POWER
+    /* Idle-power stream witness (TODO item 7). MUST stay at the entry, ahead
+     * of every diagnostic guard. First attempt sat inside
+     * `#if defined(CSD_GEN_EN) && defined(CSD_GEN_INSTRUMENT) && MIXER`,
+     * which SPECIALTYCIRCUITS_RELEASE does not define: the release image
+     * powered DOWN fine (that leg is driven by the ep0 alt-0 trigger, a
+     * different path) but could never wake, because the wake condition is
+     * this counter and it had been compiled out -- measured on hardware
+     * 2026-11-05: tile0 and tile1 both read frames=0 through a live tone,
+     * state stuck at OFF. Witness code is functional state, not
+     * instrumentation, so it belongs outside the instrumentation region.
+     *
+     * A NON-ZERO DAC-bound frame is the only honest evidence of a stream:
+     * LRCLK toggles with a silent bus. Cost: two compares on the pair, once
+     * per frame, at the point where the host stream is actually pulled. */
+    csd_pw_note_host_sample((unsigned)0, (int)sampsFromUsbToAudio[0]);
+    csd_pw_note_host_sample((unsigned)1, (int)sampsFromUsbToAudio[1]);
+#endif
 
 #ifdef CSD_DSP_DIAG_SLOTS
     /* Where does the audio actually sit in the USB->DAC buffer at hook entry?
@@ -610,7 +664,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * (DPLL_NUM) moving to 0xFE exactly while the case-A tone is audible and
      * 0x00 when clean -- the chip is correcting an actively moving input, so
      * whether REAL content reaches I2S has to be measured at the source. */
-    csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
+csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[1]);
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
@@ -633,6 +687,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 }
 
 #else /* !PCM_DSP_EN ------------------------------------------------------ */
+
 
 /* The diagnostic surface must exist in EVERY build, including bisect builds
  * that compile the engine out: csd_diag_scpi.c references these four
