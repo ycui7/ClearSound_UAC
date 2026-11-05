@@ -284,7 +284,18 @@ unsigned csd_trim_master_trim_q31(unsigned packed)
      * the file's existing idiom (csd_gen_mailbox.c). */
     int trimL = (int)(short)(packed & 0xFFFFu);
     int trimR = (int)(short)(packed >> 16);
-    int common = (trimL < trimR) ? trimL : trimR;  /* deepest channel */
+    /* The master word is one gain for BOTH channels, so it carries the
+     * SHALLOWEST trim (smallest attenuation) and csd_trim_channel_vol_step()
+     * adds each channel's remainder in the digital stage:
+     *     A_common = min(A),  D[ch] = A[ch] - A_common  >= 0
+     * Reversing this (taking the deepest, which this line did until
+     * 2026-11-05) leaves the shallower channel over-attenuated by the full
+     * difference and the deeper one short of nothing -- an attenuator cannot
+     * add gain back, so the remainder must always be >= 0. Measured with the
+     * old rule: LEFT-only trim dropped RIGHT 29 dB instead of 0 dB.
+     * At equal trims both readings are the same, so the 0 dB ladder
+     * (FF FF FF 7F) is untouched by this change. */
+    int common = (trimL > trimR) ? trimL : trimR;  /* shallowest channel */
     if (common > 0) common = 0;                    /* never amplify   */
     if (common < -CSD_TRIM_MAX88) common = -CSD_TRIM_MAX88;
     int counts = common / 32;                      /* 8.8 grid -> 0.125 dB steps */
@@ -329,15 +340,40 @@ unsigned csd_trim_master_trim_q31(unsigned packed)
  * asserting something the silicon does not do. */
 unsigned csd_trim_channel_vol_step(unsigned packed, unsigned right)
 {
-    int l      = (int)(short)(packed & 0xFFFFu);   /* 8.8 dB grid */
-    int r      = (int)(short)(packed >> 16);
-    int common = (l < r) ? l : r;                  /* deepest channel */
-    int mine   = right ? r : l;
-    int extra  = mine - common;                    /* >= 0 by construction */
+    int l    = (int)(short)(packed & 0xFFFFu);   /* 0.125 dB units, <= 0 */
+    int r    = (int)(short)(packed >> 16);
+    int mine = right ? r : l;
+
+    /* The analog master word is ONE gain for both channels, so it can only
+     * carry the SMALLEST attenuation (the shallowest trim): whatever it
+     * applies, it applies to both. The digital stage then adds what each
+     * channel still needs on top. Written as magnitudes A[ch] = -trim[ch]:
+     *
+     *     A_common = min(A)            (the shallower channel, by magnitude)
+     *     D[ch]    = A[ch] - A_common  (0 on the shallow channel)
+     *
+     * Both in signed dB that is common = max(l, r) and extra = common - mine.
+     * Taking min() here instead -- my first attempt, and what the master
+     * converter still does -- puts the extra attenuation on the channel that
+     * is supposed to stay flat. Measured on silicon 2026-11-05 with that
+     * error in place: trimming LEFT dropped LEFT 4.2 dB (correct) and RIGHT
+     * 29 dB (it should not move at all). */
+    int common = (l > r) ? l : r;
+    int extra  = common - mine;                  /* >= 0 by construction */
 
     if (extra < 0) extra = 0;
-    unsigned steps = (unsigned)((extra + 16) / 32);   /* 0.125 dB -> 0.5 dB */
-    if (steps > 254u) steps = 254u;                   /* -127 dB is the floor */
+    /* The pair is 8.8 fixed point -- 256 counts per dB, which is what the
+     * record field name trim_l_88 says and what the bench proved: a 6 dB trim
+     * (1536 counts) produced 48 steps at a divisor of 32, and clamped at 254
+     * (=254 steps, ~42 dB of the chip's real per-channel reach) at a divisor
+     * of 4. A 0.5 dB hardware step is therefore 256/2 = 128 counts. Each
+     * divisor here has been measured rather than assumed:
+     *     /32  ->  48 steps  = 24 dB asked for 6 dB   (wrong, 4x)
+     *     /4   ->  384 steps = clamped 254            (wrong, 32x)
+     *     /128 ->   12 steps =  6 dB                  (this line)
+     */
+    unsigned steps = (unsigned)((extra + 64) / 128);   /* 8.8 dB -> 0.5 dB */
+    if (steps > 254u) steps = 254u;                    /* -127 dB is the floor */
     return steps;
 }
 
