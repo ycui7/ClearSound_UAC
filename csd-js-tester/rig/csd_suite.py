@@ -1008,6 +1008,20 @@ def main():
     # One case must not poison the next: an early version left trims and the DSP
     # preset dirty, and the bit-perfect gate then aborted its own premises and
     # looked like a firmware failure.
+    # WAKE THE BOX BEFORE ANY LEVEL IS MEASURED. Idle power-save is real now
+    # (re-arm fixed, 300 s default), and a build or a long gate run easily idles
+    # past it. Waking is a SEQUENCE -- full codec re-init, then the amplifier
+    # last -- so a case that measures the instant sound is asked for can sample
+    # the box while it is still coming up. That looked exactly like a dead
+    # output path: case 09 reported a -98.7 dBFS tone against a -32 dBFS floor
+    # and scored NOT-RUN, then measured -21.2 dBFS and passed minutes later with
+    # nothing changed but a wake tone first. Silence measured during a wake-up is
+    # not a firmware verdict, so the fixture removes the race.
+    wake = tone_wav("/tmp/suite_wake.wav", 3.0)
+    wp = play_bg(dac, wake)
+    time.sleep(4.0)                     # tone plays through, wake sequence runs
+    stop(wp)
+    time.sleep(2.0)                     # amp-enable settles after the re-init
     # Defensive disarm: the tap is DEVICE state, so a run that died mid-gate
     # leaves it armed, and every later capture case then measures the tap's
     # stored word instead of the microphone. Clear it before any baseline is
