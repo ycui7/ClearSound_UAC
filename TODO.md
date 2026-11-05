@@ -226,8 +226,26 @@ the missing dependency. Items below are the dependencies.
    route to the floor. Re-run the rig before restoring any step: the premise may
    simply have been stale.
 
-11. **Built-in mic returns digital silence -- case 11 is a bring-up item, not a
-    regression, and not a "stamp pattern" either.**
+11. **Built-in mic: CLOSED AS SPEC'D, one live requirement.**
+    OWNER SPEC (2026-11-05): mic data only during playback is ACCEPTABLE. The
+    ADC has no control registers and streams when MCLK is up; its clock comes up
+    with the codec, so before any host stream there is nothing to sample, and
+    capture holding ONE distinct value across the buffer after a fresh load is
+    the expected result -- digital zero, not a quiet mic, not a broken path.
+
+    REMAINING REQUIREMENT: with power saving DISABLED (`POWER:TIMEout -1`,
+    force-on) the mic must be ON -- non-constant data, no stream needed. Case 11
+    must assert the pair, never either half alone: (a) fresh load + no stream =>
+    constant output expected; (b) power-save off, or during/after playback =>
+    non-constant data above the quantisation floor, which a floating pin cannot
+    fake. Measured: fresh load/no stream = 1 distinct / 96,000; after playback =
+    ~11k distinct at -106 dBFS, still alive at t+1 s, t+8 s, t+18 s.
+
+    Never gate the mic path on the idle power-down sequence: a register-less ADC
+    cannot report a lost clock, it just sends zeros. Do not chase "mic silent at
+    boot" as a bug.
+
+    --- original investigation, kept for the record ---
     Measured on a clean boot with `rig/mic_probe.py`: 96,000 samples per channel
     contain exactly ONE distinct value; rms is digital zero; the "top peaks" are
     an artefact of a constant signal. Both channels identical. So the ADC is not
