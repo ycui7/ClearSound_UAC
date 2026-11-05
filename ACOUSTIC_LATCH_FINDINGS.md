@@ -117,6 +117,81 @@ Corrections to assumptions held earlier in this investigation:
 Board left: recovered by image reload, case 08 PASS -
 `L-only: micL -22.1 micR -65.0 (isolation +42.8 dB) | R-only: micL -63.0 micR -21.0 (isolation +42.0 dB)`.
 
+## Second episode: the latch became unrecoverable, and there is no software POR path
+
+After the register discriminator above (which included `REGister:WRITE 0xC0 0x01`, the codec
+soft reset the firmware itself never uses), the board no longer recovers by any software means.
+
+Recovery attempts, all measured, all failed, all while the fault was acoustically re-confirmed:
+
+| attempt | result |
+|---|---|
+| `rig/load_xe.sh` reload of the same .xe, stamp PROVEN | still latched (L-only micL -101.0 / micR -89.9; R-only -32.2 / -31.3, corr +0.9967) |
+| `pkill -x xrun` AND `pkill -x xgdbserver` + reload | no change |
+| `USBDEVFS_RESET` ioctl, re-enumeration, `*IDN?` correct | no change (-97.0 / -89.7; -32.2 / -31.3, corr +0.9981) |
+| format variation S16_LE / S24_3LE / S32_LE, L-only | all silent (-92.7 / -93.4 / -97.6) |
+| 96000 -> 48000 rate round trip (fresh `AudioHWConfig`) | no change |
+| idle power-down + wake (full codec re-init, `0x07` verified) | no change |
+| second clean reload booting in PLL mode (`CHIPID tries: 0 (pll_bypass=0)`) | still latched (L-only -95.3 / -93.0) |
+
+Final state was left latched, case 08 **FAIL**, verbatim:
+`L-only: micL -99.3 micR -93.4 (isolation -5.9 dB) | R-only: micL -22.0 micR -21.2 (isolation +0.8 dB)`
+`PASS=0 FAIL=1` - and no PASS line was printed for case 08 in that session.
+
+### Why reload used to work and now does not - firmware gap
+
+The earlier episode recovered with `pkill xrun` + `pkill xgdbserver` + reload. This one does
+not, and the difference is consistent with a real defect in the driver:
+
+- **nothing in the firmware ever ASSERTS the codec reset GPIO.** `csd_AudioHwInit` only
+  *releases* it (`board.xc:993`, `GPIO_WR(0, CODEC_RELEASE_RESET)`); the reset line is never
+  driven low by any code path.
+- the driver has **zero write sites for `0xC0` SOFT_RESET** (`es9219q.h:33`), so the chip is
+  never reset by firmware either.
+
+Consequence: if the codec is left in a non-power-on internal state by any means - here, a
+diagnostic `0xC0` write - an image reload cannot recover it, because reload only re-releases a
+reset line that was never asserted. **A reload is therefore not a codec POR, and no software
+path on this build can produce one.** Recovery requires a physical power cycle of the DUT.
+
+Fixes this gap justifies, independent of the latch's root cause:
+
+1. assert then release the codec reset GPIO at the top of `csd_AudioHwInit`, so every image
+   load starts from a genuine codec power-on state and a stuck chip cannot survive a reload.
+2. read back and verify the boot register set instead of printing a 61-register dump that is
+   compared against nothing.
+3. treat `REGister:WRITE` to codec-internal control registers (`0xC0` in particular) as
+   destructive: gate it, or at minimum require an explicit unlock, because it can put the board
+   into a state only a power cycle escapes.
+
+### Two distinct states, do not conflate them
+
+- **State A - the original latch**: L input dropped, R on both outputs; *recoverable* by
+  killing both loader processes and reloading. Reproduced 2/2 deterministically.
+- **State B - post-`0xC0` soft reset**: all registers `0x00`, both outputs silent, survives
+  reload, USB reset, rate change, format change and codec re-init. Needs physical power.
+
+Clock evidence obtained while latched (register/status only - **this rig has no scope or logic
+analyzer, so no pin-level BCLK/WS/MCLK measurement was made**): `0x40=0x89 0x41=0x01 0x4D=0x03
+0x48=0x02 0x0A=0x02 0x1D=0x00`, `amixer -c 3 cget numid=8` -> `values=on`, firmware prints
+`MCLK: 49152000` and `PLL_LOCK: 1` in both states. The previously recorded `0x40=0x88 /
+0x41=0x00 / 0x4D=0x02` deltas did **not** reproduce in this episode; a residual `0x4D=0x01`
+(vs `0x03`) appeared later after an idle power-down/wake and never returned.
+
+Boot stream-open sequences are byte-identical between working and latched sessions
+(`receive_command: 30 / aud stream start / AudioHWConfig:Mute / AudioHWConfig:F:48000
+MCK:49152000 DAC:16,ADC:24 / ... / AudioHWConfig:UnMute`), and the firmware emits no BCLK-divide
+or port-config print at all, so nothing in the log distinguishes the trigger from the baseline.
+
+### Rig instruments that must not be trusted as evidence
+
+- `rig/mixer_mirror_probe.py` **fails its own self-check even on a fresh reload**
+  (`FAIL SELF-CHECK: mirror carries a real tone (silence above is meaningful) [peak -55.0 dBFS]`),
+  so a dead mirror is an instrument fault, not evidence about the xCORE data path. It needs
+  fixing before the mirror can exonerate or convict anything.
+- `.85` answers `-113,"Undefined header"` to `DEBUG:I2S?`, `POWER:TIMEout?`, and to a single
+  `REGister:READ?` sweep of the whole 135-register map (per-address and 32-register chunks work).
+
 ## Open questions for the fix
 
 - What in step 2 latches it: the S32_LE raw stream, the sample-rate/format transition away from
