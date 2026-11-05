@@ -15,6 +15,13 @@ extern "C" {
 #include "csd_identity.h"     /* AUDIOHW_CMD_IDENTITY server: identity accessors */
 #include "button_debounce.h"
 #include "xua_defs.h"
+/* Power actuator command codes (CSD_PW_CMD_*). Included OUTSIDE the PCM_DSP_EN
+ * gate on purpose: pw_execute_cmd() is compiled whenever CSD_IDLE_POWER is set,
+ * and it needs these defines whether or not the DSP is built. Keeping it inside
+ * the gate makes a PCM_DSP_EN=0 build fail with "undeclared CSD_PW_CMD_VOL_MIN". */
+#ifdef CSD_IDLE_POWER
+#include "csd_power_state.h"
+#endif
 #if PCM_DSP_EN
 #include "csd_dsp.h"
 #ifdef CSD_GEN_EN
@@ -361,8 +368,14 @@ static void vol_apply_digital(int ch, int aCom, client interface i2c_master_if i
      * leave code untouched, which is why this cannot move the 0 dB ladder
      * (FF FF FF 7F) that the master path is verified against. Hardware evidence
      * for why it must exist: with regs 15/16 never written, a LEFT-only trim
-     * moved BOTH channels ~6 dB (measured 2026-11-05). */
+     * moved BOTH channels ~6 dB (measured 2026-11-05).
+     *
+     * Guarded by the same condition that brings in its declarations: the trim
+     * mailbox does not exist at all without CSD_GEN_EN/PCM_DSP_EN, so the
+     * feature's reach is exactly the reach of the code that stores it. */
+#if defined(CSD_GEN_EN) && PCM_DSP_EN
     code += (int) csd_trim_channel_vol_step(csd_trim_applied_packed(), (unsigned) ch);
+#endif
     if (code > 255) code = 255;
     if (volRegValidD[ch] && volRegLastD[ch] == (unsigned)code) {
 #ifdef CSD_PW_TRACE

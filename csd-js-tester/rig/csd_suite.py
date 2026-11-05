@@ -501,11 +501,23 @@ def run_gate(minutes, tag, card):
     if m:
         tx = int(m.group(2))
     if tx <= 0:
+        scpi("DEBUG:LOOPback 0", card)      # never leave the tap armed (see below)
         return NOTRUN, ("%s: loopback tap delivered %d frames while streaming (state %s) -- "
                         "bit-perfectness cannot be measured until the tap carries samples; a "
                         "zero here is NOT evidence about the data path" % (tag, tx, tap1.strip()))
     rc, out = sh([PY, os.path.join(RIG, "csd_bitperfect_gate.py"),
                   "--minutes", str(minutes)], timeout=3600)
+    # DISARM ON EVERY PATH. An armed tap substitutes its stored word into the RX
+    # stream (one word per channel per half-frame), so capture stops being the
+    # microphone and becomes a buffer-derived pattern -- a state no later case
+    # should inherit, and device state that survives into the next run.
+    #
+    # HONEST SCOPE: this was tested as the explanation for case 11's stamp-like
+    # capture (autocorr 0.93, strong spectral line) and it is NOT. The signature
+    # is identical with the tap verified disarmed at baseline, so the periodic
+    # pattern comes from the capture path itself, not from the tap. Disarming is
+    # still correct hygiene; it is just not the fix for case 11.
+    scpi("DEBUG:LOOPback 0", card)
     lines = [l.strip() for l in out.splitlines() if l.strip()]
     v = [l for l in lines if l.startswith("GATE:")]
     pct = [l for l in lines if "%" in l]
@@ -996,7 +1008,12 @@ def main():
     # One case must not poison the next: an early version left trims and the DSP
     # preset dirty, and the bit-perfect gate then aborted its own premises and
     # looked like a firmware failure.
-    print("  baseline: host volume full, trims 0 counts, DSP preset 0")
+    # Defensive disarm: the tap is DEVICE state, so a run that died mid-gate
+    # leaves it armed, and every later capture case then measures the tap's
+    # stored word instead of the microphone. Clear it before any baseline is
+    # taken, so a suite result never depends on how the previous run ended.
+    scpi("DEBUG:LOOPback 0", dac)
+    print("  baseline: host volume full, trims 0 counts, DSP preset 0, tap disarmed")
     set_volume(dac, 192)
     for c in ("VOLume:TRIM:LEFT 0", "VOLume:TRIM:RIGHT 0", "DIAG:DSP:PRESet 0"):
         scpi(c, dac)
