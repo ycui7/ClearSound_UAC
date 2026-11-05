@@ -422,16 +422,43 @@ def case_04_persistence(dut):
                       "reaches the QSPI journal; this case then proves survival across LOAD."
                       % (stat, WANT[0], WANT[1], live, why))
     scpi(has_save, d)
-    scpi("VOLume:TRIM:LEFT 0", d); scpi("VOLume:TRIM:RIGHT 0", d)
-    scpi("VOLume:TRIM:LOAD", d)
-    ok, back, _ = scpi("VOLume:TRIM?", d)
-    got = [int(x) for x in re.findall(r"-?\d+", back or "")][:2]
-    detail = "save=%s wrote %s -> zeroed -> %s + LOAD read %s" % (
-        has_save, list(WANT), has_save, got)
-    if got == list(WANT):
+    ok, rec, _ = scpi("VOLume:TRIM:STATus?", d)          # journal's own view
+
+    # PROVE PERSISTENCE BY RELOADING, NOT BY LOAD.
+    # VOLume:TRIM:LOAD cannot distinguish flash from mailbox in this firmware:
+    # every VOLume:TRIM set journals immediately, so the store's idea of "what is
+    # in flash" is always the last value written, and LOAD faithfully hands back
+    # that same value. The earlier rig set the pair, zeroed it, saved, then
+    # loaded -- which wrote the zeros to flash before LOAD ran, then convicted the
+    # journal of reading back zeros. That was a fixture defect, not a firmware
+    # defect (boot adopt is real: csd_diag_midi.xc csd_mb_put_trim()).
+    # Only a fresh boot separates the two: the mailbox starts at 0 dB, so a value
+    # that appears after a reload could only have come from the record.
+    xe = os.path.join(REPO, "bin", "2AMi2o2xxxxxd", "ClearSoundDac_2AMi2o2xxxxxd.xe")
+    rc, out = sh(["bash", os.path.join(RIG, "load_xe.sh"), xe], timeout=300)
+    if rc != 0 or "PROVEN" not in out:
         scpi("VOLume:TRIM:LEFT 0", d); scpi("VOLume:TRIM:RIGHT 0", d)
+        return NOT_RUN, ("cannot reload the image to separate flash from mailbox "
+                         "(load_xe.sh rc=%d: %s) -- the fixture, not the firmware, is "
+                         "short here" % (rc, out.strip()[-160:]))
+    back = ""
+    for _ in range(20):                                   # device re-enumerates
+        ok, back, _ = scpi("VOLume:TRIM?", d)
+        if ok:
+            break
+        time.sleep(2)
+    got = [int(x) for x in re.findall(r"-?\d+", back or "")][:2]
+    detail = ("save=%s wrote %s -> journal STATus?=%s -> reloaded image, mailbox "
+              "reset to 0 dB, TRIM?=%s (only the record can supply these)"
+              % (has_save, list(WANT), (rec or "").strip(), got))
+    scpi("VOLume:TRIM:LEFT 0", d); scpi("VOLume:TRIM:RIGHT 0", d)
+    scpi(has_save, d)                                     # leave zeros persisted
+    if got == list(WANT):
         return PASS, detail
-    return FAIL, "saved pair did not survive LOAD: " + detail
+    if got == [0, 0]:
+        return FAIL, ("pair survived the save but NOT the boot: boots at 0 dB, so the "
+                      "record was never adopted -- " + detail)
+    return FAIL, "adopted pair is neither the saved value nor the default: " + detail
 
 
 def case_05_dfu_twice(dut):

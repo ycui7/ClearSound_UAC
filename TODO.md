@@ -219,3 +219,38 @@ the missing dependency. Items below are the dependencies.
    the pre-simplification state machine did. Either restore the step or fix the
    rig's premise -- but decide deliberately, do not let a stale instrument
    define the verdict.
+   STATUS 2026-11-05: partially resolved by the per-channel trim work. Regs
+   15/16 are now written by `vol_apply_digital` (proven: `0C 00` / `00 0C` for a
+   6 dB LEFT/RIGHT trim), and `pw_volume_to_minimum()` reaches those registers
+   through `vol_apply_host_request(VOL_INTERNAL_MIN_DB8)`, so the down leg has a
+   route to the floor. Re-run the rig before restoring any step: the premise may
+   simply have been stale.
+
+9. **Bit-perfect tap has no audio-path call sites -- case 06 cannot pass.**
+   `csd_mb_loop_put()`, `csd_mb_loop_put_site()` and `csd_mb_loop_take()` are
+   defined in `csd_gen_mailbox.c` and read by the SCPI side, but are called by
+   NOTHING in the tree (verified by grep across the app and lib_xua). The
+   producer/consumer hooks belong in the audio hub's TX/RX loop -- the header
+   still says so ("writer: audiohub TX", "reader: audiohub RX") -- and the
+   detached lib_xua pin (`0c69d009`) does not contain them. The orphan comment at
+   `csd_gen_mailbox.c:621` ("Undefined reference to csd_mb_loop_put") is the
+   fossil of when they did.
+   CONSEQUENCE: `DEBUG:LOOPback?` answering `1,0` is not a rate-specific fault at
+   384 kHz. The tap has never run at any rate; frames stay 0 because nothing
+   produces. Any earlier bit-perfect pass was measured against a patched
+   lib_xua, not this pin.
+   FIX: re-add the two hooks in lib_xua's audio loop, guarded by
+   `CSD_LOOPBACK_TAP`, keeping the header's cost contract -- one volatile load
+   plus a branch per channel per frame when disarmed, and tile-local state
+   (tile[0] would silently read 0 and look healthy: the trim bug's shape).
+   Needs a lib_xua branch decision from the owner before editing the pin.
+
+10. **Case 04 persistence -- fixture was wrong, not the journal.**
+    The rig set the pair, zeroed it, saved, then issued LOAD. Every trim set
+    journals immediately, so the zeros reached flash before LOAD ran and LOAD
+    correctly handed zeros back. `VOLume:TRIM:LOAD` cannot separate flash from
+    mailbox in this design; only a fresh boot can (the mailbox resets to 0 dB, so
+    a value that appears after a reload could only have come from the record).
+    The rig now reloads the image via `rig/load_xe.sh` -- promoted out of scratch,
+    which is pruned after 24 h -- and reads back after re-enumeration. Boot adopt
+    is real: `csd_diag_midi.xc` calls `csd_mb_put_trim()` after the flash load.
