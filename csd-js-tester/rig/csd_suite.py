@@ -812,8 +812,8 @@ def case_11_builtin_mic_noise(dut):
     this case measures, and it must never be reported as a failure.
 
     What binds: set POWER:TIMEout -1 (force-on, power saving disabled) and the
-    mic must deliver non-constant data above the quantisation floor with NO
-    stream running. A floating or unclocked data pin cannot fake that -- it
+    mic must deliver non-constant data above the quantisation floor while audio
+    is playing. A floating or unclocked data pin cannot fake that -- it
     returns a constant, which is exactly the signature we measured at boot
     (1 distinct value in 96,000 samples) and what this case rejects.
 
@@ -851,8 +851,21 @@ def _case_11_measure(dut, prev):
     cap = "/tmp/suite_11.wav"
     if os.path.exists(cap):
         os.remove(cap)
-    rc, out = sh(["arecord", "-q", "-D", "hw:%d,0" % d, "-f", "S32_LE", "-r", "48000",
-                  "-c", "2", "-d", "3", "-t", "wav", cap], timeout=90)
+    # MEASURED WHILE AUDIO PLAYS, per owner spec: "it is totally ok for the mic to
+    # only send data back when there is audio playing." The ADC has no control
+    # registers and needs no power-on/power-off handling of any kind -- it emits
+    # samples whenever its clock is present. So the only thing the fixture has to
+    # guarantee is that the clock domain is running, and a live stream is the
+    # honest way to do that: the tone is the stimulus condition being measured,
+    # not a wake-up hack. Power saving is already disabled by the baseline, so the
+    # box cannot fall asleep mid-measurement either way.
+    tp = play_bg(d, tone_wav("/tmp/suite_11_stim.wav", 6.0))
+    try:
+        time.sleep(1.0)
+        rc, out = sh(["arecord", "-q", "-D", "hw:%d,0" % d, "-f", "S32_LE", "-r", "48000",
+                      "-c", "2", "-d", "3", "-t", "wav", cap], timeout=90)
+    finally:
+        stop(tp)
     if not os.path.exists(cap):
         return FAIL, "capture stream would not open: %s" % out.strip()[:100]
     import wave
@@ -864,7 +877,7 @@ def _case_11_measure(dut, prev):
         flat, lag, line = _whiteness(raw[:, c])
         stats.append((flat, lag, line))
         rms.append(20 * np.log10(np.sqrt(np.mean((raw[:, c] / 2147483648.0) ** 2)) + 1e-15))
-    detail = ("no excitation: ch0 flat=%.3f autocorr=%.2f line=%.1f dB rms=%.1f | ch1 "
+    detail = ("stimulus on, power saving OFF: ch0 flat=%.3f autocorr=%.2f line=%.1f dB rms=%.1f | ch1 "
               "flat=%.3f autocorr=%.2f line=%.1f dB rms=%.1f" % (
                   stats[0][0], stats[0][1], stats[0][2], rms[0],
                   stats[1][0], stats[1][1], stats[1][2], rms[1]))
@@ -876,13 +889,13 @@ def _case_11_measure(dut, prev):
     # distinct values per 96,000 samples at -106 dBFS. So distinctness is the
     # test, and it cannot be gamed by a stuck bus.
     distinct = [len(np.unique(raw[:, c])) for c in range(2)]
-    detail = ("power saving OFF, no stream: " + detail +
+    detail = ("audio playing, power saving OFF: " + detail +
               " distinct=%s/%d" % (distinct, n))
     if min(distinct) < 100 or max(rms) < -140.0:
-        return FAIL, ("mic is not on with power saving disabled -- capture is constant, so the "
+        return FAIL, ("mic returns a constant while audio plays and power saving is disabled, so the "
                       "ADC has no clock or its data never reaches the port (a register-less ADC "
                       "cannot report that; it just sends zeros): " + detail)
-    return PASS, ("mic on with power saving disabled and no stream; " + detail +
+    return PASS, ("mic on with audio playing and power saving disabled; " + detail +
                   " -- whiteness/periodicity reported, not gated (see docstring)")
 
 
@@ -1006,7 +1019,7 @@ CASES = [
     ("08", "acoustic loopback L/R, no swap", case_08_acoustic_lr),
     ("09", "volume control", case_09_volume),
     ("10", "L/R volume trim independent", case_10_lr_trim),
-    ("11", "built-in mic reads noise, no excitation", case_11_builtin_mic_noise),
+    ("11", "built-in mic returns data while audio plays", case_11_builtin_mic_noise),
     ("12", "serial number in USB descriptor", case_12_serial_in_descriptor),
     ("13", "24-bit / 192 kHz as advertised", case_13_24bit_192k),
     ("14", "power saving enter/exit + timeout control", case_14_power_saving),
@@ -1044,20 +1057,32 @@ def main():
     # One case must not poison the next: an early version left trims and the DSP
     # preset dirty, and the bit-perfect gate then aborted its own premises and
     # looked like a firmware failure.
-    # WAKE THE BOX BEFORE ANY LEVEL IS MEASURED. Idle power-save is real now
-    # (re-arm fixed, 300 s default), and a build or a long gate run easily idles
-    # past it. Waking is a SEQUENCE -- full codec re-init, then the amplifier
-    # last -- so a case that measures the instant sound is asked for can sample
-    # the box while it is still coming up. That looked exactly like a dead
-    # output path: case 09 reported a -98.7 dBFS tone against a -32 dBFS floor
-    # and scored NOT-RUN, then measured -21.2 dBFS and passed minutes later with
-    # nothing changed but a wake tone first. Silence measured during a wake-up is
-    # not a firmware verdict, so the fixture removes the race.
-    wake = tone_wav("/tmp/suite_wake.wav", 3.0)
-    wp = play_bg(dac, wake)
-    time.sleep(4.0)                     # tone plays through, wake sequence runs
-    stop(wp)
-    time.sleep(2.0)                     # amp-enable settles after the re-init
+    # POWER SAVING IS DISABLED FOR THE WHOLE RUN. Owner directive 2026-11-05:
+    # "for measuring, the test fixture should set power saving timeout to -1, so
+    # the power saving is disabled. sending a audio stream is not reliable."
+    # That retires the wake tone that used to sit here. A tone is a stream, and a
+    # stream only wakes the box incidentally: it brings the codec up as a side
+    # effect, leaves the ADC live for ~18 s, and therefore lets a capture case
+    # measure a state the device only reached because the fixture caused it. A
+    # level or a capture measured after an ad-hoc stream is not a measurement of
+    # the device's own quiescent state.
+    #
+    # Setting the timeout to -1 (force-on, saving disabled) is the deterministic
+    # control. It is verified by reading it back, because a fixture that assumes
+    # its own setup succeeded is how a broken device gets a green result. The
+    # original value is restored on exit so a run cannot leave the board in a
+    # state no one asked for.
+    import atexit
+    ok, prev_to, _ = scpi("POWER:TIMEout?", dac)
+    prev_to = (prev_to or "").strip()
+    scpi("POWER:TIMEout -1", dac)
+    _, chk_to, _ = scpi("POWER:TIMEout?", dac)
+    if (chk_to or "").strip() != "-1":
+        print("  baseline: WARNING power saving still ENABLED, read back %r"
+              " -- level and capture results are unreliable" % (chk_to,))
+    if prev_to.lstrip("-").isdigit():
+        atexit.register(lambda: scpi("POWER:TIMEout %s" % prev_to, dac))
+    time.sleep(2.0)                     # let the force-on state settle
     # Defensive disarm: the tap is DEVICE state, so a run that died mid-gate
     # leaves it armed, and every later capture case then measures the tap's
     # stored word instead of the microphone. Clear it before any baseline is

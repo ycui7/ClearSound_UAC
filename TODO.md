@@ -245,20 +245,25 @@ the missing dependency. Items below are the dependencies.
     cannot report a lost clock, it just sends zeros. Do not chase "mic silent at
     boot" as a bug.
 
-    STRICT VERDICT (2026-11-05, measured): THE REQUIREMENT IS NOT MET. Fresh
-    load, no host stream ever, `POWER:TIMEout` set to -1 and READ BACK as -1
-    (so the force-on state did take): capture = `distinct=1/144000`, rms digital
-    zero, both channels. The requirement "mic on when power saving is disabled"
-    therefore FAILS, and the fix is the force-awake path: the codec/clock
-    sequence must run when the device enters force-on, not only when a host
-    stream arrives.
+    RESOLVED AS SPEC'D (2026-11-05, owner): there is to be NO power handling for
+    this ADC at all. It has no control registers, so it has no power state -- it
+    emits samples whenever its clock is present, and asking the firmware to make
+    the mic deliver data in the quiescent state was the wrong demand, not a
+    device defect. Two fixture changes follow from the owner's directives and are
+    implemented:
 
-    GATE DEFECT TO FIX: `case_11_builtin_mic_noise` currently passes because the
-    suite baseline plays a wake tone before measuring, which brings the codec up
-    and makes the ADC live for >=18 s. A prior stream invalidates the criterion,
-    so case 11 must guarantee "no stream since load" itself (reload via
-    `rig/load_xe.sh` and wait, or run before any playback) or it will report
-    green on a device that fails the strict test above.
+      * The baseline sets `POWER:TIMEout -1` (power saving disabled) for the whole
+        run, verified by read-back and restored on exit, instead of the earlier
+        wake tone. A stream only wakes the box incidentally, and a wake tone let
+        capture cases measure a state the fixture itself had caused.
+      * Case 11 measures the mic WHILE audio plays -- the spec'd condition -- and
+        requires non-constant data above the quantisation floor. Result:
+        ~9.7k-9.9k distinct values per 144,000 samples at -103 dBFS, PASS. A
+        constant return there is a real fault: a floating or unclocked data pin
+        produces exactly that and cannot fake live data.
+
+    A constant capture with NO stream is accepted behaviour and is never a
+    verdict about the microphone. Do not add ADC-specific power-on/power-off code.
 
     --- original investigation, kept for the record ---
     Measured on a clean boot with `rig/mic_probe.py`: 96,000 samples per channel
