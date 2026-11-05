@@ -245,6 +245,21 @@ the missing dependency. Items below are the dependencies.
     cannot report a lost clock, it just sends zeros. Do not chase "mic silent at
     boot" as a bug.
 
+    STRICT VERDICT (2026-11-05, measured): THE REQUIREMENT IS NOT MET. Fresh
+    load, no host stream ever, `POWER:TIMEout` set to -1 and READ BACK as -1
+    (so the force-on state did take): capture = `distinct=1/144000`, rms digital
+    zero, both channels. The requirement "mic on when power saving is disabled"
+    therefore FAILS, and the fix is the force-awake path: the codec/clock
+    sequence must run when the device enters force-on, not only when a host
+    stream arrives.
+
+    GATE DEFECT TO FIX: `case_11_builtin_mic_noise` currently passes because the
+    suite baseline plays a wake tone before measuring, which brings the codec up
+    and makes the ADC live for >=18 s. A prior stream invalidates the criterion,
+    so case 11 must guarantee "no stream since load" itself (reload via
+    `rig/load_xe.sh` and wait, or run before any playback) or it will report
+    green on a device that fails the strict test above.
+
     --- original investigation, kept for the record ---
     Measured on a clean boot with `rig/mic_probe.py`: 96,000 samples per channel
     contain exactly ONE distinct value; rms is digital zero; the "top peaks" are

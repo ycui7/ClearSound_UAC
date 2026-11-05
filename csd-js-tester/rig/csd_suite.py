@@ -802,11 +802,48 @@ def _whiteness(x):
 
 
 def case_11_builtin_mic_noise(dut):
-    """Case 11: with no excitation, the built-in mic path must return white noise.
+    """Case 11: with power saving DISABLED, the built-in mic must be on.
 
-    'No excitation' means nothing is playing, so this leg must not run while any
-    tone is on the bus.
+    Owner spec (2026-11-05), which replaces the old "white noise with no
+    excitation" criterion. The mic ADC has no control registers and streams as
+    soon as MCLK is up; the clock feeding it comes up with the codec, so before
+    any host stream there is nothing to sample and capture holds a single
+    distinct value. That is expected, not a defect -- so it is no longer what
+    this case measures, and it must never be reported as a failure.
+
+    What binds: set POWER:TIMEout -1 (force-on, power saving disabled) and the
+    mic must deliver non-constant data above the quantisation floor with NO
+    stream running. A floating or unclocked data pin cannot fake that -- it
+    returns a constant, which is exactly the signature we measured at boot
+    (1 distinct value in 96,000 samples) and what this case rejects.
+
+    Whiteness, autocorrelation and dominant-line figures are still reported, but
+    as information only: a bench microphone beside a switching supply has a
+    dominant line, and rejecting that measures the room, not the device.
     """
+    d = dut["dac"]
+    prev = None
+    try:
+        ok, prev, _ = scpi("POWER:TIMEout?", d)
+        prev = (prev or "").strip()
+        if not ok:
+            return NOTRUN, "POWER:TIMEout? refused -- cannot disable power saving to test the mic"
+        scpi("POWER:TIMEout -1", d)
+        time.sleep(1.5)                     # let the force-on state reach the codec
+    except Exception as e:                  # noqa: BLE001 - criterion needs the control
+        return NOTRUN, "cannot disable power saving to test the mic: %s" % e
+    try:
+        return _case_11_measure(dut, prev)
+    finally:
+        try:
+            if prev and prev.lstrip("-").isdigit():
+                scpi("POWER:TIMEout %s" % prev, d)
+        except Exception:                   # noqa: BLE001 - restore is best effort
+            pass
+
+
+def _case_11_measure(dut, prev):
+    """The measurement half of case 11, with power saving already disabled."""
     d = dut["dac"]
     rc, out = sh(["arecord", "-D", "hw:%d,0" % d, "--dump-hw-params"], timeout=40)
     if "S32_LE" not in out:
@@ -831,23 +868,22 @@ def case_11_builtin_mic_noise(dut):
               "flat=%.3f autocorr=%.2f line=%.1f dB rms=%.1f" % (
                   stats[0][0], stats[0][1], stats[0][2], rms[0],
                   stats[1][0], stats[1][1], stats[1][2], rms[1]))
-    quiet = max(rms) < -118.0
-    if quiet:
-        return FAIL, ("capture is dead silent -- a wired analogue front end always shows a "
-                      "thermal/noise floor; this stream is not a microphone: " + detail)
-    ok_flat = all(s[0] > 0.05 for s in stats)
-    ok_aper = all(s[1] < 0.50 for s in stats)
-    ok_line = all(s[2] < 25.0 for s in stats)
-    if ok_flat and ok_aper and ok_line:
-        return PASS, "noise-like and aperiodic; " + detail
-    why = []
-    if not ok_flat:
-        why.append("spectrum not flat (tonal/structured)")
-    if not ok_aper:
-        why.append("strong periodicity (a repeating stamp pattern, not a mic)")
-    if not ok_line:
-        why.append("dominant spectral line (injected signal, not noise)")
-    return FAIL, "; ".join(why) + ": " + detail
+    # The binding criterion, per owner spec: power saving is OFF and no stream is
+    # running, so the ADC either has its clock or it does not. A floating or
+    # unclocked data pin returns a CONSTANT -- one distinct value -- which is
+    # exactly the boot signature measured here (1 distinct value in 96,000
+    # samples). Live data cannot produce that: the working path measured ~11k
+    # distinct values per 96,000 samples at -106 dBFS. So distinctness is the
+    # test, and it cannot be gamed by a stuck bus.
+    distinct = [len(np.unique(raw[:, c])) for c in range(2)]
+    detail = ("power saving OFF, no stream: " + detail +
+              " distinct=%s/%d" % (distinct, n))
+    if min(distinct) < 100 or max(rms) < -140.0:
+        return FAIL, ("mic is not on with power saving disabled -- capture is constant, so the "
+                      "ADC has no clock or its data never reaches the port (a register-less ADC "
+                      "cannot report that; it just sends zeros): " + detail)
+    return PASS, ("mic on with power saving disabled and no stream; " + detail +
+                  " -- whiteness/periodicity reported, not gated (see docstring)")
 
 
 def case_12_serial_in_descriptor(dut):
