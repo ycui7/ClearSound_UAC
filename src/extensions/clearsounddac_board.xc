@@ -258,6 +258,18 @@ static unsigned volRegLastA  = 0;             /* dedupe for reg 3 (analog) */
  * the pop step and the restore both live in this task. */
 static int      pw_vol_saved[2]     = {0, 0};
 static unsigned pw_vol_saved_valid  = 0u;
+/* Is the chain currently down AS FAR AS THIS TASK KNOWS? Set when this task
+ * executes DAC_OFF, cleared when it executes VOL_RESTORE (which the channel
+ * delivers only after the assistant's codec re-init has completed).
+ *
+ * Deliberately NOT csd_power_state(): that static lives in csd_power.c, and on
+ * XS3 a module-scope static is TILE-PRIVATE. This task is on tile[0] and the
+ * policy task is on tile[1], so reading it here returned this tile's own
+ * never-written copy -- CSD_PW_STATE_ON (0) forever -- which silently disabled
+ * the guard below. Same-tile truth from the commands this task executed is the
+ * honest source; no channel is needed because this task is the one that ran
+ * the sequence. */
+static unsigned pw_down             = 0u;
 #endif
 static unsigned volRegValidA = 0;
 
@@ -382,7 +394,7 @@ static void vol_apply_host_request(unsigned channel, int valueA, int valueDL,
          * level it wants when we come back, not the stale one. Invalidating
          * here is what keeps 'restore the prior value' from meaning
          * 'restore a value the host has since replaced'. */
-        if (csd_power_state() != CSD_PW_STATE_ON) pw_vol_saved_valid = 0u;
+        if (pw_down) pw_vol_saved_valid = 0u;
 #endif
         /* Keep the FULL host request per channel (analog + digital halves of
          * ep0's split). The mixer must be able to re-partition the total
@@ -490,6 +502,8 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
             /* DAC_MUTE_N = 8D bit4 low, and hold the codec in reset. */
             gpio_8d_reset &= ~0x30u;
             led_render();
+            pw_down = 1u;          /* a host volume change now supersedes the
+                                    * saved pre-shutdown level, see line ~385 */
             break;
         case CSD_PW_CMD_VOL_RESTORE:
             /* Ordering is guaranteed by the channel, so the codec has already
@@ -513,6 +527,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
             pw_invalidate_vol_cache();
             vol_apply_all(i2c);
             vol_apply_host_mute(host_muted, i2c);
+            pw_down = 0u;          /* ordered after the assistant's re-init */
             break;
         case CSD_PW_CMD_AMP_ON:
             /* LAST: deassert the amplifier (owner: SUSPEND_N last). */
@@ -641,11 +656,14 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
      * the module's getters are scalar-only (XC cannot pass C pointers).
      * MUTE first, then volume per channel -- the post order ep0 guarantees. */
 #ifdef CSD_IDLE_POWER
-    /* Idle power: 'enabled' means built in, per the owner's wake rule
-     * (dsp/mixer start first IF they are enabled). init is idempotent and
-     * belongs here: this task owns every actuator, so it owns arming. */
-    csd_power_set_dsp_enabled(PCM_DSP_EN);
-    csd_power_init();
+    /* NO csd_power_init()/csd_power_set_dsp_enabled() here. A previous cut
+     * called them on the theory that 'this task owns every actuator, so it
+     * owns arming'. It does not: the policy statics in csd_power.c are
+     * TILE-PRIVATE and the policy task runs on tile[1], so this call wrote a
+     * copy no reader on this tile would ever consult -- and worse, it read as
+     * if tile[0] could arm the feature. The assistant owns configure, the
+     * dsp-enabled fact and init; this task executes commands and keeps its own
+     * pw_down. */
 #endif
 
     timer vol_mb_tmr;
