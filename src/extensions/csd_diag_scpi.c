@@ -1170,9 +1170,12 @@ static SCPI_FPTR_CMD scpi_result_t mixer_gain_q(scpi_t *context)
  * Accepted in every build (production calibration surface, like
  * MIXer:GAIN:*). The setter writes the packed mailbox word and raises the
  * persistence request flag; the tile[0] store task journals it within ~50 ms
- * (csd_trim_store.h -- this thread must not touch flash itself). The mixer
- * reads the word on every output-volume multiply (csd_mix_apply_trim), the
- * application point the directive names: host SET_CUR and button paths alike.
+ * (csd_trim_store.h -- this thread must not touch flash itself). The trim is
+ * applied in the CODEC (MASTER TRIM regs 17..20 plus per-channel regs 15/16,
+ * written by vol_apply_digital), NOT in the mixer: owner directive 2026-11-04
+ * says the mixer handles no trim, and csd_mix_apply_trim() is an identity
+ * pass-through. Application point the directive names: host SET_CUR and button
+ * paths alike.
  *
  * VOLume:TRIM:STATus? reports the persistence layer's view (partition size,
  * load/save status, sequence, error code, counts) so a rig can tell

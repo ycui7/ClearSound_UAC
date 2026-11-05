@@ -198,6 +198,19 @@ unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
      * git-verifiable. Do not delete it without re-verifying the register
      * path reproduces rig/trim_acoustic_ab.py within tolerance. */
 #ifdef CSD_TRIM_IN_AUDIO_PATH
+    /* Owner directive 2026-11-04, restated 2026-11-05: the mixer handles NO
+     * trim. The audio-path multiply below is a forensic A/B kept from before
+     * that directive, and it is no longer a valid comparison at all -- the
+     * codec registers now carry each channel's own attenuation
+     * (csd_trim_channel_vol_step -> regs 15/16), so enabling this would
+     * attenuate the same trim TWICE: once here, once in the chip. The doubling
+     * would then be blamed on the register path, which did not cause it.
+     *
+     * Refuse the combination rather than silently produce a wrong board. To
+     * study the old behaviour, revert to the commit that had it -- git already
+     * keeps that state; a compile-time trap that yields double attenuation is
+     * not a way to reproduce history. */
+    #error "CSD_TRIM_IN_AUDIO_PATH is no longer supported: the codec registers own per-channel trim, so the mixer multiply would apply it a second time (owner: the mixer handles no trim)."
     unsigned w = csd_mb_trim;                      /* single aligned load */
     if (!csd_trim_cache_valid || w != csd_trim_cache_word) {
         int tl = (int)(short)(w & 0xFFFFu);
@@ -237,14 +250,16 @@ unsigned csd_mix_apply_trim(unsigned ch, unsigned host_mult)
  * rule for reg 3; a true per-channel trim would need USE_SHARED_VOLUME=0
  * (reg 27) plus datasheet work and is deliberately NOT assumed.
  *
- * Scale: csd_trim_counts_to_mult_q29 is Q2.29 (2^29 = unity) and stays in the
- * MIXER domain -- csd_mix_apply_trim() consumes that word. The CODEC domain is
- * different: datasheet Register 17-20 is signed with full scale 32'h7FFFFFFF,
- * so the codec word is the Q2.29 value shifted LEFT by 2 and clamped (see
- * csd_trim_master_trim_q31). The two domains must not share a unity constant:
- * conflating them is what silenced the board. The old comment here called the
- * >>2 mapping "gate-verified acoustics" -- it never was; the acoustic gate was
- * failing on this very register the whole time. */
+ * Scale: the trim pair is 8.8 fixed point (256 counts/dB) throughout. There is
+ * NO mixer-domain trim word and no separate mixer unity constant to keep
+ * straight: csd_mix_apply_trim() is an identity pass-through (owner: the mixer
+ * handles no trim), so the codec word is the only conversion -- Q2.29 at unity
+ * shifted LEFT by 2 and clamped (see csd_trim_master_trim_q31). Conflating a
+ * mixer unity with the codec's full scale is what silenced the board once;
+ * keeping the mixer out of the path removes the pair of constants entirely.
+ * The old comment here called the >>2 mapping "gate-verified acoustics" -- it
+ * never was; the acoustic gate was failing on this very register the whole
+ * time. */
 unsigned csd_trim_reg_byte(unsigned q31, unsigned idx)
 {
     /* Byte order across regs 17..20 was MEASURED on silicon 2026-11-05, not

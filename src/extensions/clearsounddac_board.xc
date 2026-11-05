@@ -239,9 +239,16 @@ static int      volBtnDb8     = 0;            /* button offset, 8.8 dB */
  *      "on every volume change" for the host path.
  *   2. reg 15/16 resolution is 0.5 dB/LSB, so the mandated 0.125 dB grid is
  *      physically inexpressible in the codec at all.
- * The trim is therefore a multiplier applied in the mixer, post-mix, where
- * the host multiplier already lives: csd_mix_apply_trim() in
- * csd_gen_mailbox.c. It is standing, so it rides every volume change from
+ * The trim is therefore CHIP REGISTER SETUP (owner directive 2026-11-04,
+ * restated 2026-11-05: the mixer handles no trim, in zero audio-path
+ * instructions): the shared part goes to MASTER TRIM (regs 17..20) via
+ * csd_trim_master_trim_q31(), and each channel's own remainder goes to regs
+ * 15/16 via csd_trim_channel_vol_step(), both applied by vol_apply_digital --
+ * the one writer of those registers. csd_mix_apply_trim() is an IDENTITY
+ * pass-through kept only so mixer.xc's call sites stay untouched; the multiply
+ * behind CSD_TRIM_IN_AUDIO_PATH is now a build error, because with the
+ * registers carrying per-channel attenuation it would apply the trim twice.
+ * It is standing, so it rides every volume change from
  * either path (host: mixer multiplier; buttons: codec registers) without
  * either path having to know about it. The codec terms below stay exactly
  * as they were before the trim feature. */
