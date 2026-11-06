@@ -53,6 +53,20 @@ loopback pin must be a dedicated port read at the tap site, not a second ADC wir
 4. The MIDI arming command (`DEBUG:LOOPback 1`) stays exactly as it is — the owner's
    rule that only a MIDI command can enable the tap does not change.
 
+## Dependency pin (lib_xua)
+
+`lib_xua` is a **separate git repository** here, not a gitlink inside the app tree, so the
+app cannot record it by submodule. The app builds against:
+
+- repo: `/home/ycui/sw-audio-sc/lib_xua` (branch `csd-121005`, was detached)
+- commit: **`77245f99`** - "audiohub: guard the I2S monitor call behind CSD_MB_I2S_MONITOR"
+- its parent, the tap hooks: `021c97ae` (cherry-pick of `fefc9a1c`)
+
+Any commit in the app repo that changes behaviour must therefore ALSO commit the
+`lib_xua` tree and state the SHA here, otherwise the "whole dependency tree" is not
+recorded and a rebuild is not reproducible. The release note for `2026.11.01.85` shows the
+same pattern (it pins `820fab5` and calls out the drift).
+
 ## What to prove after the rework
 
 - `DEBUG:LOOPback?` frame counter still advances while armed (the pin is delivering).
