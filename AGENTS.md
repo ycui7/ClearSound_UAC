@@ -28,6 +28,53 @@ repo state — no uncommitted changes at build time. The release build is what
 ships (`release/` + tag); the debug build proves the instrumentation stays
 functional and that gating it does not perturb audio.
 
+## No DAC channel mixing (owner directive 2026-11-05)
+
+Nothing in this project touches the ES9219Q channel-mixing or automute
+registers. `0x02` carries `CH1_MIX_SEL`/`CH2_MIX_SEL`, which route one I2S slot
+to both DAC channels; a codec told to do that reproduces the right channel on
+both outputs and goes silent on a left-only stream, while every host control
+still reads nominal. The former writes (`0x02` with `MIX_SEL_DEFAULTS`, `0x04`
+automute time, `0x05` automute level) are removed rather than left commented,
+the value literals are gone from `es9219q.h`, and `csd_diag_reg_write()` refuses
+`0x02`, `0x04`, `0x05` and `0xC0` (`0xC0` is SOFT_RESET: this build has no codec
+power-on-reset path, so a soft reset that does not come back needs the supply
+pulled). Reads stay open — refusing them would hide the state we need to see.
+
+The chip runs these registers on its own reset defaults. Measured boot values on
+this board: `0x02=0x34`, `0x0D=0x40`. Do not assume the datasheet's `0x04`.
+
+## Dependency pinning: lib_xua is a separate repo
+
+`lib_xua` is NOT a gitlink inside this app tree. Any commit that changes
+behaviour must therefore also commit the `lib_xua` repo and record its SHA, or
+the build is not reproducible and the "whole dependency tree" is not committed.
+Current pin: branch `csd-121005`, commit `77245f99` (its parent `021c97ae`
+restores the loopback tap hooks). Keep `I2S_LOOPBACK_HOOK.md` in step with it.
+
+## Docs index
+
+- [`TEST.md`](TEST.md) — every acceptance case: criterion, measurement method,
+  premises, known limitations, result semantics, current measured status.
+- [`FLASH_AND_RECOVERY.md`](FLASH_AND_RECOVERY.md) — the two flash paths, JTAG
+  recovery, archive-before-flash.
+- [`ACOUSTIC_LATCH_FINDINGS.md`](ACOUSTIC_LATCH_FINDINGS.md) — the measured
+  channel-collapse latch: symptoms, what was ruled out, state A vs state B.
+- [`I2S_LOOPBACK_HOOK.md`](I2S_LOOPBACK_HOOK.md) — the pin-32 hardware
+  loopback plan, with the pin map and why `I2S_WIRES_ADC` must not be used.
+
+## Measurement integrity
+
+- Bit-perfect results are only valid on a **flashed** image that boots by itself.
+  Under `xrun --io --xscope` the loopback path measured 0.0007–0.0033 % on a data
+  path that is bit-perfect when flashed (100.0000 %). Debug loads are for
+  bring-up, not for accept/reject.
+- Prove which image answered before trusting a result: read the `*IDN?` stamp.
+  A failed flash returns a stale image, and a wrapper that ends on `echo` masks
+  `xflash`'s exit status — check `Site 0 has finished successfully`.
+- Prefer raw counts over ratios when reporting: differing bits, zero words,
+  slips, frames. A percentage hides which of those happened.
+
 ## TODO
 
 Feature list lives in [`TODO.md`](TODO.md). Owner-directive items land there;
