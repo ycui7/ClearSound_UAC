@@ -1682,8 +1682,68 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
         DAC_REGREAD(ES9219Q_READ_LOCK_STATUS, regVal);
         debug_printf(ANSI_GREEN "MQA_LOCK: %d\tPLL_LOCK: %d\tASRC: %d" ANSI_RESET "\n", (regVal>>2)&1, (regVal>>1)&1, (regVal)&1);   
         DAC_REGREAD(ES9219Q_CHIP_STATUS, regVal);
-        debug_printf(ANSI_GREEN "CHIPI_ID: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x01));   
+        debug_printf(ANSI_GREEN "CHIPI_ID: %d\tDPLL_LOCK: %d" ANSI_RESET "\n", (regVal >>2), (regVal & 0x01));  
      }
+
+    /* ---- 128*fs MCLK mode (root cause of the 384 kHz silence) ------------
+     * Datasheet v1.3, Register 10 (0x0A) bit [4] 128FS_MODE: "Enables operation of
+     * the DAC while in synchronous mode with a 128*fs MCLK", DEFAULT DISABLED.
+     * This firmware never wrote 0x0A, so the bit was 0.
+     *
+     * At 384 kHz this board runs MCLK = 49.152 MHz = exactly 128 * 384000. On that
+     * boundary the ES9219 cannot lock its DPLL to the incoming rate unless it is
+     * told to: measured 0x40 bit0 = 0 (DPLL unlocked), 0x4D = 0x02 (analog PLL
+     * locked, ASRC unlocked), and no tone in the room. Writing 0x0A = 0x12
+     * (128FS_MODE | LOCK_SPEED=2) gives 0x40 bit0 = 1 and a real 1 kHz tone.
+     * DPLL_BW_SERIAL (0x0C) and LOCK_SPEED changes made no difference once the
+     * mode bit was set, so the bit is the whole fix.
+     *
+     * The condition is arithmetic, not a rate list: set the mode exactly when the
+     * clock really is 128*fs, and clear it otherwise so other rates keep the
+     * default DPLL behaviour. LOCK_SPEED stays at its default (4'd2). */
+    DAC_REGWRITE(ES9219Q_MASTER_MODE_N_SYNC_CONFIG,
+                 (unsigned char)(0x02u |
+                     (((mClk == (128u * samFreq)) ? 0x10u : 0x00u))));
+
+    /* ---- MCLK-change lock guard (owner directive 2026-11-06) -------------
+     * Whenever the MCLK frequency changes, the codec must be checked for lock.
+     * Measured on this board: at 384 kHz the codec is NOT locked -- 0x40 bit0=0,
+     * 0x41=0x00, 0x4D=0x00 -- mute is 0, volumes are unchanged, and no tone
+     * reaches the room, while 352.8 kHz locks (0x89/0x01/0x01) and plays. A codec
+     * left unlocked chases a PLL it cannot lock: put it in bypass (0xC5 = 0x80,
+     * the same setting the boot fallback uses) and raise the bypass indication,
+     * which the tile[0] display renders as red for 3 s.
+     *
+     * TRIGGER: this function is the firmware's rate-change trigger -- it is the one
+     * place a host sample-rate selection reaches the codec (the hwcfg counter at the
+     * top of the function exists to prove exactly that). No extra comparison is
+     * needed, and adding one was a mistake: an mClk-keyed guard never ran for 384 kHz
+     * because 48 kHz and 384 kHz share the 49.152 MHz family clock, and a
+     * rate-keyed static comparison then masked it again in testing. The check runs
+     * here, on every configuration the host requests, which is what "whenever the
+     * sample rate changes" means in this firmware.
+     *
+     * The retry window exists because lock arrives a few ms after the rate switch;
+     * it is bounded so a genuinely unlocked codec is reported, not hidden. A codec
+     * that stops answering reads 0, which is "not locked" and takes the same path --
+     * an unreadable codec must not be left chasing a PLL either.
+     */
+    {
+        unsigned locked = 0;
+        unsigned tries;
+        for (tries = 0; tries < 10u; tries++) {
+            DAC_REGREAD(ES9219Q_CHIP_STATUS, locked);
+            if (locked & 0x01u) break;          /* lock bit */
+            delay_milliseconds(2);
+        }
+        if (!(locked & 0x01u)) {
+            DAC_PLL_REGWRITE(197, 0x80);        /* 0xC5 PLL_BYPASS = 1 */
+            DAC_LED_STATUS(LED_ST_BYPASS);      /* red 3 s, then normal display */
+            debug_printf(ANSI_RED "rate %d (MCLK %d): codec NOT locked after %d "
+                         "tries -> PLL BYPASS" ANSI_RESET "\n",
+                         samFreq, mClk, tries);
+        }
+    }
 
 }
 
