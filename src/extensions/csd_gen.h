@@ -275,6 +275,12 @@ unsigned csd_mb_get_rate(void);             /* reader: mixer thread   */
 void     csd_mb_put_dop(unsigned dop);      /* writer: mixer thread   */
 unsigned csd_mb_get_dop(void);              /* reader: audio thread   */
 
+/* ADC source select: 0 = pin 53 codec ADC (release default), 1 = pin 32 spare
+ * input used by the loopback rework. Writer: SCPI/MIDI thread. Reader: audio
+ * thread, once per frame. Only a MIDI command may change it. */
+void     csd_mb_put_adc_src(unsigned src);
+unsigned csd_mb_get_adc_src(void);
+
 /* Mixer volume-command trace (see csd_gen_mailbox.c): writer is the mixer
  * thread's SET_MIX_OUT_VOL handler, reader is the diagnostic thread. */
 void     csd_mb_note_vol(unsigned index, unsigned val);

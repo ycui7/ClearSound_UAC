@@ -56,6 +56,23 @@ void csd_mb_put_dop(unsigned dop) { csd_mb_dop = dop ? 1u : 0u; }
 
 unsigned csd_mb_get_dop(void) { return csd_mb_dop; }
 
+/* ADC source select. 0 = the codec's ADC data line, pin 53 (XS1_PORT_1K), which
+ * is the shipping mic input and the release default. 1 = the spare input, pin 32
+ * (XS1_PORT_1F), which the loopback rework jumps the DAC data line to.
+ *
+ * Writer: the diagnostic/SCPI thread, via a MIDI command. Reader: the audio
+ * thread, once per frame inside the I2S receive loop. Both pins are sampled by
+ * hardware every frame either way -- this only chooses which word the codec
+ * channel carries, so the cost is one port read and no memory traffic.
+ *
+ * One word, plain volatile, same pattern as csd_mb_dop above: a single aligned
+ * store/load, no tearing, and the audio thread never blocks on the writer. */
+static volatile unsigned csd_mb_adc_src;      /* 0 = pin 53, 1 = pin 32 */
+
+void csd_mb_put_adc_src(unsigned src) { csd_mb_adc_src = src ? 1u : 0u; }
+
+unsigned csd_mb_get_adc_src(void) { return csd_mb_adc_src; }
+
 /* Per-source pre-mixer gains, packed as (w_gen << 16) | w_host, each Q15
  * with 32768 = unity. Packed INTO ONE WORD on purpose: a set wants both
  * values to arrive together (two words would let the mixer apply a new
