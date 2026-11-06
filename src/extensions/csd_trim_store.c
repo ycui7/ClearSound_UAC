@@ -758,6 +758,15 @@ void csd_trim_reset_defaults(void)
     (void)csd_trim_journal_now(0u);      /* trims 0 dB + timeout, current version */
 }
 
+/* Save the value the register writer last applied. Used by the SCPI SAVE
+ * command, where the host wants "persist this now" without first setting a new
+ * trim. The argument is still passed explicitly -- reading the mailbox here
+ * would read tile[0]'s never-written copy (see the journal comment below). */
+int csd_trim_save_now(void)
+{
+    return csd_trim_journal_now(tr_applied_packed);
+}
+
 int csd_trim_journal_now(unsigned packed)
 {
     static unsigned char sector[4096];
@@ -847,6 +856,17 @@ unsigned csd_trim_status_word(unsigned idx)
     case 4u: return tr_st_err;
     case 5u: return tr_st_load_n;
     case 6u: return tr_st_save_n;
+    /* Record-version diagnostics (7..10): which path the loader took. A rig
+     * needs these because "the trim did not come back" has four causes and the
+     * trim value alone cannot tell them apart:
+     *   7 rejected by checksum -> the store used defaults
+     *   8 refused: version not understood (a bisect left a newer record)
+     *   9 accepted after forward migration (older layout upgraded)
+     *  10 reset to defaults (no usable record) */
+    case 7u: return tr_st_crc_fail;
+    case 8u: return tr_st_unsupported;
+    case 9u: return tr_st_migrated + tr_st_migrated_scan;
+    case 10u: return tr_st_defaulted;
     default: return 0u;                /* out of range: never read past */
     }
 }

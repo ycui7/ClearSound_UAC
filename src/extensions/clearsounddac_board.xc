@@ -825,6 +825,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 else if (cmd == AUDIOHW_CMD_TRIM_LOAD ||
                          cmd == AUDIOHW_CMD_TRIM_SAVE ||
                          cmd == AUDIOHW_CMD_TRIM_STAT ||
+                         cmd == AUDIOHW_CMD_TRIM_RESET ||
                          cmd == AUDIOHW_CMD_PW_TIMEOUT_GET ||
                          cmd == AUDIOHW_CMD_PW_TIMEOUT_SAVE)
                 {
@@ -886,6 +887,17 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         c[i] :> packed;
                         unsigned ok = (unsigned) csd_trim_journal_now(packed);
                         c[i] <: ok;
+                    }
+                    else if (cmd == AUDIOHW_CMD_TRIM_RESET)
+                    {
+                        /* Default condition at the CURRENT record version, so it
+                         * supersedes any record this image cannot use -- the
+                         * bisect escape hatch. Replies the packed value it wrote
+                         * and the load status, so the caller adopts defaults
+                         * through the same path a boot load uses. */
+                        csd_trim_reset_defaults();
+                        c[i] <: (unsigned) 0u;
+                        c[i] <: csd_trim_status_word(1u);
                     }
                     else if (cmd == AUDIOHW_CMD_PW_TIMEOUT_GET)
                     {

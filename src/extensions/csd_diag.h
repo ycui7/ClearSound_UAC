@@ -101,7 +101,9 @@ int csd_diag_pw_timeout_get(void);
 /* Re-run tile[0]'s single volume applier so a trim change reaches regs 15/16.
  * Requests recomputation; it never writes a volume register itself. */
 void csd_diag_vol_reapply(void);
-unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..6, see csd_trim_store.h */
+unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..10, see csd_trim_store.h */
+int csd_diag_trim_save(unsigned packed);       /* journal this pair now */
+int csd_diag_trim_reset_store(void);           /* write defaults at current version */
 
 /* Unit identity, forwarded to the tile[0] owner for the same reason register
  * reads are: the identity statics are per-tile memory (.dp.bss is DP/CP

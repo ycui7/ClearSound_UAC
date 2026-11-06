@@ -1366,6 +1366,41 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* Defined below; the two new commands reply through them rather than duplicating
+ * the adopt-and-reply logic. */
+static SCPI_FPTR_CMD scpi_result_t vol_trim_status_q(scpi_t *context);
+static SCPI_FPTR_CMD scpi_result_t vol_trim_load(scpi_t *context);
+
+/* VOLume:TRIM:SAVe -> journal the currently applied pair, then reply the status
+ * words. A rig uses this to prove the write path without first changing a value.
+ *
+ * The pair is read from the mailbox HERE, on tile[1], and sent as an argument:
+ * the store runs on tile[0], and reading the mailbox there would journal
+ * tile[0]'s never-written copy -- the bug that once made seq climb while the
+ * stored value stayed 0 dB. */
+static SCPI_FPTR_CMD scpi_result_t vol_trim_save(scpi_t *context)
+{
+    unsigned packed = csd_mb_get_trim();
+    if (!csd_diag_trim_save(packed)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return vol_trim_status_q(context);
+}
+
+/* VOLume:TRIM:RESET -> write the default condition (0 dB, 300 s) at the CURRENT
+ * record version, then adopt it through the normal load path. Recovery for a
+ * bisect that left a record this image cannot use: a newer record is refused
+ * rather than misread, and this reset supersedes it by sequence number. */
+static SCPI_FPTR_CMD scpi_result_t vol_trim_reset(scpi_t *context)
+{
+    if (csd_diag_trim_reset_store() == 3) {       /* 3 = store reported an error */
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return vol_trim_load(context);                /* adopt what the reset wrote */
+}
+
 /* VOLume:TRIM:STATus? -> partition_bytes, load_status, save_status, seq,
  * last_error, boot_count, save_count        (TODO item 3 rig dependency)
  *
@@ -1386,7 +1421,11 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_status_q(scpi_t *context)
 {
     char buf[96];
     unsigned len = 0;
-    for (unsigned i = 0; i < 7u; i++) {
+    /* 11 words: the original seven plus the four record-version counters added
+     * with the versioned store (7 checksum rejects, 8 unusable version,
+     * 9 migrated, 10 reset to defaults). They are APPENDED, never inserted, so a
+     * rig that reads seven still gets the same seven in the same order. */
+    for (unsigned i = 0; i < 11u; i++) {
         if (len) buf[len++] = ',';
         /* One scalar per round trip over the codec-server channel: the
          * cross-tile rule in this codebase is scalars only, never pointers
@@ -1873,6 +1912,8 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "POWER:TIMEout",           .callback = power_timeout_set },
     { .pattern = "POWER:TIMEout?",          .callback = power_timeout_q   },
     { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
+    { .pattern = "VOLume:TRIM:SAVe",        .callback = vol_trim_save     },
+    { .pattern = "VOLume:TRIM:RESET",       .callback = vol_trim_reset    },
 #ifndef SPECIALTYCIRCUITS_RELEASE
     /* Debug-only rows (TODO item 5): gone in release builds together with
      * their callbacks above; a stray DEBUG: command then answers -113.

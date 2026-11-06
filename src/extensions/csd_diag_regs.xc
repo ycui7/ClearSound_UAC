@@ -149,6 +149,19 @@ unsigned csd_diag_trim_status(unsigned idx)
     return v;
 }
 
+/* Write the default condition into the journal. Returns the load status the
+ * store reported; the caller adopts the result through csd_diag_trim_load(). */
+int csd_diag_trim_reset_store(void)
+{
+    unsigned packed, st;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_RESET;
+        uc_audiohw_diag :> packed;
+        uc_audiohw_diag :> st;
+    }
+    return (int) st;
+}
+
 int csd_diag_reg_read(unsigned reg, unsigned *val)
 {
     unsigned v;

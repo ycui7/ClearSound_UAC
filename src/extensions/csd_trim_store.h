@@ -109,7 +109,16 @@ unsigned csd_flash_serial_err(void);   /* 0 ok, else TRIM_ERR_* / fl_connect rc 
  * seq, last_error, boot_count, save_count. Scalar in / scalar out: the
  * cross-tile rule in this codebase is scalars only, never pointers (see
  * csd_identity.h). Out-of-range index returns 0. */
-unsigned csd_trim_status_word(unsigned idx);
+unsigned csd_trim_status_word(unsigned idx);   /* 0..10; 7..10 record-version counters */
+
+/* Write the current trims + timeout at the CURRENT record version. The store
+ * already journals on every trim change; this exists so a rig can prove the
+ * write path end to end without changing a value first. Returns 1 on success. */
+int csd_trim_save_now(void);
+
+/* Default condition, written at the current version so it supersedes any record.
+ * The escape hatch after a bisect leaves a record this image cannot use. */
+void csd_trim_reset_defaults(void);
 
 #ifdef __cplusplus
 }

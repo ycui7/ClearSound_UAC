@@ -58,6 +58,7 @@ typedef enum
     AUDIOHW_CMD_TRIM_LOAD,          //read the journal, publish into the mailbox
     AUDIOHW_CMD_TRIM_SAVE,          //journal the CURRENT mailbox trim pair
     AUDIOHW_CMD_TRIM_STAT,          //reply the 7 persistence status words from flash
+    AUDIOHW_CMD_TRIM_RESET,         //write the default condition at the current version
     AUDIOHW_CMD_IDENTITY
 } audioHwCmd_t;
 
