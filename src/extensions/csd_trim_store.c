@@ -153,22 +153,81 @@ static uint32_t slot_checksum(const trim_slot_t *s)
     return c;
 }
 
+/* ---- record compatibility -------------------------------------------------
+ * A stored record carries its own type version in version_len[31:16]. Three
+ * outcomes, and the difference matters:
+ *
+ *   CURRENT      version == TRIM_VERSION, all range gates pass          -> adopt
+ *   MIGRATED     an older version whose layout still parses            -> adopt,
+ *                fill the fields it predates with their defaults, and rewrite the
+ *                record at the current version so the migration happens once
+ *   INCOMPATIBLE version newer than this firmware, or unknown          -> do NOT
+ *                adopt; a newer record may mean a different payload entirely, and
+ *                guessing would install garbage. Counted, and the caller resets
+ *   CORRUPT      magic or checksum wrong, or a payload word out of range/off-grid
+ *                                                                       -> skip,
+ *                and use the default condition rather than believing it
+ *
+ * A record that fails its checksum NEVER becomes the volume path's truth: the
+ * store falls back to defaults (trims 0 dB, timeout 300 s) exactly as a blank
+ * partition does. Silence in flash is not evidence of a good record.
+ */
+#define TRIM_VERSION_V1   1u        /* trims only; pw_timeout_s did not exist */
+#define TRIM_PW_DEFAULT_S 300
+
+typedef enum {
+    TRIM_SLOT_CORRUPT      = 0,
+    TRIM_SLOT_CURRENT      = 1,
+    TRIM_SLOT_MIGRATED     = 2,
+    TRIM_SLOT_INCOMPATIBLE = 3
+} trim_slot_class_t;
+
+static volatile unsigned tr_st_crc_fail  = 0;   /* records rejected by checksum */
+static volatile unsigned tr_st_unsupported = 0; /* version newer/unknown        */
+static volatile unsigned tr_st_migrated  = 0;   /* records upgraded on read     */
+static volatile unsigned tr_st_defaulted = 0;   /* NO valid record -> defaults  */
+
+static trim_slot_class_t slot_classify(const trim_slot_t *s)
+{
+    if (s->magic != TRIM_MAGIC) return TRIM_SLOT_CORRUPT;
+
+    unsigned ver = s->version_len >> 16;
+    unsigned words = s->version_len & 0xFFFFu;
+
+    /* Checksum before anything is trusted. A torn NOR write, a partial append
+     * and a bit flip all land here, and all of them mean "do not adopt". */
+    if (s->chk != slot_checksum(s)) return TRIM_SLOT_CORRUPT;
+
+    if (ver > TRIM_VERSION) return TRIM_SLOT_INCOMPATIBLE;   /* newer firmware */
+
+    if (ver == TRIM_VERSION) {
+        if (words != 3u) return TRIM_SLOT_CORRUPT;
+        if (s->pw_timeout_s < -1 || s->pw_timeout_s > 86400) return TRIM_SLOT_CORRUPT;
+        if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return TRIM_SLOT_CORRUPT;
+        if (s->trim_r_88 > 0 || s->trim_r_88 < -8192 || (s->trim_r_88 % 32)) return TRIM_SLOT_CORRUPT;
+        return TRIM_SLOT_CURRENT;
+    }
+
+    if (ver == TRIM_VERSION_V1) {
+        /* The one older layout that is understood: trims in the same position,
+         * no timeout word. Its timeout field is whatever the erased flash left
+         * there, so it is NOT range-gated -- it is replaced, not believed. */
+        if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return TRIM_SLOT_CORRUPT;
+        if (s->trim_r_88 > 0 || s->trim_r_88 < -8192 || (s->trim_r_88 % 32)) return TRIM_SLOT_CORRUPT;
+        return TRIM_SLOT_MIGRATED;
+    }
+
+    return TRIM_SLOT_INCOMPATIBLE;      /* unknown older version: same rule */
+}
+
 static int slot_valid(const trim_slot_t *s)
 {
-    if (s->magic != TRIM_MAGIC) return 0;
-    if ((s->version_len >> 16) != TRIM_VERSION) return 0;
-    if ((s->version_len & 0xFFFFu) != 3u) return 0;
-    if (s->chk != slot_checksum(s)) return 0;
-    /* Range gate before trust: an absurd timeout (a corrupt word read as
-     * "sleep in 4 billion seconds", or a negative that is not the -1 the
-     * owner defined) must invalidate the record rather than install itself. */
-    if (s->pw_timeout_s < -1 || s->pw_timeout_s > 86400) return 0;
-    /* Payload contract, re-checked on load: a record that parses but
-     * violates the range/grid must not become the volume path's truth. */
-    if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return 0;
-    if (s->trim_r_88 > 0 || s->trim_r_88 < -8192 || (s->trim_r_88 % 32)) return 0;
-    return 1;
+    trim_slot_class_t k = slot_classify(s);
+    return k == TRIM_SLOT_CURRENT || k == TRIM_SLOT_MIGRATED;
 }
+
+/* (the pre-migration validator is gone: slot_classify() above is the one gate,
+ * so a record cannot be accepted by one path and rejected by another) */
 
 /* ---- status, read over SCPI by the rig ----------------------------------
  * Every failure in this file is silent by nature (a failed write simply
@@ -639,7 +698,16 @@ unsigned csd_trim_boot_load(void)
             /* Adopt the persisted timeout only from a record that passed every
              * gate (magic, version, payload count, checksum, range) -- an
              * unvalidated adopt is how a corrupt word becomes boot behaviour. */
-            tr_pw_timeout_s = best->pw_timeout_s;
+            /* Forward migration happens HERE, at adoption: an older record's
+             * absent fields take their defaults instead of whatever the erased
+             * flash left in that word. Counted, so a rig can see that a
+             * migration took place rather than inferring it from a value. */
+            if ((best->version_len >> 16) < TRIM_VERSION) {
+                tr_pw_timeout_s = TRIM_PW_DEFAULT_S;
+                tr_st_migrated++;
+            } else {
+                tr_pw_timeout_s = best->pw_timeout_s;
+            }
             tr_applied_packed = (unsigned)(((unsigned short)best->trim_r_88) << 16)
                               | (unsigned short)best->trim_l_88;
         } else {
@@ -669,6 +737,22 @@ unsigned csd_trim_boot_load(void)
  * reading it here journalled zeros while seq happily climbed. Returns 1 on
  * success and 0 on any flash failure; the failure code is latched either way,
  * so the caller's reply is honest. */
+/* Reset the store to the default condition: 0 dB trims, 300 s timeout.
+ *
+ * This is the escape hatch for the bisect ladder. Records are written by
+ * whichever image last saved, and a ramp through versions can leave a record a
+ * later image cannot use -- a NEWER one refuses to guess (INCOMPATIBLE), older
+ * ones migrate. Writing defaults at the CURRENT version with the next sequence
+ * number supersedes everything before it, so the next boot adopts defaults
+ * instead of the unusable record. No erase: the journal appends, and seq wins.
+ */
+void csd_trim_reset_defaults(void)
+{
+    tr_pw_timeout_s = TRIM_PW_DEFAULT_S;
+    tr_st_defaulted++;
+    (void)csd_trim_journal_now(0u);      /* trims 0 dB + timeout, current version */
+}
+
 int csd_trim_journal_now(unsigned packed)
 {
     static unsigned char sector[4096];

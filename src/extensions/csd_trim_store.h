@@ -63,6 +63,11 @@ unsigned csd_trim_boot_load(void);
  * partially failed write cannot leave the two settings disagreeing. */
 int csd_trim_journal_now(unsigned packed);
 
+/* Default condition: 0 dB trims, 300 s timeout, written at the CURRENT record
+ * version so it supersedes any older or newer record by sequence number. Use it
+ * after a bisect leaves an unusable record, and whenever a read fails CRC. */
+void csd_trim_reset_defaults(void);
+
 /* ---- idle-power timeout, persisted in the same record (owner case 14) -----
  * Semantics belong to csd_power.h (-1 = never, >0 = seconds; 0 is transient by
  * the owner's spec and is deliberately never journalled). Set the value, then
