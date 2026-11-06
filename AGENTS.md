@@ -52,6 +52,21 @@ the build is not reproducible and the "whole dependency tree" is not committed.
 Current pin: branch `csd-121005`, commit `77245f99` (its parent `021c97ae`
 restores the loopback tap hooks). Keep `I2S_LOOPBACK_HOOK.md` in step with it.
 
+## Rate support (owner directive 2026-11-06)
+
+Every future firmware build supports **24-bit / 384 kHz**. Case 13 asserts it:
+the descriptor must advertise a 24-bit-or-better mode, the ALSA playback range
+must reach 384000 Hz, and a 384 kHz stream must actually open and run. The
+constant is `MAX_RATE` in `csd_suite.py`; it is also the rate at which cases 6
+and 7 measure bit-perfectness, so a build that cannot sustain 384 kHz cannot be
+released.
+
+Consequence for the loopback: at 384 kHz the copy-based tap cannot keep up on a
+600 MHz build (measured coverage 0.9331, 771,072 zero words, 2204 slips) while
+the audio itself is clean. The pin-32 hardware loopback in
+`I2S_LOOPBACK_HOOK.md` is the intended fix, and until it exists a 600 MHz build
+cannot pass case 6.
+
 ## Docs index
 
 - [`TEST.md`](TEST.md) — every acceptance case: criterion, measurement method,

@@ -643,10 +643,10 @@ agrees with `*IDN?`.
 - If the MIDI serial is unavailable, the cross-check is skipped and the case
   still passes with `MIDI serial unavailable for the cross-check`.
 
-## 17. Case 13 — 24-bit / 192 kHz as advertised
+## 17. Case 13 — 24-bit / 384 kHz as advertised
 
-**Asserts.** The descriptor advertises at least 24 bits and 192 kHz, and a
-192 kHz 24-bit stream actually opens and plays.
+**Asserts.** The descriptor advertises at least 24 bits and 384 kHz, and a
+384 kHz 24-bit stream actually opens and plays.
 
 **Measures.**
 - `lsusb -d 20b1: -v`. Each `bSubslotSize` is paired with the
@@ -654,14 +654,14 @@ agrees with `*IDN?`.
   precision the FORMAT_TYPE_I descriptor declares.
 - Container mapping: `(4,24)` and `(4,32)` are `S32_LE`; `(3,24)` is
   `S24_3LE`; `(2,16)` is `S16_LE`.
-- Render a 1 s 192 kHz stereo sine in the advertised container with `ffmpeg`.
+- Render a 1 s 384 kHz stereo sine in the advertised container with `ffmpeg`.
 - Read the playback rate range with `aplay --dump-hw-params`.
 - Play the file with `aplay`.
 
 **Pass criterion.**
 - The descriptor advertises at least one mode with `bBitResolution >= 24`.
-- The playback rate range maximum is at least 192000 Hz.
-- The 192 kHz stream plays with return code 0.
+- The playback rate range maximum is at least 384000 Hz.
+- The 384 kHz stream plays with return code 0.
 
 **Premises.**
 - The descriptor contains FORMAT_TYPE_I subslot/resolution pairs. Without them

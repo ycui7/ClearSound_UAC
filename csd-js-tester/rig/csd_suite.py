@@ -58,9 +58,11 @@ MIC_TOKENS = ("EARSGAIN", "MINIDSP", "USBAUDIOEARS", "AUDIOADAP", "ADAP")
 PLAYBACK_BLOCK = ("CLEARSOUND", "XMOS", "UAC2", "DAC")
 
 PASS, FAIL, NOTRUN, TODO = "PASS", "FAIL", "NOT-RUN", "TODO"
-MAX_RATE = 384000          # the rate case 6/7 must run at
+MAX_RATE = 384000          # max rate: case 6/7 measure bit-perfectness here, and
+                           # case 13 must find it advertised (owner directive 2026-11-06:
+                           # every future firmware build supports 24-bit / 384 kHz)
 SUITABLE_BITS = 24
-SUITABLE_RATE = 192000     # case 13's advertised minimum
+SUITABLE_RATE = 192000     # generic stimulus rate used by other cases
 
 
 # --------------------------------------------------------------------------- #
@@ -917,7 +919,7 @@ def case_12_serial_in_descriptor(dut):
 
 
 def case_13_24bit_192k(dut):
-    """Case 13: 24-bit / 192 kHz, as ADVERTISED, and actually openable.
+    """Case 13: 24-bit / 384 kHz, as ADVERTISED, and actually openable.
 
     Read the descriptor first and honour what it says. This card advertises
     bBitResolution 24 in a bSubslotSize 4 container -- i.e. S32_LE carrying
@@ -947,10 +949,10 @@ def case_13_24bit_192k(dut):
     if alsa_fmt is None:
         return NOTRUN, ("advertised 24-bit container (subslot %d, res %d) has no known ALSA "
                         "mapping (pairs %s)" % (ss, br, pairs))
-    wav = "/tmp/suite_13_192.wav"
+    wav = "/tmp/suite_13_384.wav"
     codec = {4: "pcm_s32le", 3: "pcm_s24le", 2: "pcm_s16le"}[ss]
     rc3, out3 = sh(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                    "sine=frequency=1000:duration=1", "-ac", "2", "-ar", str(SUITABLE_RATE),
+                    "sine=frequency=1000:duration=1", "-ac", "2", "-ar", str(MAX_RATE),
                     "-c:a", codec, wav, "-y"], timeout=60)
     if rc3 != 0:
         return NOTRUN, "could not render the test file: %s" % out3.strip()[:100]
@@ -962,9 +964,9 @@ def case_13_24bit_192k(dut):
     rc4, out4 = sh(["aplay", "-q", "-D", "hw:%d,0" % d, wav], timeout=60)
     detail = ("descriptor modes %s (bit-res, subslot) -> 24-bit class is %d-bit in %d-byte "
               "slots = ALSA %s; rates %d..%d Hz; streamed %d Hz rc=%d %s" % (
-                  pairs, br, ss, alsa_fmt, lo, hi, SUITABLE_RATE, rc4, out4.strip()[:70]))
-    if hi < SUITABLE_RATE:
-        return FAIL, "192 kHz is not offered (max %d Hz): " % hi + detail
+                  pairs, br, ss, alsa_fmt, lo, hi, MAX_RATE, rc4, out4.strip()[:70]))
+    if hi < MAX_RATE:
+        return FAIL, "384 kHz is not offered (max %d Hz): " % hi + detail
     if rc4 != 0:
         return FAIL, ("advertised 24-bit mode would not stream as %s -- descriptor/ALSA "
                       "mismatch: " % alsa_fmt + detail)
@@ -1021,7 +1023,7 @@ CASES = [
     ("10", "L/R volume trim independent", case_10_lr_trim),
     ("11", "built-in mic returns data while audio plays", case_11_builtin_mic_noise),
     ("12", "serial number in USB descriptor", case_12_serial_in_descriptor),
-    ("13", "24-bit / 192 kHz as advertised", case_13_24bit_192k),
+    ("13", "24-bit / 384 kHz as advertised", case_13_24bit_192k),
     ("14", "power saving enter/exit + timeout control", case_14_power_saving),
 ]
 
