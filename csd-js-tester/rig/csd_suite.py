@@ -438,7 +438,7 @@ def case_04_persistence(dut):
     rc, out = sh(["bash", os.path.join(RIG, "load_xe.sh"), xe], timeout=300)
     if rc != 0 or "PROVEN" not in out:
         scpi("VOLume:TRIM:LEFT 0", d); scpi("VOLume:TRIM:RIGHT 0", d)
-        return NOT_RUN, ("cannot reload the image to separate flash from mailbox "
+        return NOTRUN, ("cannot reload the image to separate flash from mailbox "
                          "(load_xe.sh rc=%d: %s) -- the fixture, not the firmware, is "
                          "short here" % (rc, out.strip()[-160:]))
     back = ""
