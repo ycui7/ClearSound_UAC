@@ -41,7 +41,7 @@
              DAC at ~-87 dBFS) lived in merge commit 71c79b0 and is NOT in this
              file. (An earlier note here claimed the opposite; it had the two
              maps inverted. Verify against AGENTS.md before acting on either.) -->
-        <Node Id="0" InPackageId="0" Type="XS3-L16A-1024" Oscillator="24MHz" SystemFrequency="800MHz" ReferenceFrequency="100MHz">
+        <Node Id="0" InPackageId="0" Type="XS3-L16A-1024" Oscillator="24MHz" SystemFrequency="600MHz" ReferenceFrequency="100MHz">
           <Boot>
             <Source Location="bootFlash"/>
           </Boot>
