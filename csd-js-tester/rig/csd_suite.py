@@ -661,9 +661,18 @@ def case_08_acoustic_lr(dut):
     # Deaf-probe guard, as cases 01/09/10 already have. Without it a muted or
     # unplugged mic leaves both channels at the floor, isolation ~0 dB, and the case
     # reports "CHANNELS SWAPPED" / "isolation below 12 dB" on a healthy DAC.
+    #
+    # Margin choice matters, and 10 dB was too strict: a healthy near-field
+    # capture measured -22.8 dBFS against a -32.6 dBFS floor (9.8 dB), and the
+    # guard declared the probe deaf on a working channel. The case needs 12 dB of
+    # ISOLATION between the two mic channels, so the loud channel only has to
+    # clear the floor by enough to be a tone rather than noise -- 6 dB, the same
+    # threshold cases 01/09/10 use. Being too generous here yields a FAIL when the
+    # quiet channel is really floor; being too strict yields a false NOT-RUN on a
+    # good measurement, which is what this line exists to prevent.
     for nm in ("L", "R"):
         pkL, pkR, flr = res[nm]
-        if max(pkL, pkR) < flr + 10:
+        if max(pkL, pkR) < flr + 6:
             return NOTRUN, ("probe deaf: %s-only drive peaks %.1f/%.1f dBFS against a "
                             "floor of %.1f -- nothing reached the microphone, so the "
                             "channel routing was not measured" % (nm, pkL, pkR, flr))

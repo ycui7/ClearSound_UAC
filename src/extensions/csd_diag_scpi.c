@@ -26,8 +26,14 @@
  * never by including csd_trim_store.h: that header's entry points drive the
  * tile[0] SQI ports and may only be called by the tile[0] codec server. */
 
-#define CSD_IDN_VENDOR   "ClearSound"
-#define CSD_IDN_MODEL    "CSD-22"
+/* *IDN? identity. These are the product's actual names, and they match the USB
+ * descriptor's VENDOR_STR / PRODUCT_STR_A2 so that lsusb and the MIDI identity
+ * cannot disagree about what the unit is (csd_identity.c:81 exists because that
+ * inconsistency was a real defect here). No invented product code: an earlier
+ * revision put "CSD-22" here, which was a firmware-only label that appears
+ * nowhere on the product. */
+#define CSD_IDN_VENDOR   "SpecialtyCircuits LLC"
+#define CSD_IDN_MODEL    "ClearSound DAC"
 /* Serial is not a constant any more, so it is not passed through SCPI_Init
  * at all: q_idn reads it live. See q_idn for why capture-at-init would be
  * wrong. This macro only fills the now-unused idn3 slot. */
