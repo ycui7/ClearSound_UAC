@@ -185,6 +185,7 @@ typedef enum {
 static volatile unsigned tr_st_crc_fail  = 0;   /* records rejected by checksum */
 static volatile unsigned tr_st_unsupported = 0; /* version newer/unknown        */
 static volatile unsigned tr_st_migrated  = 0;   /* records upgraded on read     */
+static volatile unsigned tr_st_migrated_scan = 0; /* counted by the sector scan  */
 static volatile unsigned tr_st_defaulted = 0;   /* NO valid record -> defaults  */
 
 static trim_slot_class_t slot_classify(const trim_slot_t *s)
@@ -646,11 +647,15 @@ static unsigned tr_scan(const unsigned char *sec, unsigned len,
     for (unsigned i = 0; i < nslots; i++) {
         const trim_slot_t *s = (const trim_slot_t *)(sec + i * TRIM_SLOT_BYTES);
         if (*(const uint32_t *)s == 0xFFFFFFFFu) { f = i; break; }   /* first erased */
-        if (slot_valid(s)) {                      /* torn slots are skipped,
-                                                   * not reused: NOR writes
-                                                   * cannot restore a 1 bit,
-                                                   * so a partially-written
-                                                   * slot stays dirty. */
+        /* Classify once and act on the class: torn slots are skipped and never
+         * reused (NOR cannot restore a 1 bit, so a partially-written slot stays
+         * dirty), an unusable version is counted so the caller can reset, and
+         * only CURRENT/MIGRATED records compete for "newest". */
+        trim_slot_class_t k = slot_classify(s);
+        if (k == TRIM_SLOT_MIGRATED) tr_st_migrated_scan++;
+        else if (k == TRIM_SLOT_INCOMPATIBLE) tr_st_unsupported++;
+        else if (k == TRIM_SLOT_CORRUPT) tr_st_crc_fail++;
+        if (k == TRIM_SLOT_CURRENT || k == TRIM_SLOT_MIGRATED) {
             if (!b || (int32_t)(s->seq - bseq) > 0) { /* wraps correctly */
                 b = s; bseq = s->seq;
             }
