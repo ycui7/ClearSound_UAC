@@ -47,6 +47,20 @@ import bp_score
 APP = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = f"{APP}/.venv/bin/python"
 CARD = os.environ.get("CSD_CARD", "3")
+# The card number is a fixture guess, and a wrong guess is catastrophic rather than
+# merely wrong: snd-aloop plays back exactly what it is given, so scoring hw:4,0 when
+# the DAC is hw:3,0 prints 100.000000% bit-exact with NO device in the path. The
+# suite resolves the DAC by name, so it passes --card through; this check refuses to
+# score anything whose /proc/asound name is not a ClearSound/XMOS DAC.
+DAC_TOKENS = ("DACUAC", "ClearSound", "XMOSUAC", "XMOS USB Audio")
+
+
+def card_name(n):
+    try:
+        cards = open("/proc/asound/cards", errors="ignore").read()
+    except OSError:
+        return ""
+    return " ".join(l for l in cards.splitlines() if l.strip().startswith("%s " % n))
 RATE = sig.RATE
 N = 4096
 # Writer block: frames generated per numpy call. Generation duty is only
@@ -628,7 +642,14 @@ def test2_noise(minutes, align_search=None):
         log(f"  note: {r['errs']} read error(s) -- those frames were never "
             f"captured, so they are unmeasured rather than mismatched "
             f"(budget {READ_ERROR_BUDGET})")
+    # Coverage: `checked` is only what the scorer could align. Without this the gate
+    # passes on 1.2 s of a 120 s run -- every captured frame exact, nothing said
+    # about the 98% that never arrived.
+    need = 0.9 * int(r["written"])
+    log(f"  coverage: {checked:,} of {r['written']:,} written frames "
+        f"({100.0*checked/max(1, r['written']):.1f}%; require >= 90%)")
     ok = (exact == checked and checked > RATE and nz > 0.999
+          and checked >= need
           and r["errs"] <= READ_ERROR_BUDGET
           and sc_h.get("bits", 1) == 0 and sc_h.get("zero_frames", 1) == 0)
     log(f"  TEST 2: {'PASS' if ok else 'FAIL'}")
@@ -641,7 +662,18 @@ def main():
     ap.add_argument("--minutes", type=float, default=5.0)
     ap.add_argument("--skip-silence", action="store_true")
     ap.add_argument("--skip-noise", action="store_true")
+    ap.add_argument("--card", type=int, default=None,
+                    help="ALSA card of the DAC under test; the suite passes the card it "
+                         "resolved by name so a wrong fixture guess cannot be scored")
     a = ap.parse_args()
+    global CARD
+    if a.card is not None:
+        CARD = str(a.card)
+    name = card_name(CARD)
+    if not any(t in name for t in DAC_TOKENS):
+        sys.exit("card %s is %r, not a ClearSound DAC -- refusing to score it "
+                 "(a loopback card returns what it is given and would read 100%%)"
+                 % (CARD, name.strip()))
     log(f"gate: card hw:{CARD},0  rate {RATE}  format {FMT} (S32_LE)  "
         f"buf {BUFSZ} frames = {1000.0*BUFSZ/RATE:.1f} ms")
     pin_path()

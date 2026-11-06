@@ -508,6 +508,7 @@ def run_gate(minutes, tag, card):
                         "bit-perfectness cannot be measured until the tap carries samples; a "
                         "zero here is NOT evidence about the data path" % (tag, tx, tap1.strip()))
     rc, out = sh([PY, os.path.join(RIG, "csd_bitperfect_gate.py"),
+                   "--card", str(card),
                   "--minutes", str(minutes)], timeout=3600)
     # DISARM ON EVERY PATH. An armed tap substitutes its stored word into the RX
     # stream (one word per channel per half-frame), so capture stops being the
@@ -611,6 +612,15 @@ def case_08_acoustic_lr(dut):
         if pk is None:
             return NOTRUN, str(fl)
         res[nm] = (pk[0], pk[1], max(fl.values()))
+    # Deaf-probe guard, as cases 01/09/10 already have. Without it a muted or
+    # unplugged mic leaves both channels at the floor, isolation ~0 dB, and the case
+    # reports "CHANNELS SWAPPED" / "isolation below 12 dB" on a healthy DAC.
+    for nm in ("L", "R"):
+        pkL, pkR, flr = res[nm]
+        if max(pkL, pkR) < flr + 10:
+            return NOTRUN, ("probe deaf: %s-only drive peaks %.1f/%.1f dBFS against a "
+                            "floor of %.1f -- nothing reached the microphone, so the "
+                            "channel routing was not measured" % (nm, pkL, pkR, flr))
     iso_l = res["L"][0] - res["L"][1]
     iso_r = res["R"][1] - res["R"][0]
     detail = ("L-only: micL %.1f micR %.1f (isolation %+.1f dB) | R-only: micL %.1f "
