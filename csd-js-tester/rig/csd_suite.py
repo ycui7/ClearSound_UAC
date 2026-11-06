@@ -34,6 +34,7 @@ Rules this file obeys, all learned on this bench:
 """
 import argparse
 import base64
+import glob
 import os
 import re
 import subprocess
@@ -83,10 +84,55 @@ def cards():
     return out
 
 
+def idn_serial():
+    """The serial the DEVICE reports over MIDI.
+
+    This is the identity that matters. An ALSA card number is assignment order: it
+    changes when the unit re-enumerates (case_04 reloads the image) and it is
+    whatever else is on the bus when a second unit or an XTAG is attached.
+    """
+    ok, txt, _ = scpi("*IDN?", None)
+    if not ok:
+        return None
+    fields = [f.strip() for f in txt.split(",")]
+    return fields[2] if len(fields) >= 3 and fields[2] else None
+
+
+def card_for_usb_serial(serial):
+    """ALSA card number whose USB device reports this serial -- sysfs only.
+
+    Binds the card the MIDI identity names, so the stream is opened on the unit
+    that answered. Never matches on a guessed card number or a name token, and it
+    cannot land on snd-aloop (a virtual card has no USB serial).
+    """
+    if not serial:
+        return None
+    for dev in sorted(glob.glob("/sys/bus/usb/devices/*/serial")):
+        try:
+            if open(dev).read().strip().lower() != serial.strip().lower():
+                continue
+        except OSError:
+            continue
+        usbdir = os.path.dirname(dev)
+        for cdir in sorted(glob.glob("/sys/class/sound/card*")):
+            if os.path.realpath(os.path.join(cdir, "device")).startswith(usbdir):
+                try:
+                    return int(os.path.basename(cdir)[4:])
+                except ValueError:
+                    return None
+    return None
+
+
 def find_dac(prefer=None):
     c = cards()
     if prefer is not None and prefer in c:
         return prefer
+    # Ask the device who it is, then open the card that carries that identity.
+    n = card_for_usb_serial(idn_serial())
+    if n is not None and n in c:
+        return n
+    # Fallback only when the unit does not answer MIDI yet (cold boot): a name
+    # token is weaker than a serial, but it is better than picking card 3 blind.
     for n, name in sorted(c.items()):
         if any(t in name for t in DAC_TOKENS) and "MIC" not in name:
             return n
