@@ -21,6 +21,11 @@
 /* Port defines - items missing from XN file */
 #define PORT_I2S_DAC0      PORT_I2S_DAC_DATA /* Name conversion from XN file */
 #define PORT_I2S_ADC0      PORT_I2S_ADC_DATA /* Name conversion From XN file */
+/* Second ADC data input (pin 32, X1D13/1F). The loopback rework jumps DAC data
+ * to this pin, so the tap can read transmitted words back from a pin instead of
+ * copying them in firmware. Declared as its own port on purpose: adding it to
+ * I2S_WIRES_ADC would create extra audio channels and change the USB descriptor. */
+#define PORT_I2S_ADC1_LB   PORT_I2S_ADC_DATA_1
 #define PORT_MCLK_IN_USB   XS1_PORT_1D
 #define PORT_MCLK_COUNT    XS1_PORT_16B
 
