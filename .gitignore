@@ -36,3 +36,4 @@ csd-js-tester/rig/.trim_dfu_expect
 # untracked files deliberately, to catch a new .c under src/, and a root-level
 # markdown does not need that protection.
 SINGLE_CALLER_INVENTORY.md
+libexec
