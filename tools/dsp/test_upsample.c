@@ -85,6 +85,36 @@ int main(void) {
            fabs(bl_dc - 1.0) < 0.02 ? "PASS" : "FAIL");
     if (fabs(bl_dc - 1.0) >= 0.02) fail++;
 
+
+    /* 6) halfband stage, both structural claims checked on the shipped table:
+     *    (a) the identity branch lands on ODD outputs, so those equal the input
+     *    (b) EVEN outputs equal the naive 64-tap even-index sum, which is what
+     *        the 62 structural zeros plus symmetry folding replace            */
+    {
+        static int32_t hb_in[512], hb_out[1024];
+        csd_hb_state hbs;
+        csd_hb_reset(&hbs);
+        for (int i = 0; i < 512; i++) hb_in[i] = (int32_t)((i * 1103515245u) ^ 0x1b5c2e77u);
+        csd_hb2_process(&hbs, hb_in, 512, hb_out);
+
+        int ident_mism = 0;
+        for (int n = 0; n < 512; n++) if (hb_out[2 * n + 1] != hb_in[n]) ident_mism++;
+
+        int interp_mism = 0;
+        for (int n = 64; n < 512; n++) {   /* history must be full: x[n-63] valid */
+            int64_t acc = 0;
+            for (int q = 0; q <= 63; q++) acc += (int64_t)csd_hb_coef[2 * q] * hb_in[n - q];
+            acc >>= 30;
+            if (acc > 2147483647LL) acc = 2147483647LL;
+            if (acc < -2147483648LL) acc = -2147483648LL;
+            if (hb_out[2 * n] != (int32_t)acc) interp_mism++;
+        }
+        printf("halfband identity == input   %d mismatches of 512  %s\n", ident_mism, ident_mism == 0 ? "PASS" : "FAIL");
+        printf("halfband interp == naive sum %d mismatches of 448  %s\n", interp_mism, interp_mism == 0 ? "PASS" : "FAIL");
+        if (ident_mism || interp_mism) fail++;
+        printf("halfband multiplies/input    32 (32 symmetric pairs, zeros never loaded)\n");
+    }
+
     /* 5) the folded kernel must be bit-identical to the unfolded convolution */
     {
         static int32_t sig[4096], a[4096], b[4096];

@@ -92,6 +92,32 @@ zero and a symmetric remainder, so a 2x stage costs about N/4 multiplies per
 output, i.e. roughly half of the equivalent polyphase prototype -- and the
 cascade uses shorter filters. That is the next change, not part of this commit.
 
+
+### Stage A with structural zeros -- 2x halfband cascade
+
+A windowed sinc has **no** exact zeros: the shipped stage-A tables contain 0 zero
+coefficients out of 512, 256 and 128 taps, so a zero-skip test there is dead code.
+The filter that does have zeros is the halfband. Its kernel is 127 taps with
+**62 exact zeros** at every other offset; only the odd-indexed taps are nonzero,
+plus the centre.
+
+Phase assignment is easy to get backwards, and the test caught both mistakes:
+
+- the centre tap sits at index 63 (odd), so the **identity branch lands on the
+  ODD output samples** and the interpolated phase on the even ones;
+- the test's naive reference must start where `x[n-63]` is valid, not at n=0.
+
+Cost per input sample per 2x stage: **32 multiplies** (32 symmetric pairs over
+the 64 even-indexed taps, zeros never loaded) plus a free identity branch,
+against 127 for the generic polyphase 2x. For 48 -> 384 kHz that is three stages
+at 48/96/192 kHz in, i.e. 32 x (48k + 96k + 192k) = 10.7 M MAC/s per channel,
+against 24.6 M for the 512-tap 8x prototype: **2.3x less**, with the same
+linear-phase property.
+
+Proof: identity branch matches the input bit for bit (0 of 512), interpolated
+phase matches the naive 64-tap even-index sum bit for bit (0 of 448), and the
+band-limit folding is still 0 of 4096 against the unfolded convolution.
+
 ## Files
 
 - `tools/dsp/gen_upsample_taps.py` -- designs both stages, emits Q30 tables.

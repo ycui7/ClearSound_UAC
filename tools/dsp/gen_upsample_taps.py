@@ -121,6 +121,46 @@ def to_q30(values):
     return q
 
 
+# ---- stage A, structural form: 2x halfband cascade ---------------------
+# A halfband interpolator's kernel has EXACT zeros at every even offset except
+# the centre, and a symmetric remainder at the odd offsets. Those zeros are the
+# "skip the multiply" property: a generic sinc has none (all 512 taps nonzero),
+# so a zero-skip test there is dead code.
+HB_TAPS = 127          # odd, = 4m-1, so the symmetry point is a tap
+
+
+def design_halfband(n=HB_TAPS, atten_db=A_ATTEN_DB):
+    """2x halfband: h[centre]=0.5, h[even offset]=0, odd taps = windowed sinc."""
+    assert n % 4 == 3, "halfband length must be 4m-1"
+    centre = (n - 1) // 2
+    beta = kaiser_beta(atten_db)
+    h = [0.0] * n
+    h[centre] = 0.5
+    for i in range(n):
+        d = i - centre
+        if d % 2 == 0:
+            continue                      # structurally zero
+        h[i] = (0.5 * kaiser_window(i, n, beta)
+                * math.sin(math.pi * d / 2.0) / (math.pi * d / 2.0))
+    return h
+
+
+def emit_halfband():
+    # a 2x interpolator's prototype must sum to 2 for unity gain: centre 0.5 -> 1.0
+    h = [2.0 * v for v in design_halfband()]
+    q = to_q30(h)
+    zeros = sum(1 for v in q if v == 0)
+    out = [f"/* 2x halfband, {HB_TAPS} taps: {zeros} exact zeros (even offsets) */",
+           f"#define CSD_HB_TAPS {HB_TAPS}u",
+           f"#define CSD_HB_CENTRE {(HB_TAPS - 1) // 2}u",
+           f"#define CSD_HB_ZEROS {zeros}u",
+           f"static const int32_t csd_hb_coef[{HB_TAPS}] = {{"]
+    for i in range(0, len(q), 8):
+        out.append("    " + ", ".join(str(v) for v in q[i:i + 8]) + ",")
+    out.append("};")
+    return "\n".join(out), zeros
+
+
 def emit(path=None):
     if path is None:
         import os
@@ -151,6 +191,9 @@ def emit(path=None):
     for i in range(0, len(hb), 8):
         lines.append("    " + ", ".join(str(v) for v in hb[i:i + 8]) + ",")
     lines.append("};")
+    hb_text, hb_zeros = emit_halfband()
+    lines.append("")
+    lines.append(hb_text)
     lines.append("")
     lines.append("#endif /* CSD_DSP_TAPS_H */")
     with open(path, "w") as f:

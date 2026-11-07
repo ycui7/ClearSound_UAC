@@ -89,3 +89,35 @@ void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out
         s->pos = (s->pos + 1u) % CSD_BL_TAPS;
     }
 }
+
+/* ---------------- 2x halfband stage ---------------------------------- */
+void csd_hb_reset(csd_hb_state *s) {
+    for (uint32_t i = 0; i < CSD_HB_HIST; i++) s->hist[i] = 0;
+}
+
+void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out) {
+    /* Centre tap sits at index 63 (odd), so the centre aligns with ODD output
+     * samples: those are the identity branch. The interpolated phase is the EVEN
+     * outputs, built from the 64 even-indexed taps -- the odd-indexed ones are
+     * the structural zeros and are never touched.
+     *
+     *   y[2n+1] = x[n]
+     *   y[2n]   = sum_{k=0..63} h[2k] * x[n-k]      (32 symmetric pairs)
+     */
+    for (uint32_t n = 0; n < n_in; n++) {
+        for (uint32_t k = CSD_HB_HIST - 1u; k > 0u; k--) s->hist[k] = s->hist[k - 1u];
+        s->hist[0] = in[n];
+
+        int64_t acc = 0;
+        for (uint32_t k = 0; k < 32u; k++) {   /* h[2k] == h[2*(63-k)] */
+            acc += (int64_t)csd_hb_coef[2u * k]
+                 * ((int64_t)s->hist[k] + (int64_t)s->hist[63u - k]);
+        }
+        acc >>= 30;
+        if (acc > 2147483647LL) acc = 2147483647LL;
+        if (acc < -2147483648LL) acc = -2147483648LL;
+
+        out[2u * n] = (int32_t)acc;          /* interpolated */
+        out[2u * n + 1u] = s->hist[0];       /* identity, unity gain */
+    }
+}

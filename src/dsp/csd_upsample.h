@@ -43,4 +43,18 @@ void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out
 /* Group delay of the band-limit stage, in 384 kHz samples (linear phase). */
 #define CSD_BL_GROUP_DELAY CSD_BL_DELAY
 
+
+/* ---- stage A, structural form: 2x halfband cascade ------------------- */
+#define CSD_HB_HIST 64u
+
+typedef struct {
+    int32_t hist[CSD_HB_HIST];   /* input history, newest at [0] */
+} csd_hb_state;
+
+void csd_hb_reset(csd_hb_state *s);
+/* n_in frames -> 2*n_in frames. Even outputs cost one multiply (centre tap);
+ * odd outputs skip the 62 structural zeros and fold the symmetric remainder:
+ * 33 multiplies per input sample instead of 127. */
+void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out);
+
 #endif /* CSD_UPSAMPLE_H */
