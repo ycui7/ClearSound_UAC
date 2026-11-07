@@ -1,0 +1,46 @@
+/* CSD upsampling DSP core -- portable C, no XMOS or RTOS dependency.
+ *
+ * Stage A  sinc polyphase interpolator: 48/96/192 kHz -> 384 kHz
+ * Stage B  linear-phase 4th-order-equivalent band limit, corner 15 kHz
+ *
+ * Coefficients live in csd_dsp_taps.h, generated and property-tested by
+ * tools/dsp/gen_upsample_taps.py. Nothing here allocates: every state is a
+ * plain struct so it can be a C static on an XS3 tile.
+ */
+#ifndef CSD_UPSAMPLE_H
+#define CSD_UPSAMPLE_H
+
+#include <stdint.h>
+#include "csd_dsp_taps.h"
+
+/* ---- stage A: polyphase sinc interpolator ---------------------------- */
+#define CSD_UP_MAX_TAPS_PER_PHASE 64u
+
+typedef struct {
+    int32_t hist[CSD_UP_MAX_TAPS_PER_PHASE];  /* input history, newest first */
+    uint32_t n_hist;                          /* taps per phase in use       */
+} csd_up_state;
+
+/* Output rate is always CSD_DSP_FS_OUT. Returns the integer ratio (8/4/2),
+ * or 0 when the rate is unsupported -- never a silent wrong answer. */
+uint32_t csd_up_ratio(uint32_t fs_in);
+
+void csd_up_reset(csd_up_state *s, uint32_t fs_in);
+
+/* n_in input frames -> n_in * ratio output frames. out must have room. */
+void csd_up_process(csd_up_state *s, uint32_t fs_in,
+                    const int32_t *in, uint32_t n_in, int32_t *out);
+
+/* ---- stage B: band limit / noise shaping ---------------------------- */
+typedef struct {
+    int32_t hist[CSD_BL_TAPS];
+    uint32_t pos;
+} csd_bl_state;
+
+void csd_bl_reset(csd_bl_state *s);
+void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out);
+
+/* Group delay of the band-limit stage, in 384 kHz samples (linear phase). */
+#define CSD_BL_GROUP_DELAY CSD_BL_DELAY
+
+#endif /* CSD_UPSAMPLE_H */
