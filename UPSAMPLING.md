@@ -62,6 +62,36 @@ an 800 MHz XS3 tile that is roughly half of one core before loop overhead, so
 the open decision is whether stage B stays a long FIR or becomes a shorter FIR
 plus a decimated noise shaper.
 
+
+## Cost reduction by symmetry
+
+**Stage B: folded, halved.** The 511-tap kernel is symmetric, `c[k] == c[TAPS-1-k]`,
+so each multiply serves two taps:
+
+```
+acc += c[k] * (hist[pos-k] + hist[pos-(TAPS-1-k)])    k = 0 .. 254
+acc += c[255] * hist[pos-255]                          centre tap
+```
+
+511 multiplies -> 256, and one coefficient load instead of two. The host test
+compares every output against the unfolded convolution: **0 mismatches of 4096**.
+Folding changes the work, never the result.
+
+**Stage A: folding is not available, and here is why.** A symmetric prototype
+does not decompose into symmetric phases. The partner of tap `k*L+j` is tap
+`N-1-(k*L+j)`, whose phase is `(L-1-j) mod L` -- a *different* output sample. The
+folded product is a single multiply that would have to be added into two
+different accumulators, and splitting it costs the two multiplies it saved. It
+only folds when every pair lands in one phase, i.e. `N-1 = 0 (mod L)`, which is
+impossible for L >= 2. Computing phase sums and differences instead is also a
+wash: `(a+b)` and `(a-b)` need two multiplies for the same two outputs.
+
+The real saving in stage A is structural, not arithmetic: **cascade of 2x
+halfband stages** (48 kHz -> 96 -> 192 -> 384). A halfband has every other tap
+zero and a symmetric remainder, so a 2x stage costs about N/4 multiplies per
+output, i.e. roughly half of the equivalent polyphase prototype -- and the
+cascade uses shorter filters. That is the next change, not part of this commit.
+
 ## Files
 
 - `tools/dsp/gen_upsample_taps.py` -- designs both stages, emits Q30 tables.

@@ -66,15 +66,22 @@ void csd_bl_reset(csd_bl_state *s) {
 }
 
 void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out) {
-    uint32_t i, k, idx;
+    /* Symmetric kernel, folded: c[k] == c[TAPS-1-k], so each multiply serves the
+     * tap from the front and the tap from the back. 511 taps -> 255 multiplies
+     * plus the centre tap, i.e. half the work for identical output. */
+    const uint32_t half = CSD_BL_TAPS / 2u;
+    uint32_t i, k, i1, i2;
     for (i = 0; i < n; i++) {
         s->hist[s->pos] = in[i];
         int64_t acc = 0;
-        idx = s->pos;
-        for (k = 0; k < CSD_BL_TAPS; k++) {
-            acc += (int64_t)csd_bl_coef[k] * (int64_t)s->hist[idx];
-            idx = (idx == 0u) ? CSD_BL_TAPS - 1u : idx - 1u;
+        i1 = s->pos;                          /* tap k,     walking back  */
+        i2 = (s->pos + 1u) % CSD_BL_TAPS;     /* tap TAPS-1-k, walking fwd */
+        for (k = 0; k < half; k++) {
+            acc += (int64_t)csd_bl_coef[k] * ((int64_t)s->hist[i1] + (int64_t)s->hist[i2]);
+            i1 = (i1 == 0u) ? CSD_BL_TAPS - 1u : i1 - 1u;
+            i2 = (i2 + 1u) % CSD_BL_TAPS;
         }
+        acc += (int64_t)csd_bl_coef[half] * (int64_t)s->hist[(s->pos + CSD_BL_TAPS - half) % CSD_BL_TAPS];
         acc >>= 30;
         if (acc > 2147483647LL) acc = 2147483647LL;
         if (acc < -2147483648LL) acc = -2147483648LL;

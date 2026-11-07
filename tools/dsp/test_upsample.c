@@ -22,6 +22,21 @@ static int32_t out[N_IN * 8];
 static csd_up_state up;
 static csd_bl_state bl;
 
+/* Reference: the UNFOLDED convolution. The folded path must match this bit for
+ * bit -- folding changes how much work is done, never the result. */
+static int32_t bl_naive(const int32_t *hist, uint32_t pos) {
+    int64_t acc = 0;
+    uint32_t idx = pos;
+    for (uint32_t k = 0; k < CSD_BL_TAPS; k++) {
+        acc += (int64_t)csd_bl_coef[k] * (int64_t)hist[idx];
+        idx = (idx == 0u) ? CSD_BL_TAPS - 1u : idx - 1u;
+    }
+    acc >>= 30;
+    if (acc > 2147483647LL) acc = 2147483647LL;
+    if (acc < -2147483648LL) acc = -2147483648LL;
+    return (int32_t)acc;
+}
+
 int main(void) {
     int fail = 0;
     const double FS_IN = 48000.0, FS_OUT = 384000.0;
@@ -69,6 +84,24 @@ int main(void) {
     printf("BL DC gain         %.3f                               %s\n", bl_dc,
            fabs(bl_dc - 1.0) < 0.02 ? "PASS" : "FAIL");
     if (fabs(bl_dc - 1.0) >= 0.02) fail++;
+
+    /* 5) the folded kernel must be bit-identical to the unfolded convolution */
+    {
+        static int32_t sig[4096], a[4096], b[4096];
+        csd_bl_state bl2;
+        csd_bl_reset(&bl); csd_bl_reset(&bl2);
+        for (int i = 0; i < 4096; i++) sig[i] = (int32_t)((i * 2654435761u) ^ 0x5bf03635u);
+        csd_bl_process(&bl, sig, 4096, a);
+        for (int i = 0; i < 4096; i++) {
+            bl2.hist[bl2.pos] = sig[i];
+            b[i] = bl_naive(bl2.hist, bl2.pos);
+            bl2.pos = (bl2.pos + 1u) % CSD_BL_TAPS;
+        }
+        int mism = 0;
+        for (int i = 0; i < 4096; i++) if (a[i] != b[i]) mism++;
+        printf("folded == unfolded  %d mismatches of 4096  %s\n", mism, mism == 0 ? "PASS" : "FAIL");
+        if (mism) fail++;
+    }
 
     printf("\n%s\n", fail ? "RESULT: FAIL" : "RESULT: PASS");
     return fail ? 1 : 0;
