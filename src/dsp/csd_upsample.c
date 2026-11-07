@@ -118,6 +118,32 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t 
         if (acc < -2147483648LL) acc = -2147483648LL;
 
         out[2u * n] = (int32_t)acc;          /* interpolated */
-        out[2u * n + 1u] = s->hist[0];       /* identity, unity gain */
+        out[2u * n + 1u] = s->hist[31];      /* identity, delayed to meet the interp phase */
     }
+}
+
+/* ---------------- 2x cascade to 384 kHz ------------------------------ */
+void csd_cascade_reset(csd_cascade_state *c) {
+    for (uint32_t i = 0; i < 3u; i++) csd_hb_reset(&c->st[i]);
+}
+
+/* Stage chain, chosen so no stage writes over samples it still has to read:
+ *   192 kHz   in -> out
+ *   96 kHz    in -> tmp -> out
+ *   48 kHz    in -> tmp -> tmp2 -> out
+ */
+void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
+                         const int32_t *in, uint32_t n_in,
+                         int32_t *out, int32_t *tmp, int32_t *tmp2) {
+    if (fs_in == 192000u) {
+        csd_hb2_process(&c->st[0], in, n_in, out);
+    } else if (fs_in == 96000u) {
+        csd_hb2_process(&c->st[0], in, n_in, tmp);
+        csd_hb2_process(&c->st[1], tmp, 2u * n_in, out);
+    } else if (fs_in == 48000u) {
+        csd_hb2_process(&c->st[0], in, n_in, tmp);
+        csd_hb2_process(&c->st[1], tmp, 2u * n_in, tmp2);
+        csd_hb2_process(&c->st[2], tmp2, 4u * n_in, out);
+    }
+    /* any other rate emits nothing rather than a wrong-rate signal */
 }

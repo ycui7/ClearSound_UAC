@@ -98,7 +98,7 @@ int main(void) {
         csd_hb2_process(&hbs, hb_in, 512, hb_out);
 
         int ident_mism = 0;
-        for (int n = 0; n < 512; n++) if (hb_out[2 * n + 1] != hb_in[n]) ident_mism++;
+        for (int n = 31; n < 512; n++) if (hb_out[2 * n + 1] != hb_in[n - 31]) ident_mism++;
 
         int interp_mism = 0;
         for (int n = 64; n < 512; n++) {   /* history must be full: x[n-63] valid */
@@ -109,7 +109,7 @@ int main(void) {
             if (acc < -2147483648LL) acc = -2147483648LL;
             if (hb_out[2 * n] != (int32_t)acc) interp_mism++;
         }
-        printf("halfband identity == input   %d mismatches of 512  %s\n", ident_mism, ident_mism == 0 ? "PASS" : "FAIL");
+        printf("halfband identity == x[n-31] %d mismatches of 481  %s\n", ident_mism, ident_mism == 0 ? "PASS" : "FAIL");
         printf("halfband interp == naive sum %d mismatches of 448  %s\n", interp_mism, interp_mism == 0 ? "PASS" : "FAIL");
         if (ident_mism || interp_mism) fail++;
         printf("halfband multiplies/input    32 (32 symmetric pairs, zeros never loaded)\n");
@@ -131,6 +131,24 @@ int main(void) {
         for (int i = 0; i < 4096; i++) if (a[i] != b[i]) mism++;
         printf("folded == unfolded  %d mismatches of 4096  %s\n", mism, mism == 0 ? "PASS" : "FAIL");
         if (mism) fail++;
+    }
+
+    /* 7) full cascade: 192/96/48 kHz all land on 384 kHz at unity gain */
+    {
+        static int32_t cin[2048], cout[2048 * 8], ctmp[2048 * 4], ctmp2[2048 * 4];
+        const uint32_t rates[3] = {192000u, 96000u, 48000u};
+        for (int r = 0; r < 3; r++) {
+            csd_cascade_state cs;
+            csd_cascade_reset(&cs);
+            for (int i = 0; i < 2048; i++) cin[i] = (int32_t)(FULL / 4 * sin(2.0 * M_PI * 1125.0 * i / rates[r]));
+            csd_cascade_process(&cs, rates[r], cin, 2048, cout, ctmp, ctmp2);
+            /* 1125 Hz = bin 3 of a 1024-point Goertzel at 384 kHz: bin-centred, so
+             * no leakage floor to confuse a gain error with a measurement error */
+            double lvl = goertzel_db(cout + 1024, 1024, 1125.0, FS_OUT);
+            int ok = fabs(lvl + 12.04) < 0.3;
+            printf("cascade %6u Hz -> 384k  %5.2f dBFS (in -12.04)  %s\n", rates[r], lvl, ok ? "PASS" : "FAIL");
+            if (!ok) fail++;
+        }
     }
 
     printf("\n%s\n", fail ? "RESULT: FAIL" : "RESULT: PASS");

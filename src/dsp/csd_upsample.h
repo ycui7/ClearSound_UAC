@@ -57,4 +57,16 @@ void csd_hb_reset(csd_hb_state *s);
  * 33 multiplies per input sample instead of 127. */
 void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out);
 
+/* Cascade: 192 kHz one 2x stage, 96 kHz two, 48 kHz three. BOTH scratch buffers
+ * must hold 4*n_in samples. Two are needed because the 48 kHz path expands
+ * 8x: writing a stage forward in-place would destroy samples it has not read. */
+typedef struct {
+    csd_hb_state st[3];
+} csd_cascade_state;
+
+void csd_cascade_reset(csd_cascade_state *c);
+void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
+                         const int32_t *in, uint32_t n_in,
+                         int32_t *out, int32_t *tmp, int32_t *tmp2);
+
 #endif /* CSD_UPSAMPLE_H */

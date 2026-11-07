@@ -147,7 +147,12 @@ def design_halfband(n=HB_TAPS, atten_db=A_ATTEN_DB):
 
 def emit_halfband():
     # a 2x interpolator's prototype must sum to 2 for unity gain: centre 0.5 -> 1.0
-    h = [2.0 * v for v in design_halfband()]
+    h = design_halfband()
+    # The identity branch is exactly unity, so the interpolated phase's taps must
+    # also sum to 1.0 or the cascade loses gain stage after stage (measured: each
+    # stage came out 3.6 dB low before this normalisation).
+    s_even = sum(h[i] for i in range(len(h)) if i % 2 == 0)
+    h = [(v / s_even if i % 2 == 0 else v) for i, v in enumerate(h)]
     q = to_q30(h)
     zeros = sum(1 for v in q if v == 0)
     out = [f"/* 2x halfband, {HB_TAPS} taps: {zeros} exact zeros (even offsets) */",
