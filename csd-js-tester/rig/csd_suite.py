@@ -240,17 +240,23 @@ def set_volume(card, value):
 
 def tone_wav(path, secs=2.0, freq=1000.0, ch=None, dbfs=-6.0):
     """ch=None both, 0 left, 1 right. ch=None, 0 left, 1 right."""
+    # 24-bit in 4-byte slots, the product format. This used to render 16-bit
+    # (S16_LE) and the DAC refused the hw-param set outright -- "aplay:
+    # set_params: Unable to install hw params: ACCESS: RW_INTERLEAVED FORMAT:
+    # S16_LE" -- so the acoustic cases drove a silent stream and their probes
+    # reported a deaf microphone on a working board. A stimulus the device does
+    # not advertise is a harness bug, not a DUT failure.
     n = int(48000 * secs)
-    amp = 10 ** (dbfs / 20.0) * 32767.0
+    amp = 10 ** (dbfs / 20.0) * (2 ** 23 - 1) * 256.0   # 24-bit -> 32-bit slot
     t = np.arange(n) / 48000.0
-    x = (amp * np.sin(2 * np.pi * freq * t)).astype(np.int16)
-    z = np.zeros(n, dtype=np.int16)
-    st = np.empty(n * 2, dtype=np.int16)
+    x = (amp * np.sin(2 * np.pi * freq * t)).astype(np.int32)
+    z = np.zeros(n, dtype=np.int32)
+    st = np.empty(n * 2, dtype=np.int32)
     st[0::2] = x if ch in (None, 0) else z
     st[1::2] = x if ch in (None, 1) else z
     import wave
     with wave.open(path, "wb") as w:
-        w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+        w.setnchannels(2); w.setsampwidth(4); w.setframerate(48000)
         w.writeframes(st.tobytes())
     return path
 
@@ -673,7 +679,10 @@ def case_08_acoustic_lr(dut):
     for nm in ("L", "R"):
         pkL, pkR, flr = res[nm]
         if max(pkL, pkR) < flr + 6:
-            return NOTRUN, ("probe deaf: %s-only drive peaks %.1f/%.1f dBFS against a "
+            # FAIL, not NOT-RUN: the rig proved it can hear the room (the floor is
+            # measured), and the board produced nothing audible. Booking that as
+            # "could not be measured" hides a silent DAC (owner rule 2026-11-07).
+            return FAIL, ("probe deaf: %s-only drive peaks %.1f/%.1f dBFS against a "
                             "floor of %.1f -- nothing reached the microphone, so the "
                             "channel routing was not measured" % (nm, pkL, pkR, flr))
     iso_l = res["L"][0] - res["L"][1]
