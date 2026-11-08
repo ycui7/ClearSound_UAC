@@ -103,7 +103,10 @@ int main(void) {
         int interp_mism = 0;
         for (int n = 80; n < 512; n++) {   /* pairs reach x[n-79]: history must be full */
             int64_t acc = 0;
-            for (int q = 0; q <= 39; q++) acc += (int64_t)csd_hb_coef[2 * q + 1] * (hb_in[n - q] + hb_in[n - (79 - q)]);
+            for (int q = 0; q <= 39; q++)   /* promote before adding: the runtime does, and two
+             * full-scale int32 samples overflow when summed as int32 */
+                acc += (int64_t)csd_hb_coef[2 * q + 1] *
+                       ((int64_t)hb_in[n - q] + (int64_t)hb_in[n - (79 - q)]);
             acc >>= 30;
             if (acc > 2147483647LL) acc = 2147483647LL;
             if (acc < -2147483648LL) acc = -2147483648LL;
