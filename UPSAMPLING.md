@@ -276,7 +276,8 @@ Stated for the later kernel discussion, not as a defect:
   rejection tracks the rate automatically.
 * The 511-tap band limit is a fixed coefficient set designed at 384 kHz with a
   15 kHz corner. At 352.8 kHz the same coefficients place the corner at
-  15000 x 352.8/384 = 13.78 kHz.
+  15000 x 352.8/384 = 13.78 kHz. Accepted as-is (owner, 2026-11-07): the corner
+  shift is not a problem to solve. One kernel serves both families.
 * Group delay is 255 samples of the band limit either way: 0.664 ms at 384 kHz,
   0.723 ms at 352.8 kHz.
 
