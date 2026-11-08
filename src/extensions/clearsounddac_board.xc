@@ -22,10 +22,18 @@ extern "C" {
 #ifdef CSD_IDLE_POWER
 #include "csd_power_state.h"
 #endif
+#include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
+                             * caller -- the SQI ports live on this tile. See
+                             * csd_trim_store.h. Moved OUT of the PCM_DSP_EN
+                             * gate: the trim handlers run in every build, so
+                             * the declarations must too (basic-build fix). */
+#include "csd_gen.h"   /* trim conversion decls: the board's trim handlers run
+                        * in every build and the header is scalar-only control
+                        * surface (csd_gen.xc is the only TU that pulls the core
+                        * tables). Moved out of the CSD_GEN_EN gate -- the
+                        * generator FEATURE stays off in basic builds. */
 #if PCM_DSP_EN
 #include "csd_dsp.h"
-#ifdef CSD_GEN_EN
-#include "csd_gen.h"
 #ifdef CSD_UPSAMPLE_EN
 #include "csd_upsample_hook.h"   /* csd_ups_set_enabled, for the persisted option */
 #ifdef CSD_UPS_ASYNC
@@ -35,9 +43,6 @@ void xua_csd_set_usb_ratio(unsigned r);
 #endif
 #endif
 #include "csd_power_state.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
-#include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
-                             * caller -- the SQI ports live on this tile. See
-                             * csd_trim_store.h. */
 #endif
 #include "csd_vol_mailbox.h"
 #ifdef CSD_IDLE_POWER
@@ -46,7 +51,6 @@ void xua_csd_set_usb_ratio(unsigned r);
                               * host volume/mute here; this task drains it in
                               * its select loop. Same tile, so a static is
                               * visible to both -- see csd_vol_mailbox.h. */
-#endif
 
 #include <debug_print.h>
 #include <math.h>
