@@ -1,164 +1,144 @@
-# Upsampling to 384 kHz -- design record
+# Upsampling filter -- detailed summary
 
-Branch `upsampling`. Scaffold only: the DSP core and its tables are complete and
-tested off-target; nothing is wired into `csd_dsp.xc` yet, and nothing has run on
-hardware.
+Branch `upsampling`. Status: DSP core complete and tested off-target; **not yet
+wired into `csd_dsp.xc`, never run on an XS3.**
 
-## Requirement
+## 1. Signal path
 
-48, 96 and 192 kHz inputs are converted to 384 kHz with **sinc** interpolation,
-not linear interpolation. A second, linear-phase low pass starts rolling off
-around 15 kHz and is equivalent to at least a 4th-order filter, with minimum
-group-delay dispersion.
-
-## Why sinc and not linear interpolation
-
-Linear interpolation is a 2-tap triangular kernel. Its first image is only about
--13 dB down; the scaffold's tests measure the sinc design's image at **-140 dB**
-relative to DC (spec was -80 dB). Both numbers come from the shipped fixed-point
-tables, not from an ideal filter.
-
-## Stage A -- polyphase sinc interpolator
-
-Integer ratios only: 48 -> 8x, 96 -> 4x, 192 -> 2x, all landing exactly on
-384 kHz. One windowed-sinc prototype per ratio, Kaiser window, 80 dB design
-attenuation, 64 taps per phase:
-
-| input | ratio | prototype taps | taps/phase | MAC/s per channel |
-|-------|-------|----------------|------------|-------------------|
-| 48 kHz  | 8 | 512 | 64 | 24.6 M |
-| 96 kHz  | 4 | 256 | 64 | 24.6 M |
-| 192 kHz | 2 | 128 | 64 | 24.6 M |
-
-The prototype is normalised to sum to **L**, not 1. Each output sample is
-produced by one phase, so a prototype summing to 1 would put DC out at 1/L
-(-18 dB at 8x). This was caught by the host test's DC check, not by inspection.
-
-Passband edge is 0.45 x fs_in, so 48 kHz keeps to 21.6 kHz; the stopband starts
-at fs_in - f_pass (26.4 kHz), which is where the first image lives.
-
-## Stage B -- band limit / noise shaping
-
-Magnitude follows a 4th-order Butterworth with a 15 kHz corner; it is realised as
-a **511-tap symmetric FIR** at 384 kHz, so phase is exactly linear and group
-delay is flat at 255 samples (0.66 ms). A real 4th-order IIR Butterworth has
-frequency-dependent group delay, which is exactly what the "minimum dispersion"
-requirement excludes.
-
-Measured against the ideal curve: 0 dB at DC, -3 dB at 15 kHz, -48 dB at 60 kHz,
-all within 1.5 dB. The response is monotone, so there is no ripple-induced
-dispersion.
-
-**Trade-off to decide before hardware:** a 15 kHz corner removes programme
-content from 15-21.6 kHz on 48 kHz material. That is what was specified, but it
-is audible on cymbals and strings; if the intent was noise shaping only, the
-corner belongs in the noise-shaping stage and not in the programme path.
-
-## Cost
-
-Per stereo pair at 48 kHz input: 2 x 24.6 M (stage A) + 2 x 196.2 M (stage B) =
-**441 M MAC/s**. Stage B dominates because it runs at 384 kHz with 511 taps. On
-an 800 MHz XS3 tile that is roughly half of one core before loop overhead, so
-the open decision is whether stage B stays a long FIR or becomes a shorter FIR
-plus a decimated noise shaper.
-
-
-## Cost reduction by symmetry
-
-**Stage B: folded, halved.** The 511-tap kernel is symmetric, `c[k] == c[TAPS-1-k]`,
-so each multiply serves two taps:
+One stream per channel. The upsampler REPLACES the incoming stream; the mixer
+receives exactly one stream per channel. Bypass and cascade are mutually
+exclusive -- if the DSP is off the mixer takes the original stream and none of
+this runs.
 
 ```
-acc += c[k] * (hist[pos-k] + hist[pos-(TAPS-1-k)])    k = 0 .. 254
-acc += c[255] * hist[pos-255]                          centre tap
+                        stage A (2x halfband cascade)                 stage B
+ 48k ──┐
+       ├──[2x]──96k──[2x]──192k──[2x]──┐
+ 96k ──┼────────────[2x]──192k──[2x]──┤
+192k ──┴─────────────────────[2x]─────┤
+                                      │
+                                      ▼
+                               ┌──────────────┐   384k    ┌────────────┐  384k
+                               │ 384k stream  │──────────▶│ band limit │──────▶ mixer
+                               └──────────────┘           │ 511-tap    │  (one
+                                                          │ fc 15 kHz  │   stream)
+                                                          └────────────┘
 ```
 
-511 multiplies -> 256, and one coefficient load instead of two. The host test
-compares every output against the unfolded convolution: **0 mismatches of 4096**.
-Folding changes the work, never the result.
+Per rate: 48 kHz runs three 2x stages, 96 kHz two, 192 kHz one. Every stage is
+the same 127-tap halfband kernel, so all three paths share one table and one
+routine.
 
-**Stage A: folding is not available, and here is why.** A symmetric prototype
-does not decompose into symmetric phases. The partner of tap `k*L+j` is tap
-`N-1-(k*L+j)`, whose phase is `(L-1-j) mod L` -- a *different* output sample. The
-folded product is a single multiply that would have to be added into two
-different accumulators, and splitting it costs the two multiplies it saved. It
-only folds when every pair lands in one phase, i.e. `N-1 = 0 (mod L)`, which is
-impossible for L >= 2. Computing phase sums and differences instead is also a
-wash: `(a+b)` and `(a-b)` need two multiplies for the same two outputs.
+## 2. Stage A -- 2x halfband, structurally sparse
 
-The real saving in stage A is structural, not arithmetic: **cascade of 2x
-halfband stages** (48 kHz -> 96 -> 192 -> 384). A halfband has every other tap
-zero and a symmetric remainder, so a 2x stage costs about N/4 multiplies per
-output, i.e. roughly half of the equivalent polyphase prototype -- and the
-cascade uses shorter filters. That is the next change, not part of this commit.
+Kernel: 127 taps, symmetric. Nonzero taps sit at the **even** indices (64 of
+them); the **odd** indices are exact zeros (62 of them) plus the centre tap at
+index 63. That is the property that saves the work: zeros are never loaded.
 
-
-### Stage A with structural zeros -- 2x halfband cascade
-
-A windowed sinc has **no** exact zeros: the shipped stage-A tables contain 0 zero
-coefficients out of 512, 256 and 128 taps, so a zero-skip test there is dead code.
-The filter that does have zeros is the halfband. Its kernel is 127 taps with
-**62 exact zeros** at every other offset; only the odd-indexed taps are nonzero,
-plus the centre.
-
-Phase assignment is easy to get backwards, and the test caught both mistakes:
-
-- the centre tap sits at index 63 (odd), so the **identity branch lands on the
-  ODD output samples** and the interpolated phase on the even ones;
-- the test's naive reference must start where `x[n-63]` is valid, not at n=0.
-
-Cost per input sample per 2x stage: **32 multiplies** (32 symmetric pairs over
-the 64 even-indexed taps, zeros never loaded) plus a free identity branch,
-against 127 for the generic polyphase 2x. For 48 -> 384 kHz that is three stages
-at 48/96/192 kHz in, i.e. 32 x (48k + 96k + 192k) = 10.7 M MAC/s per channel,
-against 24.6 M for the 512-tap 8x prototype: **2.3x less**, with the same
-linear-phase property.
-
-Proof: identity branch matches the input bit for bit (0 of 512), interpolated
-phase matches the naive 64-tap even-index sum bit for bit (0 of 448), and the
-band-limit folding is still 0 of 4096 against the unfolded convolution.
-
-
-## One stream into the mixer
-
-The upsampler **replaces** the channel's stream. The mixer receives exactly one
-stream per channel: the cascade's output. The original 48/96/192 kHz samples are
-never forwarded alongside it and nothing is summed into the output buffer, so
-there is no dry+wet pair and no double-add. If the DSP is bypassed, the mixer
-takes the original stream and this stage does not run -- the two cases are
-mutually exclusive by construction.
-
-The runtime enforces the "assign, never accumulate" half of that. A test
-pre-fills the output buffer with `0x7fffffff` and checks the result is bit-equal
-to a run into a cleared buffer: 0 of 1024 samples differ, so stale data cannot
-colour the stream the mixer sees.
-
-## Files
-
-- `tools/dsp/gen_upsample_taps.py` -- designs both stages, emits Q30 tables.
-- `src/dsp/csd_dsp_taps.h` -- generated tables; do not edit by hand.
-- `src/dsp/csd_upsample.[ch]` -- portable fixed-point core, no allocation, no
-  XMOS dependency, so it can be a C static on a tile.
-- `tools/dsp/test_gen_upsample_taps.py` -- 8 property tests on the quantised
-  coefficients (DC gain, symmetry -> linear phase, image rejection, passband
-  flatness, 4th-order tracking, monotonicity).
-- `tools/dsp/test_upsample.c` -- 5 host checks on the runtime, compiled with gcc.
-
-## Proof
+Phase mapping (this is the part that is easy to get backwards -- the centre index
+63 is ODD, so the identity branch lands on the odd output samples):
 
 ```
-python3 -m unittest test_gen_upsample_taps   -> Ran 8 tests ... OK
-gcc ... test_upsample.c csd_upsample.c -lm    -> RESULT: PASS
-   DC gain 1.0000 | impulse peak 319 (expect 319) | 1 kHz -12.04 dBFS
-   image at 47 kHz -140.9 dB | band-limit DC 1.000
+  x[n] ──┬────────────────────────────────────────▶ y[2n+1] = x[n-31]      (identity, delayed 31)
+         │
+         └──▶ 32 symmetric pairs over h[2k] ───────▶ y[2n]                    (interpolated)
+              sum k=0..31  h[2k] * (x[n-k] + x[n-63+k])
 ```
 
-The 319-sample impulse position is the linear-phase delay: (512-1)/2 = 255.5 at
-384 kHz, sampled at phase 0, plus the 8-sample input offset.
+Cost per input sample per stage: **32 multiplies + 1 delay**, against 127 for a
+generic polyphase 2x. The interpolated taps are normalised so they sum to 1.0,
+because the identity branch is exactly unity and the two phases must carry equal
+gain.
 
-## Not done
+Why the delay exists: the interpolated branch spans 64 taps, its group delay is
+31.5 input samples. Without the 31-sample delay on the identity branch the two
+phases are misaligned, and interleaving them comb-filters the signal. Measured
+before the fix: DC still unity, but a 1125 Hz tone came out 1.5 / 9.1 / 12.8 dB
+low for 192/96/48 kHz -- one stage worth of error each.
 
-- Not wired into `csd_dsp.xc`; no XMOS build yet, so no cycle count on target.
-- Rate switching between 48/96/192 is not plumbed; `csd_up_ratio()` returns 0 for
-  anything else and the core emits nothing rather than guessing.
-- Stage B corner (15 kHz) and length (511) are design choices pending sign-off.
+## 3. Stage B -- linear-phase 4th-order-equivalent band limit
+
+511 taps, symmetric, at 384 kHz. Magnitude follows a 4th-order Butterworth with
+a 15 kHz corner (0 dB DC, -3 dB at 15 kHz, -48 dB at 60 kHz, monotone); phase is
+exactly linear, group delay flat at 255 samples. A real 4th-order IIR would have
+frequency-dependent group delay, which the requirement excludes.
+
+Folded on its symmetry -- 511 taps become 256 multiplies per output sample:
+
+```
+ acc = sum k=0..254  c[k] * (hist[pos-k] + hist[pos-(510-k)])  +  c[255]*hist[pos-255]
+```
+
+## 4. Numeric format and memory
+
+- coefficients Q30 `int32`, product in `int64`, one `>>30` at the end
+- samples `int32`, saturated on output, never wrapped
+- no allocation anywhere: state is plain structs, suitable for tile statics
+- state per channel: stage A `3 x 64 int32` = 768 B, stage B `511 int32` = 2044 B,
+  total **2.8 KB**; scratch per call is `2 x 4 x n_in int32` for the 48 kHz path
+
+## 5. Cost
+
+| path | stage A MAC/s/ch | stage B MAC/s/ch | total MAC/s/ch |
+|------|------------------|------------------|----------------|
+| 48 kHz  | 32 x (48k+96k+192k) = 10.7 M | 256 x 384k = 98.3 M | 109 M |
+| 96 kHz  | 32 x (96k+192k) = 9.2 M     | 98.3 M              | 107 M |
+| 192 kHz | 32 x 192k = 6.1 M           | 98.3 M              | 104 M |
+
+Stage B dominates: it runs at 384 kHz. A stereo pair is about 218 M MAC/s, i.e.
+roughly a quarter of one 800 MHz XS3 tile before loop overhead -- but this is a
+count, not a measurement; no cycle count exists until it runs on target.
+
+For comparison, the 512-tap single-rate polyphase prototype it replaced cost
+24.6 M MAC/s/ch in stage A, so the sparse halfband cascade is **2.3x cheaper**
+there.
+
+## 6. Measured results (host, shipped fixed-point tables)
+
+```
+DC gain                        1.0000
+impulse peak                   319   (linear-phase delay, expected 319)
+1 kHz tone through the 8x path  -12.04 dBFS   (in -12.04)
+image at 47 kHz                -140.9 dB      (512-tap prototype)
+band-limit DC                  1.000
+folding vs unfolded            0 mismatches of 4096
+halfband identity == x[n-31]   0 mismatches of 481
+halfband interp == naive sum   0 mismatches of 448
+output assigned not accumulated 0 of 1024 differ from a prefilled buffer
+cascade 192/96/48 kHz           -12.04 dBFS each (unity, all three paths)
+```
+
+**Image rejection of the halfband cascade is weaker than the prototype's.**
+Measured through the three-stage 48 kHz path with a 10 kHz tone: the 38 kHz spur
+sits 60.6 dB below the tone and the 58 kHz spur 68.0 dB below it, against
+140 dB for the 512-tap prototype. The 127-tap halfband was designed for 80 dB;
+the cascade does not reach it. A longer halfband kernel is the lever, at 2x the
+multiplies per stage for roughly double the length. **This is an open decision:**
+accept ~61 dB with the cheap cascade, or spend taps to get back toward 80 dB.
+
+## 7. Test inventory
+
+`tools/dsp/test_gen_upsample_taps.py` -- 8 property tests on the generated
+tables: DC gain, symmetry (=> linear phase), image rejection, passband flatness,
+4th-order magnitude tracking, monotonicity, sinc-vs-linear margin.
+
+`tools/dsp/test_upsample.c` -- 12 host checks on the runtime, compiled with gcc:
+the behavioural numbers above plus the structural equivalences.
+
+Both run without hardware:
+```
+python3 -m unittest test_gen_upsample_taps      # 8 tests
+gcc -O2 -Isrc/dsp -o /tmp/tu tools/dsp/test_upsample.c src/dsp/csd_upsample.c -lm && /tmp/tu
+```
+
+## 8. Open items
+
+1. **15 kHz corner**: removes programme content from 15-21.6 kHz on 48 kHz
+   material. If noise shaping was the intent, this belongs after the mixer or in
+   the shaper, not in the programme path.
+2. **Halfband length vs image rejection**: 127 taps gives ~61 dB measured; the
+   cost curve needs a measured sweep with the C implementation, not a model.
+3. **Not wired into `csd_dsp.xc`**; no XS3 build, no cycle count, no hardware
+   measurement of THD or noise.
+4. **Rate switching** is not plumbed: an unsupported rate emits nothing rather
+   than a wrong-rate signal, and the caller must reset the cascade on rate change.
