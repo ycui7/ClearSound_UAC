@@ -1894,7 +1894,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
      * DSP can never be upsampling while the chip still has its own FIR on. */
     /* Keep the tile[1] intent in step with the operator's command at once;
      * the journal is the authority and the next stream start re-reads it. */
-    csd_ups_set_want(ap ? enable : 0u);
+    /* Intent is the operator's, not the codec's: set it from the command so
+     * the next stream start can force the rate and the grant can then land. */
+    csd_ups_set_want(enable);
     csd_ups_set_enabled(ap);
     ups_reply(context);
     return SCPI_RES_OK;

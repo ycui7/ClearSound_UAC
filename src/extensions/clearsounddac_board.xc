@@ -864,8 +864,8 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         } else {
                             /* Refuse. At any other frame clock the modulators
                              * would be starved by 8x -- silence, not hiss. */
-                            s_osf_want    = 0u;
-                            s_osf_applied = 0u;
+                            s_osf_want    = 1u;   /* intent stands; it retries
+                            s_osf_applied = 0u;      at the next rate change */
                             s_osf_refusals++;
                         }
                     } else {
@@ -880,7 +880,15 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                      * flag, every rate change that re-granted the option would
                      * append a NOR record and the 128-slot sector would fill up. */
                     if (persist) {
-                        csd_trim_ups_set(s_osf_applied);
+                        /* Persist the REQUEST, not the grant. Storing the grant
+                         * deadlocks the option: the force needs want, want comes
+                         * from the journal, the journal held only what the codec
+                         * accepted, and accepting needs a frame clock that only
+                         * the force produces. An operator's 'enable' must
+                         * survive to the next stream start and try again.
+                         * `applied` still reports the truth right now, and
+                         * refusals says why it is 0. */
+                        csd_trim_ups_set(s_osf_want);
                         (void)csd_trim_journal_now(csd_trim_applied_packed());
                     }
                     reply = s_osf_applied;
