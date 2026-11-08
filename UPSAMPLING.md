@@ -239,35 +239,14 @@ to a string literal and produced parse errors at each use site. `od` on
 
 Two families, one kernel. `csd_up_out_fs()` is the single source of truth.
 
-| Input | Output | Ratio | Stage ratios | Stages |
-|---|---|---|---|---|
-| 48 000 Hz | 384 000 Hz | 8 | 2 . 2 . 2 | 3 |
-| 96 000 Hz | 384 000 Hz | 4 | 2 . 2 . 1 | 3 |
-| 192 000 Hz | 384 000 Hz | 2 | 2 . 1 . 1 | 3 |
-| 44 100 Hz | 352 800 Hz | 8 | 2 . 2 . 2 | 3 |
-| 88 200 Hz | 352 800 Hz | 4 | 2 . 2 . 1 | 3 |
-| 176 400 Hz | 352 800 Hz | 2 | 2 . 1 . 1 | 3 |
-
-Depth is uniform by request and by design: `CSD_UPS_STAGES` is 3 for every rate,
-and `csd_up_stage_plan()` returns the per-rate stage ratios.
-
-**Why a stage is 2x, and why depth needed making explicit.** A halfband's 62
-structural zeros exist only at exactly 2x -- that is what makes stage A cheap
-(40 multiplies per input sample instead of 127). So every real stage must be a
-2x, the total ratio is 2^stages, and integer stage ratios multiplying to the
-total are only 2.2.2, 2.2.1 and 2.1.1. Equal depth therefore means the
-short-rates run **padded stages**: a ratio-1 stage copies, applies no filter and
-adds no group delay, so the filtering that does exist is bit-identical to the
-minimal cascade. Verified: all six rate hashes unchanged by the change.
-
-**Rejected alternative.** Non-integer stage ratios (4 = 4/3 . 3/2 . 2) would
-give uniform depth without padding, but every stage becomes an
-interpolate-then-decite resampler and the halfband zeros disappear -- losing the
-very property that makes stage A cheap. Rejected.
-
-**Per-rate coefficients.** `csd_up_stage()` takes its coefficient pointer from
-the caller and the stage ratio from the plan. Today every stage uses the shared
-halfband table; giving a rate its own set is a table change, not a code change.
+| Input | Output | Ratio | Cascade stages |
+|---|---|---|---|
+| 48 000 Hz | 384 000 Hz | 8 | 3 |
+| 96 000 Hz | 384 000 Hz | 4 | 2 |
+| 192 000 Hz | 384 000 Hz | 2 | 1 |
+| 44 100 Hz | 352 800 Hz | 8 | 3 |
+| 88 200 Hz | 352 800 Hz | 4 | 2 |
+| 176 400 Hz | 352 800 Hz | 2 | 1 |
 
 **Only MCLK differs between the families.** The coefficient tables, the stage
 count, the band limit and the group delay in samples are all identical. That is
@@ -309,3 +288,31 @@ simulator report is byte-identical to the tester math. Currently 38 lines,
 covering all six rates, both family mappings, exact-multiple ratios, refusal of
 44 000 / 22 050 / 32 000 / 384 000 as inputs, and buffer-untouched behaviour on
 refusal.
+
+
+## Stage A depth: efficient minimal cascade (owner decision, 2026-11-07)
+
+Depth follows the total ratio: 8x = 3 stages, 4x = 2, 2x = 1.
+
+**Why it is forced.** A halfband's 62 structural zeros exist only at exactly 2x.
+That is what makes stage A cheap -- 40 multiplies per input sample instead of
+127 -- so every real stage must be a 2x, and the total ratio is 2^stages.
+
+**Uniform depth was built, measured, and backed out.** Running three stages at
+every rate means the short-rates carry padded stages, because integer stage
+ratios can only be 2*2*2, 2*2*1 and 2*1*1. A ratio-1 stage copies: no filtering
+and no added group delay, so all six rate hashes stayed bit-identical (48000
+2255943590, 96000 2109678388, 192000 3038677792, 44100 1297205703, 88200
+2227632825, 176400 765286489). It cost roughly two extra memcpys per frame at
+192 kHz input and one at 96 kHz, and changed nothing audible or measurable. The
+owner chose the efficient design; the padding is reverted.
+
+**Rejected alternative, kept on record.** Non-integer stage ratios
+(4 = 4/3 * 3/2 * 2) would give uniform depth without padding, but every stage
+becomes an interpolate-then-decite resampler and the halfband zeros disappear --
+losing the property that makes stage A cheap.
+
+**If uniform depth is ever wanted again**, the shape that worked was a
+`csd_up_stage(state, in, n, out, coef, ratio)` taking its coefficient pointer
+from a per-rate plan, with the cascade as one loop of fixed length. That seam is
+what made the experiment behaviour-neutral in the first place.
