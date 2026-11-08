@@ -748,18 +748,39 @@ reply is always the resulting state, never the request.
 
 **Pass criterion.**
 - Step 1: `0,0,<frame>,0,0` -- off, with the chip's built-in filter in circuit.
-- Step 2 at 48 kHz: `applied=0` and `codec_refusals` increments by one. This is
-  the interlock working, not a failure: at a 48 kHz frame clock the modulators
-  would be starved by a factor of 8.
+- Step 2 (enable, before the stream restart): `applied=0` and `codec_refusals`
+  increments by one. This is the interlock working, not a failure: at a 48 kHz
+  frame clock the modulators would be starved by a factor of 8. After the stream
+  restart the same request must read `applied=1, frame_hz=384000`.
 - Step 4: the value set in the last successful `STATe 1` returns.
 - With the option off, the case-06 bit-perfect result must be unchanged, because
   off means the shipped signal path is untouched.
 
-**Current state (honest).** Steps 2 and 3 both report `applied=0`. lib_xua ties
-the I2S frame clock to the USB stream rate through the shared MCLK, so the codec
-is never fed 384 kHz while the stream is 48 kHz; see UPSAMPLING.md. The refusal
-is the designed behaviour until the output clock is separated from the stream
-rate.
+**Measured on the bench (revBB, image 781bca37, host stream held at 48 kHz).**
+Codec state read back over I2C, not taken from firmware:
+
+| option | `STATe?` | reg `0x07` | reg `0x0A` | reg `0x40` |
+|---|---|---|---|---|
+| off | `0,0,48000,0,0` | `0x00` (FIR in circuit) | `0x02` | `0x88` |
+| on  | `1,1,384000,1,0` | `0x08` (OSF bypassed) | `0x12` (128FS set) | `0x89` (lock bit up) |
+| off | `0,0,48000,1,0` | `0x00` | `0x02` | `0x88` |
+
+`applied=1` at `frame_hz=384000` with the host still at 48 kHz is the result:
+the frame clock the codec receives is set internally, the chip's own FIR comes
+out, and `128FS_MODE` follows from the `mClk == 128*fs` test.
+
+**Register reads must use the proven wire form** -- quoted base64 of the raw
+address byte (`REGister:READ? "AA=="` for reg 7). A plain `0x07` is rejected with
+`-101`, and a rejected reply base64-decodes to `b''`, which reads back as
+register value 0: a gate that cannot fail. See section 21.
+
+**Timing note.** Enabling lands at the NEXT stream start, because the force lives
+in `csd_AudioHwConfig`. The first attempt at a 48 kHz frame clock is counted as a
+refusal before the restart grants it, which is why `codec_refusals` reads 1
+after a successful enable.
+
+**Not yet run.** The power-cycle leg (step 4), and case 06 re-run with the option
+off to reconfirm the shipped path is untouched.
 
 ## 20. Current status (2026-11-06)
 
