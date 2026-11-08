@@ -133,6 +133,24 @@ int main(void) {
         if (mism) fail++;
     }
 
+    /* 6b) the cascade REPLACES the stream: output samples are assigned, never
+     *     accumulated, so a buffer pre-filled with garbage cannot leak in. This
+     *     is what keeps the mixer from seeing a sum of old and new data. */
+    {
+        static int32_t cin2[512], a[1024], b[1024], t1[1024], t2[1024];
+        csd_cascade_state cs;
+        for (int i = 0; i < 512; i++) cin2[i] = (int32_t)(FULL / 8 * sin(2.0 * M_PI * 750.0 * i / 192000.0));
+        for (int i = 0; i < 1024; i++) a[i] = 0x7fffffff;      /* hostile prefill */
+        for (int i = 0; i < 1024; i++) b[i] = 0;
+        csd_cascade_reset(&cs); csd_cascade_process(&cs, 192000u, cin2, 512, a, t1, t2);   /* 1 stage: exactly 1024 out */
+        csd_cascade_reset(&cs); csd_cascade_process(&cs, 192000u, cin2, 512, b, t1, t2);
+        int leaks = 0;
+        for (int i = 0; i < 1024; i++) if (a[i] != b[i]) leaks++;
+        printf("cascade output assigned  %d samples differ from prefilled buffer  %s\n",
+               leaks, leaks == 0 ? "PASS" : "FAIL");
+        if (leaks) fail++;
+    }
+
     /* 7) full cascade: 192/96/48 kHz all land on 384 kHz at unity gain */
     {
         static int32_t cin[2048], cout[2048 * 8], ctmp[2048 * 4], ctmp2[2048 * 4];

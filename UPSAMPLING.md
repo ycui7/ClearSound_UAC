@@ -118,6 +118,21 @@ Proof: identity branch matches the input bit for bit (0 of 512), interpolated
 phase matches the naive 64-tap even-index sum bit for bit (0 of 448), and the
 band-limit folding is still 0 of 4096 against the unfolded convolution.
 
+
+## One stream into the mixer
+
+The upsampler **replaces** the channel's stream. The mixer receives exactly one
+stream per channel: the cascade's output. The original 48/96/192 kHz samples are
+never forwarded alongside it and nothing is summed into the output buffer, so
+there is no dry+wet pair and no double-add. If the DSP is bypassed, the mixer
+takes the original stream and this stage does not run -- the two cases are
+mutually exclusive by construction.
+
+The runtime enforces the "assign, never accumulate" half of that. A test
+pre-fills the output buffer with `0x7fffffff` and checks the result is bit-equal
+to a run into a cleared buffer: 0 of 1024 samples differ, so stale data cannot
+colour the stream the mixer sees.
+
 ## Files
 
 - `tools/dsp/gen_upsample_taps.py` -- designs both stages, emits Q30 tables.

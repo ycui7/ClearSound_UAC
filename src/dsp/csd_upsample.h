@@ -57,7 +57,14 @@ void csd_hb_reset(csd_hb_state *s);
  * 33 multiplies per input sample instead of 127. */
 void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out);
 
-/* Cascade: 192 kHz one 2x stage, 96 kHz two, 48 kHz three. BOTH scratch buffers
+/* REPLACEMENT, NOT MIXING. The cascade consumes the channel's incoming samples
+ * and produces the ONE stream that is handed to the mixer. The original samples
+ * are never forwarded as well, and nothing is summed into the output: every
+ * output sample is assigned, never accumulated, so a pre-filled buffer cannot
+ * colour the result. If the DSP is bypassed the mixer gets the original stream
+ * and this stage does not run -- never both at once.
+ *
+ * Cascade: 192 kHz one 2x stage, 96 kHz two, 48 kHz three. BOTH scratch buffers
  * must hold 4*n_in samples. Two are needed because the 48 kHz path expands
  * 8x: writing a stage forward in-place would destroy samples it has not read. */
 typedef struct {
