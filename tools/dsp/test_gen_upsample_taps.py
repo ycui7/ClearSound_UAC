@@ -94,5 +94,57 @@ class BandLimitProperties(unittest.TestCase):
         self.assertLessEqual(diff, 2, "not symmetric -> phase not linear")
 
 
+class BesselFloor(unittest.TestCase):
+    """The band limit must never be WORSE than a 4th-order analog Bessel.
+
+    A 4th-order Bessel is the gentlest sensible alignment: its magnitude rolls
+    off slower than Butterworth, and its group delay is the flattest of the
+    classical analog filters. So it is a floor for attenuation. Ours is a
+    symmetric FIR, so its phase is exactly linear, which no analog filter is --
+    that side of the comparison we win by construction.
+    """
+
+    @staticmethod
+    def bessel4_mag(w):
+        """|H| of the 4th-order reverse-Bessel low pass, w in radians/s."""
+        # theta4(s) = s^4 + 10 s^3 + 45 s^2 + 105 s + 105
+        s = 1j * w
+        theta = s ** 4 + 10 * s ** 3 + 45 * s ** 2 + 105 * s + 105
+        return abs(105 / theta)
+
+    @classmethod
+    def w3(cls):
+        """Corner where the response is -3 dB, so both filters share a corner."""
+        lo, hi = 0.1, 10.0
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            if cls.bessel4_mag(mid) > 2 ** -0.5:
+                lo = mid
+            else:
+                hi = mid
+        return (lo + hi) / 2
+
+    def test_attenuation_beats_bessel_at_and_above_the_corner(self):
+        import math
+        h = q30(g.design_bandlimit())
+        worst = 0.0
+        for f in range(int(g.B_FC), 120001, 500):
+            bessel_db = 20 * math.log10(max(self.bessel4_mag(f / g.B_FC * self.w3()), 1e-12))
+            ours_db = resp_db(h, f)                   # absolute: gain normalised to 1
+            margin = ours_db - bessel_db               # negative = we attenuate more
+            worst = min(worst, margin) if worst else margin
+            self.assertLessEqual(margin, 0.5,
+                                 f"{f} Hz: ours {ours_db:.2f} dB vs Bessel {bessel_db:.2f} dB")
+        self.assertLess(worst, -3.0, f"worst margin only {worst:.1f} dB -- re-check the design")
+
+    def test_passband_is_no_worse_than_bessel(self):
+        import math
+        h = q30(g.design_bandlimit())
+        for f in (1000, 5000, 10000, 14000):
+            bessel_db = 20 * math.log10(max(self.bessel4_mag(f / g.B_FC * self.w3()), 1e-12))
+            self.assertGreaterEqual(resp_db(h, f), bessel_db - 0.2,
+                                    f"{f} Hz: ours droops more than Bessel")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
