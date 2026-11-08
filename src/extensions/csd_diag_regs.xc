@@ -251,6 +251,43 @@ int csd_diag_identity_snapshot(csd_id_snapshot_t *snap)
     return 1;
 }
 
+/* Upsampling option, tile[0] side. Enabling asks the codec server to bypass
+ * the chip's own oversampling FIR; the server only grants it when the frame
+ * clock it was last told about is 384 kHz or 352.8 kHz, because the ES9219Q
+ * takes FSR = frame clock and derives its target rate as FSR/8 (datasheet
+ * v1.3 Table 3). A refusal is reported, not hidden: applied comes back 0 and
+ * refusals increments. */
+int csd_diag_ups_set(unsigned want, unsigned *applied,
+                     unsigned *samfreq, unsigned *refusals)
+{
+    unsigned a = 0u, sf = 0u, rf = 0u;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_UPS_SET;
+        uc_audiohw_diag <: (want ? 1u : 0u);
+        uc_audiohw_diag :> a;
+        uc_audiohw_diag :> sf;
+        uc_audiohw_diag :> rf;
+    }
+    if (applied)  *applied  = a;
+    if (samfreq)  *samfreq  = sf;
+    if (refusals) *refusals = rf;
+    return 1;
+}
+
+void csd_diag_ups_get(unsigned *applied, unsigned *samfreq, unsigned *refusals)
+{
+    unsigned a = 0u, sf = 0u, rf = 0u;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_UPS_GET;
+        uc_audiohw_diag :> a;
+        uc_audiohw_diag :> sf;
+        uc_audiohw_diag :> rf;
+    }
+    if (applied)  *applied  = a;
+    if (samfreq)  *samfreq  = sf;
+    if (refusals) *refusals = rf;
+}
+
 int csd_diag_reg_write(unsigned reg, unsigned val)
 {
     if (reg > 0xFFu || val > 0xFFu) return 0;

@@ -22,6 +22,7 @@
 #include "csd_identity.h"
 #include "csd_gen.h"
 #include "csd_power.h"          /* POWER:TIMEout, owner case 14 */
+#include "csd_upsample_hook.h"  /* DIAG:UPSAMPLing, XMOS 8x + ES9219Q FIR bypass */
 /* L/R trim persistence (TODO 3) is reached through csd_diag.h's proxy calls,
  * never by including csd_trim_store.h: that header's entry points drive the
  * tile[0] SQI ports and may only be called by the tile[0] codec server. */
@@ -1841,6 +1842,59 @@ static SCPI_FPTR_CMD scpi_result_t gen_reject_q(scpi_t *context)
 
 #endif /* !SPECIALTYCIRCUITS_RELEASE: MIXer counters, DIAG:I2S, probes */
 
+/* ---- DIAG:UPSAMPLing -- XMOS 8x upsampling + ES9219Q internal FIR bypass --
+ *
+ * ONE control, not two. Enabling the chip's OSF bypass without feeding it 8x
+ * data starves the modulators, and feeding it 8x data with its FIR still
+ * engaged interpolates twice; both are silence or noise rather than a subtle
+ * artefact, so the pair is settable only together (es9219q.h, datasheet v1.3
+ * Table 3 p13 and p22).
+ *
+ * DEFAULT OFF: the built-in filter is the acoustically proven path.
+ *
+ * The reply is always the resulting state, not the request: "applied" is 0
+ * when the codec is not actually being fed a 384 kHz or 352.8 kHz frame clock,
+ * which is the case until the I2S output clock is decoupled from the USB
+ * stream rate. A silent refusal would be the worst possible failure here.
+ *
+ * Rows live outside the release gate on purpose: this is a product control. */
+static void ups_reply(scpi_t *context)
+{
+    unsigned ap = 0u, sf = 0u, rf = 0u;
+    csd_diag_ups_get(&ap, &sf, &rf);
+    char buf[96];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u",
+                     csd_ups_is_enabled(), ap, sf, rf, csd_ups_diag_refusals());
+    if (n > 0) SCPI_ResultCharacters(context, buf, n);
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_q(scpi_t *context)
+{
+    ups_reply(context);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
+{
+    uint32_t enable = 0u;
+    const char *why = NULL;                 /* gen_u32's reason string */
+    if (!gen_u32(context, "state", &enable, 0u, 1u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;                /* the file's own idiom */
+    }
+    unsigned ap = 0u, sf = 0u, rf = 0u;
+    if (!csd_diag_ups_set(enable, &ap, &sf, &rf)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_OK;
+    }
+    /* Mirror into the audio path only what the codec actually accepted, so the
+     * DSP can never be upsampling while the chip still has its own FIR on. */
+    csd_ups_set_enabled(ap);
+    ups_reply(context);
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t csd_commands[] = {
     /* IEEE 488.2 mandated subset */
     { .pattern = "*IDN?",  .callback = q_idn     },   /* ours, not CoreIdnQ: see q_idn */
@@ -1911,6 +1965,10 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "PERSISTence:SAVE",        .callback = persist_save    },
     { .pattern = "POWER:TIMEout",           .callback = power_timeout_set },
     { .pattern = "POWER:TIMEout?",          .callback = power_timeout_q   },
+    /* One control for XMOS upsampling and the DAC's FIR bypass together.
+     * Reply is "xmos_en,applied,frame_hz,codec_refusals,ups_refusals". */
+    { .pattern = "DIAG:UPSAMPLing:STATe",   .callback = ups_set           },
+    { .pattern = "DIAG:UPSAMPLing:STATe?",  .callback = ups_q             },
     { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
     { .pattern = "VOLume:TRIM:SAVe",        .callback = vol_trim_save     },
     { .pattern = "VOLume:TRIM:RESET",       .callback = vol_trim_reset    },

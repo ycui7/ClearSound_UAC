@@ -62,6 +62,14 @@ unsigned csd_ups_diag_frames(void);     /* frames rewritten this stream */
 unsigned csd_ups_diag_in_hz(void);
 unsigned csd_ups_diag_out_hz(void);
 
+/* Runtime option (default 0 = off). Enabling is only half of it: the codec
+ * must also be told to bypass its own oversampling FIR, and the board refuses
+ * that unless the frame clock really is 384 kHz or 352.8 kHz. Both halves are
+ * driven together by DIAG:UPSAMPLing:STATe. */
+void     csd_ups_set_enabled(unsigned enable);   /* 'on' is a reserved word in XC */
+unsigned csd_ups_is_enabled(void);
+unsigned csd_ups_diag_refusals(void);   /* enable attempts while not armed */
+
 #ifdef __cplusplus
 }
 #endif

@@ -98,6 +98,13 @@ int csd_diag_trim_save(unsigned packed);
  * (-1 never, 0 now, >0 seconds); get() returns the persisted value, or 300. */
 int csd_diag_pw_timeout_save(int sec, unsigned packed);
 int csd_diag_pw_timeout_get(void);
+/* Upsampling option. set() asks tile[0] to bypass the DAC's internal FIR and
+ * returns what actually happened: applied 1 only when the codec is genuinely
+ * being fed a 384 kHz or 352.8 kHz frame clock. get() reports current state
+ * without changing it. */
+int  csd_diag_ups_set(unsigned want, unsigned *applied,
+                      unsigned *samfreq, unsigned *refusals);
+void csd_diag_ups_get(unsigned *applied, unsigned *samfreq, unsigned *refusals);
 /* Re-run tile[0]'s single volume applier so a trim change reaches regs 15/16.
  * Requests recomputation; it never writes a volume register itself. */
 void csd_diag_vol_reapply(void);

@@ -70,7 +70,17 @@
 
 #define ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE      (0x07)
 #define ES9219Q_FILTER_SHAPE            	     	(0 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
-#define ES9219Q_BYPASS_OSF              	     	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
+#define ES9219Q_BYPASS_OSF             	     	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
+/* Reg 7 bit 3, spelled out. Datasheet v1.3 p40 and the Sample Rate Notation
+ * table p13: with BYPASS_OSF=1 the chip takes FSR = frame clock rate and its
+ * target sample rate is FSR/8, so the wire must already carry 8x data. Feeding
+ * a 384 kHz frame clock therefore plays 48 kHz audio, and 352.8 kHz plays
+ * 44.1 kHz -- both legal (Table 8 limits OSF-bypass to FSR <= 768 kHz, and
+ * p22 gives exactly the 44.1k -> 352.8k example). MCLK stays 128*FSR:
+ * 49.152 MHz and 45.1584 MHz, the two clocks this design already generates.
+ * The bit is driven at run time by the upsampling option, not by this
+ * compile-time constant; see csd_osf_bits() in clearsounddac_board.xc. */
+#define ES9219Q_BYPASS_OSF_BIT          	     	(1u << 3)
 /* Datasheet rev1.3 Reg 7 bit0 SYSTEM MUTE: 1 = mute, 0 = unmute.
  * (These were inverted here before — the names now match the silicon.) */
 #define ES9219Q_MUTE                     	     	(1 << 0)    //1: mute

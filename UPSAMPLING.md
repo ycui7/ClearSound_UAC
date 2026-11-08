@@ -281,7 +281,37 @@ Stated for the later kernel discussion, not as a defect:
 * Group delay is 255 samples of the band limit either way: 0.664 ms at 384 kHz,
   0.723 ms at 352.8 kHz.
 
-### Verification
+### Runtime config option (default OFF)
+
+One MIDI/SCPI control turns on XMOS upsampling and the ES9219Q internal FIR
+bypass together:
+
+```
+F0 7E DIAG:UPSAMPLing:STATe 1 F7      # enable
+F0 7E DIAG:UPSAMPLing:STATe? F7       # -> xmos_en,applied,frame_hz,codec_refusals,ups_refusals
+```
+
+They are one decision. 8x data with the chip FIR still on interpolates twice;
+FIR bypassed without 8x data starves the modulators (datasheet v1.3 Table 3
+p13, p22). Both failure modes are silence or noise, so the pair cannot be set
+apart.
+
+**Off by default**, which keeps the acoustically proven built-in filter.
+
+**The interlock is the point of the design.** Bypass is granted only when the
+frame clock the codec was actually configured with is 384000 or 352800. The
+reply always reports resulting state, so a refusal is visible (`applied=0`,
+refusal count rising) rather than looking like success. Reg 7 bit 3 is forced in
+the tile[0] server's register-write path, so no other writer -- init, a
+rate-change mute from tile[1], or a SCPI `REGister:WRITE` -- can undo it.
+
+Clocks needed, and already generated: 384 kHz frame -> MCLK 49.152 MHz
+(`MCLK_48`); 352.8 kHz frame -> 45.1584 MHz (`MCLK_441`). No 98 MHz clock.
+
+Until the I2S output clock is decoupled from the USB stream rate in audiohub,
+enabling the option with a 48 kHz stream is correctly refused.
+
+## Verification
 
 `tools/dsp/xc_sim/run_sim_qualification.sh` -- exit 0 only when the XS3
 simulator report is byte-identical to the tester math. Currently 38 lines,

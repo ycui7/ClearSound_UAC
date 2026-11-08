@@ -37,7 +37,27 @@ static unsigned          s_out_hz;       /* confirmed I2S/codec rate, 0 = not ar
 static unsigned          s_bypass;       /* 1 => pass frames through untouched */
 static unsigned          s_frames;       /* diagnostic */
 
-unsigned csd_ups_diag_state(void) { return (s_out_hz != 0u && !s_bypass) ? 1u : 0u; }
+/* Runtime enable for the whole option. DEFAULT OFF: shipping behaviour keeps
+ * the DAC's built-in filter, which is the acoustically proven path. The MIDI
+ * surface is the intended way to turn it on.
+ *
+ * Enabled does not mean active. The path still has to be armed at a family
+ * output rate (csd_ups_arm) or the frame is left alone and refusals count. */
+static unsigned s_enabled = 0u;
+static unsigned s_refusals = 0u;
+
+void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
+{
+    const unsigned now = enable ? 1u : 0u;
+    if (now != s_enabled) {
+        s_enabled = now;
+        csd_ups_reset();          /* a mode switch is a stream restart */
+    }
+}
+unsigned csd_ups_is_enabled(void) { return s_enabled; }
+unsigned csd_ups_diag_refusals(void) { return s_refusals; }
+
+unsigned csd_ups_diag_state(void) { return (s_enabled && s_out_hz != 0u && !s_bypass) ? 1u : 0u; }
 unsigned csd_ups_diag_frames(void) { return s_frames; }
 unsigned csd_ups_diag_in_hz(void)  { return s_in_hz; }
 unsigned csd_ups_diag_out_hz(void) { return s_out_hz; }
@@ -95,7 +115,16 @@ int csd_ups_frame(unsigned CSD_UPS_CPTR s)   /* expands to plain '*' in C */
     /* Every output rate is an 8x/4x/2x of a family member, so csd_up_ratio()
      * already proves the family; s_out_hz must agree with it, which arm()
      * enforces. Nothing here assumes 384 kHz specifically. */
-    if (s_bypass || s_out_hz == 0u || ratio == 0u) return 0;        /* untouched */
+    if (!s_enabled) {
+        /* Option off: the DSP path owns the frame. Count an attempt only when
+         * something is clearly mis-wired, so 'off' stays distinguishable from
+         * 'on but refused'. */
+        return 0;
+    }
+    if (s_bypass || s_out_hz == 0u || ratio == 0u) {
+        s_refusals++;
+        return 0;                                          /* untouched */
+    }
 
     if (s_phase == 0u) {
         /* Pull one host frame and expand it into the per-channel queues. */

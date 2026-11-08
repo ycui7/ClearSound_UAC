@@ -59,6 +59,9 @@ typedef enum
     AUDIOHW_CMD_TRIM_SAVE,          //journal the CURRENT mailbox trim pair
     AUDIOHW_CMD_TRIM_STAT,          //reply the 7 persistence status words from flash
     AUDIOHW_CMD_TRIM_RESET,         //write the default condition at the current version
+    AUDIOHW_CMD_UPS_SET,            //enable/disable XMOS upsampling + DAC OSF bypass
+    AUDIOHW_CMD_UPS_GET,            //reply {applied, frame clock, refusals}
+    AUDIOHW_CMD_HWCFG_RATE,         //tile[1] reports the frame clock just configured
     AUDIOHW_CMD_IDENTITY
 } audioHwCmd_t;
 

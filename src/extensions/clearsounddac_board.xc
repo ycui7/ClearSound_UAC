@@ -153,6 +153,37 @@ on tile[0]: clock c_trim_qspi = XS1_CLKBLK_3;
 
 /* Host mute intent + display state. Written only by AudioHwRemoteTile0. */
 static unsigned host_muted = 0;
+
+/* ---- upsampling option: XMOS 8x + ES9219Q internal FIR bypass -------------
+ *
+ * ONE flag covers both halves because they are one decision, not two: feeding
+ * the chip 8x data while its own oversampling FIR is still engaged would
+ * interpolate twice and produce nonsense, and bypassing the FIR without 8x
+ * data starves the modulators (datasheet v1.3 p22, Table 3 p13). There is
+ * deliberately no way to set them apart.
+ *
+ * DEFAULT IS OFF. s_osf_want/s_osf_applied start at 0, which keeps the
+ * built-in filter -- the acoustically proven configuration.
+ *
+ * THE INTERLOCK. Bypass is granted only when the codec is actually being fed a
+ * 384 kHz or 352.8 kHz frame clock, as reported by tile[1] after AudioHwConfig.
+ * Anything else is refused and the built-in filter stays on, because at a
+ * 48 kHz frame clock the chip would be starved by a factor of 8 -- silent
+ * corruption, not degraded sound. A refusal increments s_osf_refusals so the
+ * rig can tell "off" from "asked for and denied".
+ *
+ * These live on tile[0]: the I2C server is the only writer of codec registers,
+ * and the OSF bit is forced in its REGWR handler (see below) so that a rate
+ * change or a mute from tile[1] cannot quietly undo the bypass. */
+static unsigned s_osf_want     = 0;   /* requested by the config option   */
+static unsigned s_osf_applied  = 0;   /* what reg 7 bit 3 actually holds  */
+static unsigned s_hwcfg_samfreq = 0;  /* frame clock tile[1] configured   */
+static unsigned s_osf_refusals = 0;   /* enable attempts denied           */
+
+static unsigned csd_osf_bits(void)
+{
+    return s_osf_applied ? ES9219Q_BYPASS_OSF_BIT : 0u;
+}
 static unsigned led_state  = LED_ST_SOLID_RED;
 static unsigned led_on     = 1;      /* blink phase */
 static unsigned led_tier   = 0;      /* last rate tier */
@@ -452,7 +483,7 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
     {
         host_muted = muted;
         ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-            (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
+            (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
              (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
         led_state = muted ? LED_ST_MUTED
                           : ((led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF);
@@ -530,7 +561,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
             break;
         case CSD_PW_CMD_DAC_OFF:
             ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-                (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF | ES9219Q_MUTE), i2c);
+                (ES9219Q_FILTER_SHAPE | csd_osf_bits() | ES9219Q_MUTE), i2c);
             /* DAC_MUTE_N = 8D bit4 low, and hold the codec in reset. */
             gpio_8d_reset &= ~0x30u;
             led_render();
@@ -801,7 +832,56 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     unsigned regAddr, regValue;
                     c[i] :> regAddr;
                     c[i] :> regValue;
+                    /* Reg 7 carries the OSF bypass. Any writer asking for reg 7
+                     * -- the init sequence, a mute from tile[1], the SCPI
+                     * REGister:WRITE probe -- gets the bit that the option
+                     * says, so no call site can quietly re-enable the chip's
+                     * FIR while the option is on. */
+                    if (regAddr == ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE) {
+                        regValue = (regValue & ~ES9219Q_BYPASS_OSF_BIT) | csd_osf_bits();
+                    }
                     ES9219Q_REGWRITE(regAddr, regValue, i2c);
+                }
+                else if (cmd == AUDIOHW_CMD_HWCFG_RATE)
+                {
+                    /* tile[1] tells us the frame clock it has just configured.
+                     * This is what the interlock below reads: the codec's own
+                     * view of its input rate, not what the USB host asked for. */
+                    c[i] :> s_hwcfg_samfreq;
+                }
+                else if (cmd == AUDIOHW_CMD_UPS_SET)
+                {
+                    unsigned want, reply;
+                    c[i] :> want;
+                    if (want) {
+                        if (s_hwcfg_samfreq == 384000u || s_hwcfg_samfreq == 352800u) {
+                            s_osf_want    = 1u;
+                            s_osf_applied = 1u;
+                        } else {
+                            /* Refuse. At any other frame clock the modulators
+                             * would be starved by 8x -- silence, not hiss. */
+                            s_osf_want    = 0u;
+                            s_osf_applied = 0u;
+                            s_osf_refusals++;
+                        }
+                    } else {
+                        s_osf_want    = 0u;
+                        s_osf_applied = 0u;
+                    }
+                    /* Land it now rather than waiting for the next mute. */
+                    ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                        (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
+                         (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+                    reply = s_osf_applied;
+                    c[i] <: reply;
+                    c[i] <: s_hwcfg_samfreq;
+                    c[i] <: s_osf_refusals;
+                }
+                else if (cmd == AUDIOHW_CMD_UPS_GET)
+                {
+                    c[i] <: s_osf_applied;
+                    c[i] <: s_hwcfg_samfreq;
+                    c[i] <: s_osf_refusals;
                 }
                 else if(cmd == AUDIOHW_CMD_REGRD)
                 {
@@ -1092,7 +1172,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 {
                     /* AudioHwConfig's unmute just overwrote reg 7; re-assert mute. */
                     ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-                        (ES9219Q_FILTER_SHAPE | ES9219Q_BYPASS_OSF |
+                        (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
                          (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
@@ -1214,6 +1294,32 @@ static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
         uc_audiohw1 <: val;
         //debug_printf("PLL_WRITE\tAddr: 0x%x\t(%d)\tValue: 0x%x\n", reg, reg, val );
     }
+}
+
+/* Report the frame clock tile[1] has configured, so the tile[0] interlock
+ * decides on what the codec actually receives. */
+static inline void DAC_HWCFG_RATE(unsigned samFreq)
+{
+    /* A chanend cannot be initialised in a declaration in XC, so use the
+     * shared channel directly, as DAC_REGWRITE above does. */
+    unsafe {
+        uc_audiohw1 <: AUDIOHW_CMD_HWCFG_RATE;
+        uc_audiohw1 <: samFreq;
+    }
+}
+
+static inline unsigned DAC_UPS_SET(unsigned want)
+{
+    unsigned applied, samfreq, refusals;
+    unsafe {
+        uc_audiohw1 <: AUDIOHW_CMD_UPS_SET;
+        uc_audiohw1 <: want;
+        uc_audiohw1 :> applied;
+        uc_audiohw1 :> samfreq;
+        uc_audiohw1 :> refusals;
+    }
+    (void)samfreq; (void)refusals;
+    return applied;
 }
 
 static inline void DAC_REGWRITE(unsigned reg, unsigned val)
