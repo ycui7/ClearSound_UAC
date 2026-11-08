@@ -98,21 +98,21 @@ int main(void) {
         csd_hb2_process(&hbs, hb_in, 512, hb_out);
 
         int ident_mism = 0;
-        for (int n = 31; n < 512; n++) if (hb_out[2 * n + 1] != hb_in[n - 31]) ident_mism++;
+        for (int n = 40; n < 512; n++) if (hb_out[2 * n] != hb_in[n - 40]) ident_mism++;
 
         int interp_mism = 0;
-        for (int n = 64; n < 512; n++) {   /* history must be full: x[n-63] valid */
+        for (int n = 80; n < 512; n++) {   /* pairs reach x[n-79]: history must be full */
             int64_t acc = 0;
-            for (int q = 0; q <= 63; q++) acc += (int64_t)csd_hb_coef[2 * q] * hb_in[n - q];
+            for (int q = 0; q <= 39; q++) acc += (int64_t)csd_hb_coef[2 * q + 1] * (hb_in[n - q] + hb_in[n - (79 - q)]);
             acc >>= 30;
             if (acc > 2147483647LL) acc = 2147483647LL;
             if (acc < -2147483648LL) acc = -2147483648LL;
-            if (hb_out[2 * n] != (int32_t)acc) interp_mism++;
+            if (hb_out[2 * n + 1] != (int32_t)acc) interp_mism++;
         }
-        printf("halfband identity == x[n-31] %d mismatches of 481  %s\n", ident_mism, ident_mism == 0 ? "PASS" : "FAIL");
-        printf("halfband interp == naive sum %d mismatches of 448  %s\n", interp_mism, interp_mism == 0 ? "PASS" : "FAIL");
+        printf("halfband identity == x[n-40] %d mismatches of 481  %s\n", ident_mism, ident_mism == 0 ? "PASS" : "FAIL");
+        printf("halfband interp == naive sum %d mismatches of 432  %s\n", interp_mism, interp_mism == 0 ? "PASS" : "FAIL");
         if (ident_mism || interp_mism) fail++;
-        printf("halfband multiplies/input    32 (32 symmetric pairs, zeros never loaded)\n");
+        printf("halfband multiplies/input    40 (40 symmetric pairs, zeros never loaded)\n");
     }
 
     /* 5) the folded kernel must be bit-identical to the unfolded convolution */

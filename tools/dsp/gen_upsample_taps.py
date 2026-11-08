@@ -126,12 +126,17 @@ def to_q30(values):
 # the centre, and a symmetric remainder at the odd offsets. Those zeros are the
 # "skip the multiply" property: a generic sinc has none (all 512 taps nonzero),
 # so a zero-skip test there is dead code.
-HB_TAPS = 127          # odd, = 4m-1, so the symmetry point is a tap
+HB_TAPS = 161          # = 4m+1: centre index is EVEN, so the identity branch
+                      # delay is exactly m samples, not m-0.5, and the two phases
+                      # time-align with no fractional-sample error
 
 
-def design_halfband(n=HB_TAPS, atten_db=A_ATTEN_DB):
+HB_ATTEN_DB = 120.0    # stopband target for the interpolation stages
+
+
+def design_halfband(n=HB_TAPS, atten_db=HB_ATTEN_DB):
     """2x halfband: h[centre]=0.5, h[even offset]=0, odd taps = windowed sinc."""
-    assert n % 4 == 3, "halfband length must be 4m-1"
+    assert n % 4 == 1, "halfband length must be 4m+1 (even centre -> integer delay)"
     centre = (n - 1) // 2
     beta = kaiser_beta(atten_db)
     h = [0.0] * n
@@ -151,8 +156,10 @@ def emit_halfband():
     # The identity branch is exactly unity, so the interpolated phase's taps must
     # also sum to 1.0 or the cascade loses gain stage after stage (measured: each
     # stage came out 3.6 dB low before this normalisation).
-    s_even = sum(h[i] for i in range(len(h)) if i % 2 == 0)
-    h = [(v / s_even if i % 2 == 0 else v) for i, v in enumerate(h)]
+    # centre is at an EVEN index here (N = 4m+1), so the interpolated phase is
+    # built from the ODD-indexed taps: those are the ones that must sum to 1.0
+    s_odd = sum(h[i] for i in range(len(h)) if i % 2 == 1)
+    h = [(v / s_odd if i % 2 == 1 else v) for i, v in enumerate(h)]
     q = to_q30(h)
     zeros = sum(1 for v in q if v == 0)
     out = [f"/* 2x halfband, {HB_TAPS} taps: {zeros} exact zeros (even offsets) */",

@@ -45,7 +45,7 @@ void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out
 
 
 /* ---- stage A, structural form: 2x halfband cascade ------------------- */
-#define CSD_HB_HIST 64u
+#define CSD_HB_HIST 84u
 
 typedef struct {
     int32_t hist[CSD_HB_HIST];   /* input history, newest at [0] */

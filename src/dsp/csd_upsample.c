@@ -96,29 +96,28 @@ void csd_hb_reset(csd_hb_state *s) {
 }
 
 void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out) {
-    /* Centre tap sits at index 63 (odd), so the centre aligns with ODD output
-     * samples: those are the identity branch. The interpolated phase is the EVEN
-     * outputs, built from the 64 even-indexed taps -- the odd-indexed ones are
-     * the structural zeros and are never touched.
-     *
-     *   y[2n+1] = x[n]
-     *   y[2n]   = sum_{k=0..63} h[2k] * x[n-k]      (32 symmetric pairs)
+    /* 161 taps (N = 4m+1) with the centre at index 80, an EVEN index. So the
+     * centre aligns with EVEN output samples: those are the identity branch.
+     * The interpolated phase is the ODD outputs, built from the 80 odd-indexed
+     * taps as 40 symmetric pairs; the 80 even-indexed taps are structural zeros.
+     *   y[2n]   = x[n-40]
+     *   y[2n+1] = sum q=0..39  h[2q+1] * (x[n-q] + x[n-79+q])
      */
     for (uint32_t n = 0; n < n_in; n++) {
         for (uint32_t k = CSD_HB_HIST - 1u; k > 0u; k--) s->hist[k] = s->hist[k - 1u];
         s->hist[0] = in[n];
 
         int64_t acc = 0;
-        for (uint32_t k = 0; k < 32u; k++) {   /* h[2k] == h[2*(63-k)] */
-            acc += (int64_t)csd_hb_coef[2u * k]
-                 * ((int64_t)s->hist[k] + (int64_t)s->hist[63u - k]);
+        for (uint32_t q = 0; q < 40u; q++) {
+            acc += (int64_t)csd_hb_coef[2u * q + 1u]
+                 * ((int64_t)s->hist[q] + (int64_t)s->hist[79u - q]);
         }
         acc >>= 30;
         if (acc > 2147483647LL) acc = 2147483647LL;
         if (acc < -2147483648LL) acc = -2147483648LL;
 
-        out[2u * n] = (int32_t)acc;          /* interpolated */
-        out[2u * n + 1u] = s->hist[31];      /* identity, delayed to meet the interp phase */
+        out[2u * n] = s->hist[40];           /* identity, delay 40 = centre/2 */
+        out[2u * n + 1u] = (int32_t)acc;     /* interpolated */
     }
 }
 
@@ -145,5 +144,4 @@ void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
         csd_hb2_process(&c->st[1], tmp, 2u * n_in, tmp2);
         csd_hb2_process(&c->st[2], tmp2, 4u * n_in, out);
     }
-    /* any other rate emits nothing rather than a wrong-rate signal */
 }

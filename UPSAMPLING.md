@@ -31,22 +31,23 @@ routine.
 
 ## 2. Stage A -- 2x halfband, structurally sparse
 
-Kernel: 127 taps, symmetric. Nonzero taps sit at the **even** indices (64 of
-them); the **odd** indices are exact zeros (62 of them) plus the centre tap at
-index 63. That is the property that saves the work: zeros are never loaded.
+Kernel: **161 taps** (N = 4m+1, so the centre index 80 is EVEN and the delay is
+the whole number 40 samples). Nonzero taps sit at the **odd** indices; the
+**even** indices are 80 exact zeros, apart from the centre. That is the property that saves the work: zeros are never loaded.
 
 Phase mapping (this is the part that is easy to get backwards -- the centre index
 63 is ODD, so the identity branch lands on the odd output samples):
 
 ```
-  x[n] ──┬────────────────────────────────────────▶ y[2n+1] = x[n-31]      (identity, delayed 31)
+  x[n] ──┬────────────────────────────────────────▶ y[2n]   = x[n-40]     (identity, delay 40)
          │
-         └──▶ 32 symmetric pairs over h[2k] ───────▶ y[2n]                    (interpolated)
-              sum k=0..31  h[2k] * (x[n-k] + x[n-63+k])
+         └──▶ 40 symmetric pairs over h[2k+1] ─────▶ y[2n+1]                (interpolated)
+              sum q=0..39  h[2q+1] * (x[n-q] + x[n-79+q])
 ```
 
-Cost per input sample per stage: **32 multiplies + 1 delay**, against 127 for a
-generic polyphase 2x. The interpolated taps are normalised so they sum to 1.0,
+Cost per input sample per stage: **40 multiplies + 1 delay**, against 161 for a
+generic polyphase 2x. The kernel is designed to **120 dB** stopband attenuation
+(Kaiser beta 12.27). The interpolated taps are normalised so they sum to 1.0,
 because the identity branch is exactly unity and the two phases must carry equal
 gain.
 
@@ -81,9 +82,9 @@ Folded on its symmetry -- 511 taps become 256 multiplies per output sample:
 
 | path | stage A MAC/s/ch | stage B MAC/s/ch | total MAC/s/ch |
 |------|------------------|------------------|----------------|
-| 48 kHz  | 32 x (48k+96k+192k) = 10.7 M | 256 x 384k = 98.3 M | 109 M |
-| 96 kHz  | 32 x (96k+192k) = 9.2 M     | 98.3 M              | 107 M |
-| 192 kHz | 32 x 192k = 6.1 M           | 98.3 M              | 104 M |
+| 48 kHz  | 40 x (48k+96k+192k) = 13.4 M | 256 x 384k = 98.3 M | 112 M |
+| 96 kHz  | 40 x (96k+192k) = 11.5 M     | 98.3 M              | 110 M |
+| 192 kHz | 40 x 192k = 7.7 M            | 98.3 M              | 106 M |
 
 Stage B dominates: it runs at 384 kHz. A stereo pair is about 218 M MAC/s, i.e.
 roughly a quarter of one 800 MHz XS3 tile before loop overhead -- but this is a
@@ -108,13 +109,16 @@ output assigned not accumulated 0 of 1024 differ from a prefilled buffer
 cascade 192/96/48 kHz           -12.04 dBFS each (unity, all three paths)
 ```
 
-**Image rejection of the halfband cascade is weaker than the prototype's.**
-Measured through the three-stage 48 kHz path with a 10 kHz tone: the 38 kHz spur
-sits 60.6 dB below the tone and the 58 kHz spur 68.0 dB below it, against
-140 dB for the 512-tap prototype. The 127-tap halfband was designed for 80 dB;
-the cascade does not reach it. A longer halfband kernel is the lever, at 2x the
-multiplies per stage for roughly double the length. **This is an open decision:**
-accept ~61 dB with the cheap cascade, or spend taps to get back toward 80 dB.
+**Image rejection: -154.6 dB measured** through the three-stage 48 kHz path with a
+9375 Hz tone (bin 100 of a 4096-point Goertzel at 384 kHz). Every spur at
+k*48k +/- 9.375 kHz sits below -120 dB, so the 120 dB requirement is met with
+margin.
+
+Earlier numbers of -60.6 dB for this same path were **measurement error**, not
+filter behaviour: 10 kHz is 106.67 bins at 384 kHz, so the Goertzel leakage floor
+masqueraded as the image. The give-away was that the figure did not move when the
+kernel changed from 127 taps / 80 dB to 161 taps / 120 dB. Always bin-centre the
+tone.
 
 ## 7. Test inventory
 
