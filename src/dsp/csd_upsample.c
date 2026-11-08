@@ -33,7 +33,7 @@ void csd_up_reset(csd_up_state *s, uint32_t fs_in) {
 }
 
 void csd_up_process(csd_up_state *s, uint32_t fs_in,
-                    const int32_t *in, uint32_t n_in, int32_t *out) {
+                    const int32_t *inbuf, uint32_t n_in, int32_t *outbuf) {
     const uint32_t L = csd_up_ratio(fs_in);
     const int32_t *c = coef_for(fs_in);
     const uint32_t tpp = s->n_hist;
@@ -44,7 +44,7 @@ void csd_up_process(csd_up_state *s, uint32_t fs_in,
     for (n = 0; n < n_in; n++) {
         /* push the new input sample, shifting the history down */
         for (k = tpp - 1u; k > 0u; k--) s->hist[k] = s->hist[k - 1u];
-        s->hist[0] = in[n];
+        s->hist[0] = inbuf[n];
 
         for (j = 0; j < L; j++) {
             int64_t acc = 0;
@@ -54,7 +54,7 @@ void csd_up_process(csd_up_state *s, uint32_t fs_in,
             acc >>= 30;                /* Q30 coefficients */
             if (acc > 2147483647LL) acc = 2147483647LL;
             if (acc < -2147483648LL) acc = -2147483648LL;
-            out[n * L + j] = (int32_t)acc;
+            outbuf[n * L + j] = (int32_t)acc;
         }
     }
 }
@@ -65,14 +65,14 @@ void csd_bl_reset(csd_bl_state *s) {
     s->pos = 0;
 }
 
-void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out) {
+void csd_bl_process(csd_bl_state *s, const int32_t *inbuf, uint32_t n, int32_t *outbuf) {
     /* Symmetric kernel, folded: c[k] == c[TAPS-1-k], so each multiply serves the
      * tap from the front and the tap from the back. 511 taps -> 255 multiplies
      * plus the centre tap, i.e. half the work for identical output. */
     const uint32_t half = CSD_BL_TAPS / 2u;
     uint32_t i, k, i1, i2;
     for (i = 0; i < n; i++) {
-        s->hist[s->pos] = in[i];
+        s->hist[s->pos] = inbuf[i];
         int64_t acc = 0;
         i1 = s->pos;                          /* tap k,     walking back  */
         i2 = (s->pos + 1u) % CSD_BL_TAPS;     /* tap TAPS-1-k, walking fwd */
@@ -85,7 +85,7 @@ void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out
         acc >>= 30;
         if (acc > 2147483647LL) acc = 2147483647LL;
         if (acc < -2147483648LL) acc = -2147483648LL;
-        out[i] = (int32_t)acc;
+        outbuf[i] = (int32_t)acc;
         s->pos = (s->pos + 1u) % CSD_BL_TAPS;
     }
 }
@@ -95,7 +95,7 @@ void csd_hb_reset(csd_hb_state *s) {
     for (uint32_t i = 0; i < CSD_HB_HIST; i++) s->hist[i] = 0;
 }
 
-void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out) {
+void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32_t *outbuf) {
     /* 161 taps (N = 4m+1) with the centre at index 80, an EVEN index. So the
      * centre aligns with EVEN output samples: those are the identity branch.
      * The interpolated phase is the ODD outputs, built from the 80 odd-indexed
@@ -105,7 +105,7 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t 
      */
     for (uint32_t n = 0; n < n_in; n++) {
         for (uint32_t k = CSD_HB_HIST - 1u; k > 0u; k--) s->hist[k] = s->hist[k - 1u];
-        s->hist[0] = in[n];
+        s->hist[0] = inbuf[n];
 
         int64_t acc = 0;
         for (uint32_t q = 0; q < 40u; q++) {
@@ -116,8 +116,8 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t 
         if (acc > 2147483647LL) acc = 2147483647LL;
         if (acc < -2147483648LL) acc = -2147483648LL;
 
-        out[2u * n] = s->hist[40];           /* identity, delay 40 = centre/2 */
-        out[2u * n + 1u] = (int32_t)acc;     /* interpolated */
+        outbuf[2u * n] = s->hist[40];           /* identity, delay 40 = centre/2 */
+        outbuf[2u * n + 1u] = (int32_t)acc;     /* interpolated */
     }
 }
 
@@ -132,16 +132,16 @@ void csd_cascade_reset(csd_cascade_state *c) {
  *   48 kHz    in -> tmp -> tmp2 -> out
  */
 void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
-                         const int32_t *in, uint32_t n_in,
-                         int32_t *out, int32_t *tmp, int32_t *tmp2) {
+                         const int32_t *inbuf, uint32_t n_in,
+                         int32_t *outbuf, int32_t *tmp, int32_t *tmp2) {
     if (fs_in == 192000u) {
-        csd_hb2_process(&c->st[0], in, n_in, out);
+        csd_hb2_process(&c->st[0], inbuf, n_in, outbuf);
     } else if (fs_in == 96000u) {
-        csd_hb2_process(&c->st[0], in, n_in, tmp);
-        csd_hb2_process(&c->st[1], tmp, 2u * n_in, out);
+        csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
+        csd_hb2_process(&c->st[1], tmp, 2u * n_in, outbuf);
     } else if (fs_in == 48000u) {
-        csd_hb2_process(&c->st[0], in, n_in, tmp);
+        csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
         csd_hb2_process(&c->st[1], tmp, 2u * n_in, tmp2);
-        csd_hb2_process(&c->st[2], tmp2, 4u * n_in, out);
+        csd_hb2_process(&c->st[2], tmp2, 4u * n_in, outbuf);
     }
 }

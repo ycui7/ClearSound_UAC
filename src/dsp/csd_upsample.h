@@ -29,7 +29,7 @@ void csd_up_reset(csd_up_state *s, uint32_t fs_in);
 
 /* n_in input frames -> n_in * ratio output frames. out must have room. */
 void csd_up_process(csd_up_state *s, uint32_t fs_in,
-                    const int32_t *in, uint32_t n_in, int32_t *out);
+                    const int32_t *inbuf, uint32_t n_in, int32_t *outbuf);
 
 /* ---- stage B: band limit / noise shaping ---------------------------- */
 typedef struct {
@@ -38,7 +38,7 @@ typedef struct {
 } csd_bl_state;
 
 void csd_bl_reset(csd_bl_state *s);
-void csd_bl_process(csd_bl_state *s, const int32_t *in, uint32_t n, int32_t *out);
+void csd_bl_process(csd_bl_state *s, const int32_t *inbuf, uint32_t n, int32_t *outbuf);
 
 /* Group delay of the band-limit stage, in 384 kHz samples (linear phase). */
 #define CSD_BL_GROUP_DELAY CSD_BL_DELAY
@@ -55,7 +55,7 @@ void csd_hb_reset(csd_hb_state *s);
 /* n_in frames -> 2*n_in frames. Even outputs cost one multiply (centre tap);
  * odd outputs skip the 62 structural zeros and fold the symmetric remainder:
  * 33 multiplies per input sample instead of 127. */
-void csd_hb2_process(csd_hb_state *s, const int32_t *in, uint32_t n_in, int32_t *out);
+void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32_t *outbuf);
 
 /* REPLACEMENT, NOT MIXING. The cascade consumes the channel's incoming samples
  * and produces the ONE stream that is handed to the mixer. The original samples
@@ -73,7 +73,7 @@ typedef struct {
 
 void csd_cascade_reset(csd_cascade_state *c);
 void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
-                         const int32_t *in, uint32_t n_in,
-                         int32_t *out, int32_t *tmp, int32_t *tmp2);
+                         const int32_t *inbuf, uint32_t n_in,
+                         int32_t *outbuf, int32_t *tmp, int32_t *tmp2);
 
 #endif /* CSD_UPSAMPLE_H */

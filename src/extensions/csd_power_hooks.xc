@@ -196,10 +196,20 @@ void csd_PowerAssistantTask(unsafe chanend c_pw)
                      * with idle pinned at 0 while the witness stood still. */
                     static unsigned tr = 0;
                     if ((++tr % 20u) == 1u) {
-                        debug_printf("PWTRACE act=%u frames=%u state=%d idle=%u/%u mclk=%u tick=%u\n",
-                                     csd_pw_host_activity(), csd_pw_host_frames(),
-                                     (int)csd_power_state(), csd_power_idle_ms_dbg(),
-                                     (unsigned)CSD_PW_IDLE_MS, csd_pw_last_mclk(), tr);
+                        unsigned a_  = csd_pw_host_activity();
+                        unsigned f_  = csd_pw_host_frames();
+                        int      st_ = (int)csd_power_state();
+                        unsigned id_ = csd_power_idle_ms_dbg();
+                        unsigned bd_ = CSD_PW_IDLE_MS;
+                        unsigned mc_ = csd_pw_last_mclk();
+                        /* Hoisted rather than inline: this line is only
+                         * reachable on a clean build, and a malformed -D on the
+                         * command line shows up here as a parse error at the
+                         * macro use. Local variables make that readable, and
+                         * keep each debug_printf well inside its argument
+                         * limit. Same prefix so the rig can rejoin the halves. */
+                        debug_printf("PWTRACE act=%u frames=%u state=%d\n", a_, f_, st_);
+                        debug_printf("PWTRACE  idle=%u/%u mclk=%u tick=%u\n", id_, bd_, mc_, tr);
                     }
                 }
 #endif

@@ -11,6 +11,7 @@
 #if PCM_DSP_EN
 
 #include "csd_dsp.h"
+#include "csd_upsample_hook.h"
 #ifdef CSD_GEN_EN
 /* Interface only. csd_gen_core.h -- which carries the ~20 KB generated tables
  * as file-scope statics -- is included by exactly one translation unit,
@@ -238,6 +239,15 @@ static void csd_dsp_clear_state(void)
 
 void csd_dsp_set_rate(unsigned hz)
 {
+#ifdef CSD_UPSAMPLE_EN
+    /* Host rate drives stage A. The output clock is whatever this build actually
+     * configures; CSD_UPS_OUT_HZ lets the board declare it. Declaring anything
+     * other than 384000 leaves the path disarmed rather than guessing. */
+    csd_ups_set_input_rate(hz);
+#  ifdef CSD_UPS_OUT_HZ
+    csd_ups_arm(CSD_UPS_OUT_HZ);
+#  endif
+#endif
     int idx = pick_table(hz);
 
     /* Honour a preset change made while no stream was running. This is the
@@ -668,6 +678,14 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[1]);
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
+#ifdef CSD_UPSAMPLE_EN
+    /* Upsample + band-limit last, after the DSP and after the DoP guard, so DoP
+     * detection and the DSP both still see host-rate frames. No-op (frame
+     * untouched, returns 0) until csd_ups_arm() confirms a 384 kHz output clock.
+     * When the generator is armed its tone is upsampled too, which is what the
+     * acoustic cases want: it exercises the whole chain to the DAC words. */
+    csd_ups_frame(sampsFromUsbToAudio);
+#endif
 #ifdef CSD_GEN_EN
     csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[1]);
