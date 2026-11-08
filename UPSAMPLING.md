@@ -281,7 +281,55 @@ Stated for the later kernel discussion, not as a defect:
 * Group delay is 255 samples of the band limit either way: 0.664 ms at 384 kHz,
   0.723 ms at 352.8 kHz.
 
-### Runtime config option (default OFF)
+### Why the codec is not yet fed 384 kHz: the shared-MCLK coupling
+
+Measured in source, not assumed. `lib_i2s/src/i2s_frame_master_impl.h:17`:
+
+    configure_clock_src_divide(bclk, p_mclk, mclk_bclk_ratio >> 1);
+
+The I2S bit clock is a fixed-ratio divider **of the MCLK pin**, and LRCLK follows
+BCLK. Nothing calls `configure_clock_src` or sets a ClockBlock per rate: the only
+thing that ties the codec's frame clock to the USB stream rate is the frequency
+handed to `sw_pll_fixed_clock(mClk)` -- at `lib_xua/src/core/audiohub/xua_audiohub.xc:1026`
+and again in `csd_AudioHwConfig` (`clearsounddac_board.xc:1769`), where
+`mClk = samFreq * MCLK_MULTIPLIER` for the host's rate.
+
+Consequence: raising MCLK 8x to feed the DAC 384 kHz raises LRCLK on every I2S
+port, so the audio thread is paced 8x faster than the USB stream supplies samples.
+The upsampler already closes that gap on the *data* side (it emits 8 frames per
+input frame), but lib_xua has no way to say "port rate 384 kHz, stream rate
+48 kHz" -- stream rate and port rate are one variable there. Separating them is
+the enabling change, and it is a vendored-library change on the path that carries
+the proven 24-bit/384 kHz bit-perfect result, so it is not made casually.
+
+Until then the option is present, correct, and refuses -- which is the right
+behaviour, because emitting 8x data into a 48 kHz LRCLK is wrong by a factor of
+eight, not merely degraded.
+
+## Persistence
+
+The setting is journalled with the calibration trims in the same 32 B slot, at
+record **version 3**: one checksum, one sequence, one validity gate, so the
+option can never disagree with the trims after a partial write.
+
+- The option word is the slot's trailing word, which sits *after* `chk`. For v3
+  records the checksum is **extended to cover it**; v2 records keep their original
+  six-word checksum and stay verifiable byte for byte. A setting that gates a
+  hardware filter must not be the one unprotected field in the record.
+- Migration is field-by-field against the record's own version, so a v2 board
+  keeps its operator timeout and only gains `ups_en = 0`. Defaulting everything
+  older than current would have thrown away a real setting.
+- The value is adopted only from a record that passed magic, version, payload
+  count, checksum and range gates. Erased flash never becomes boot behaviour.
+- Two `_Static_assert`s pin the slot at 32 bytes and the option word at index 7.
+  The checksum walks the struct as raw words and indexes word 7 directly, so
+  member drift would silently stop protecting calibration -- a passing build would
+  not show it.
+- Only an explicit operator command journals. A rate-change re-grant persists
+  nothing, or every rate change would append a NOR record and fill the
+  128-slot sector.
+
+## Runtime config option (default OFF)
 
 One MIDI/SCPI control turns on XMOS upsampling and the ES9219Q internal FIR
 bypass together:

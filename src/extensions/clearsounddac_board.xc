@@ -26,6 +26,9 @@ extern "C" {
 #include "csd_dsp.h"
 #ifdef CSD_GEN_EN
 #include "csd_gen.h"
+#ifdef CSD_UPSAMPLE_EN
+#include "csd_upsample_hook.h"   /* csd_ups_set_enabled, for the persisted option */
+#endif
 #include "csd_power_state.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
 #include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
                              * caller -- the SQI ports live on this tile. See
@@ -851,8 +854,9 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 }
                 else if (cmd == AUDIOHW_CMD_UPS_SET)
                 {
-                    unsigned want, reply;
+                    unsigned want, persist, reply;
                     c[i] :> want;
+                    c[i] :> persist;
                     if (want) {
                         if (s_hwcfg_samfreq == 384000u || s_hwcfg_samfreq == 352800u) {
                             s_osf_want    = 1u;
@@ -872,6 +876,13 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
                         (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
                          (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+                    /* Persist only on an explicit operator command. Without the
+                     * flag, every rate change that re-granted the option would
+                     * append a NOR record and the 128-slot sector would fill up. */
+                    if (persist) {
+                        csd_trim_ups_set(s_osf_applied);
+                        (void)csd_trim_journal_now(csd_trim_applied_packed());
+                    }
                     reply = s_osf_applied;
                     c[i] <: reply;
                     c[i] <: s_hwcfg_samfreq;
@@ -1308,12 +1319,13 @@ static inline void DAC_HWCFG_RATE(unsigned samFreq)
     }
 }
 
-static inline unsigned DAC_UPS_SET(unsigned want)
+static inline unsigned DAC_UPS_SET(unsigned want, unsigned persist)
 {
     unsigned applied, samfreq, refusals;
     unsafe {
         uc_audiohw1 <: AUDIOHW_CMD_UPS_SET;
         uc_audiohw1 <: want;
+        uc_audiohw1 <: persist;
         uc_audiohw1 :> applied;
         uc_audiohw1 :> samfreq;
         uc_audiohw1 :> refusals;
@@ -1822,6 +1834,21 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
     DAC_REGWRITE(ES9219Q_MASTER_MODE_N_SYNC_CONFIG,
                  (unsigned char)(0x02u |
                      (((mClk == (128u * samFreq)) ? 0x10u : 0x00u))));
+
+    /* Report the frame clock we have actually configured. The upsampling
+     * option's interlock judges this value -- what the codec really receives --
+     * and never the rate the host asked for. */
+    DAC_HWCFG_RATE(samFreq);
+
+#ifdef CSD_UPSAMPLE_EN
+    /* Re-apply the persisted option at every rate change, because a rate change
+     * is exactly when the option becomes legal or illegal again. The codec
+     * replies with what it ACCEPTED; the audio path mirrors that reply, never
+     * the request, so the DSP can never be interpolating while the chip still
+     * has its own FIR engaged. persist=0: a rate change must not append a
+     * journal record. */
+    csd_ups_set_enabled(csd_trim_ups_get() ? DAC_UPS_SET(1u, 0u) : 0u);
+#endif
 
     /* ---- MCLK-change lock guard (owner directive 2026-11-06) -------------
      * Whenever the MCLK frequency changes, the codec must be checked for lock.

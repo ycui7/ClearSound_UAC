@@ -721,7 +721,47 @@ holds the value it is given.
 - On image `.85` the header does not exist: `POWER:TIMEout?` answers
   `-113,'Undefined header'`.
 
-## 19. Current status (2026-11-06)
+## 19. Case 15 — Upsampling option: XMOS 8x with the codec's FIR bypassed
+
+**Asserts.** The option exists, defaults to off, survives a power cycle when set,
+and never engages unless the codec is genuinely being fed a 384 kHz or 352.8 kHz
+frame clock.
+
+**Build note.** The option is compiled in with `-DCSD_UPSAMPLE_EN=1`. Without it
+the rows do not exist. Filter math is qualified offline by
+`tools/dsp/xc_sim/run_sim_qualification.sh`, which must print `IDENTICAL` on both
+the host and the XS3 simulator.
+
+**Why one control.** Enabling is a single decision covering the interpolator and
+the ES9219Q's own oversampling FIR (reg 7 bit 3). 8x data with the chip FIR still
+engaged interpolates twice; the FIR bypassed without 8x data starves the
+modulators. Both produce silence or noise, so the pair cannot be set apart.
+
+**Steps.**
+1. `DIAG:UPSAMPLing:STATe?` at boot, before any command.
+2. `DIAG:UPSAMPLing:STATe 1` at 48 kHz, then `DIAG:UPSAMPLing:STATe?`.
+3. Set the host stream to 384 kHz, repeat step 2.
+4. Power-cycle, `DIAG:UPSAMPLing:STATe?`.
+
+**Reply shape.** `xmos_en,applied,frame_hz,codec_refusals,ups_refusals`. The
+reply is always the resulting state, never the request.
+
+**Pass criterion.**
+- Step 1: `0,0,<frame>,0,0` -- off, with the chip's built-in filter in circuit.
+- Step 2 at 48 kHz: `applied=0` and `codec_refusals` increments by one. This is
+  the interlock working, not a failure: at a 48 kHz frame clock the modulators
+  would be starved by a factor of 8.
+- Step 4: the value set in the last successful `STATe 1` returns.
+- With the option off, the case-06 bit-perfect result must be unchanged, because
+  off means the shipped signal path is untouched.
+
+**Current state (honest).** Steps 2 and 3 both report `applied=0`. lib_xua ties
+the I2S frame clock to the USB stream rate through the shared MCLK, so the codec
+is never fed 384 kHz while the stream is 48 kHz; see UPSAMPLING.md. The refusal
+is the designed behaviour until the output clock is separated from the stream
+rate.
+
+## 20. Current status (2026-11-06)
 
 Measured on the bench. These are results, not intentions.
 
@@ -730,7 +770,7 @@ Measured on the bench. These are results, not intentions.
 - The only TODO is case 05 (DFU). It has never run: no `xdfu` and no
   `dfu-util` are installed, and no DFU command is recorded.
 - Case 06 measured `46,075,904/46,075,904 = 100.0000%` bit-exact. That number
-  is from the gate after the scoring fix described in section 20.
+  is from the gate after the scoring fix described in section 21.
 - Cases 11 and 14 passed, so that image answers `POWER:TIMEout?` and
   `DEBUG:LOOPback?`. Image `.85` rejects both with `-113`.
 
@@ -751,7 +791,7 @@ instrument.**
   and slips 0 at 600 MHz; case 06 PASS with 0 differing bits at 600 MHz; then
   re-measure 800 MHz for no regression.
 
-## 20. Known traps that have produced false results
+## 21. Known traps that have produced false results
 
 Each item below caused a wrong verdict on this bench. Check it before you
 believe a FAIL.
@@ -818,7 +858,7 @@ believe a FAIL.
   is `DACUAC20`; the debug image is `XMOSUAC20`. Matching one spelling made
   every gate of the other shape report "no DAC found".
 
-## 21. Open dependencies
+## 22. Open dependencies
 
 These are the reasons the remaining non-PASS results exist. They are work
 items, not verdicts.

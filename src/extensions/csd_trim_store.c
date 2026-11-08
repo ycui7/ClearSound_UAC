@@ -73,6 +73,7 @@
  * path that already costs tens.
  */
 #include <stdint.h>
+#include <stddef.h>           /* offsetof, for the slot layout asserts below */
 #include "csd_trim_store.h"
 /* deliberately NOT csd_gen.h: this file must not read or write the tile[1]
  * mailbox statics -- see csd_trim_journal_now / csd_trim_boot_load. */
@@ -91,7 +92,12 @@
  * disagree. v1 records fail the version gate and fall back to the documented
  * defaults (0 dB / 0 dB, 300 s), which is the specified behaviour for "no valid
  * persistence found" -- and there are no field units to lose. */
-#define TRIM_VERSION  2u
+/* v3 (upsampling option): the word after chk now carries the upsampling
+ * option in bit 0. It lives after chk, so the checksum is EXTENDED to cover it
+ * for v3 records -- a setting that gates a hardware filter path must not be the
+ * one field in the record that no checksum protects. v2 records keep the
+ * original six-word checksum and are still verifiable byte for byte. */
+#define TRIM_VERSION  3u
 #define TRIM_SLOT_BYTES   32u       /* 8 words: hdr(4) + payload(3) + spare(1) */
 #define TRIM_MAX_SLOTS    128u      /* 4 KiB sector / 32 */
 
@@ -138,8 +144,19 @@ typedef struct {
                                      * transient by spec), but the field can
                                      * hold it without breaking the gate. */
     uint32_t chk;                   /* sum of the six words above it */
-    uint32_t rsvd;
+    uint32_t opt_bits;              /* v3+: bit0 = upsampling option. Covered by
+                                     * slot_checksum() for v3 records; v2 wrote 0
+                                     * here and is not covered, exactly as before. */
 } trim_slot_t;                        /* 32 bytes */
+
+/* The checksum walks this struct as raw words and, for v3, indexes word 7
+ * directly. Any padding or member drift would silently change which bytes are
+ * protected -- a calibration store that quietly stops checking itself is the
+ * worst kind of passing build. Pin the layout at compile time. */
+_Static_assert(sizeof(trim_slot_t) == TRIM_SLOT_BYTES,
+               "trim slot layout drifted from the on-flash size");
+_Static_assert(offsetof(trim_slot_t, opt_bits) == 28u,
+               "option word moved off its checksummed index");
 
 static uint32_t slot_checksum(const trim_slot_t *s)
 {
@@ -150,6 +167,10 @@ static uint32_t slot_checksum(const trim_slot_t *s)
      * store is allowed to be trusted unchecked -- that is how a torn write
      * becomes a silent wrong volume. */
     for (unsigned i = 0; i < 6u; i++) c += w[i];
+    /* v3 moved the option word into the protected set. Older records are
+     * checksummed exactly as their writer computed it, so migrating a record
+     * never turns a valid v2 entry into a rejected one. */
+    if ((s->version_len >> 16) >= 3u) c += w[7];
     return c;
 }
 
@@ -173,6 +194,8 @@ static uint32_t slot_checksum(const trim_slot_t *s)
  * partition does. Silence in flash is not evidence of a good record.
  */
 #define TRIM_VERSION_V1   1u        /* trims only; pw_timeout_s did not exist */
+#define TRIM_VERSION_V2   2u        /* trims + idle timeout; no option word    */
+#define TRIM_OPT_UPS      0x1u      /* opt_bits bit0: XMOS 8x + DAC FIR bypass */
 #define TRIM_PW_DEFAULT_S 300
 
 typedef enum {
@@ -206,7 +229,22 @@ static trim_slot_class_t slot_classify(const trim_slot_t *s)
         if (s->pw_timeout_s < -1 || s->pw_timeout_s > 86400) return TRIM_SLOT_CORRUPT;
         if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return TRIM_SLOT_CORRUPT;
         if (s->trim_r_88 > 0 || s->trim_r_88 < -8192 || (s->trim_r_88 % 32)) return TRIM_SLOT_CORRUPT;
+        /* Only bit0 is defined. Refuse the record rather than invent a meaning
+         * for bits nobody wrote: garbage in a gate word is how a corrupt record
+         * becomes boot behaviour. */
+        if (s->opt_bits & ~TRIM_OPT_UPS) return TRIM_SLOT_CORRUPT;
         return TRIM_SLOT_CURRENT;
+    }
+
+    if (ver == TRIM_VERSION_V2) {
+        /* The immediately preceding layout: trims and timeout, no option word.
+         * Its option word is whatever earlier firmware wrote there, so it is
+         * replaced by the default (option off), never believed. */
+        if (words != 3u) return TRIM_SLOT_CORRUPT;
+        if (s->pw_timeout_s < -1 || s->pw_timeout_s > 86400) return TRIM_SLOT_CORRUPT;
+        if (s->trim_l_88 > 0 || s->trim_l_88 < -8192 || (s->trim_l_88 % 32)) return TRIM_SLOT_CORRUPT;
+        if (s->trim_r_88 > 0 || s->trim_r_88 < -8192 || (s->trim_r_88 % 32)) return TRIM_SLOT_CORRUPT;
+        return TRIM_SLOT_MIGRATED;
     }
 
     if (ver == TRIM_VERSION_V1) {
@@ -272,6 +310,18 @@ void csd_trim_pw_timeout_set(int sec)
 }
 
 int csd_trim_pw_timeout_get(void) { return (int)tr_pw_timeout_s; }
+
+/* Upsampling option, persisted alongside the trims so it survives power-up and
+ * cannot disagree with them. DEFAULT 0 (off) is both the initialiser here and
+ * the migration default for any record that predates the field -- the option
+ * is never adopted from erased flash.
+ *
+ * set() stores only; the caller journals, exactly as the timeout does, so a
+ * rate-change re-grant never appends a record. */
+static volatile unsigned tr_ups_en = 0u;
+
+void csd_trim_ups_set(unsigned on) { tr_ups_en = on ? 1u : 0u; }
+unsigned csd_trim_ups_get(void)    { return tr_ups_en; }
 
 /* No per-field accessors on purpose: these statics are read by the tile[0]
  * server and crossed to tile[1] one word at a time through
@@ -707,11 +757,28 @@ unsigned csd_trim_boot_load(void)
              * absent fields take their defaults instead of whatever the erased
              * flash left in that word. Counted, so a rig can see that a
              * migration took place rather than inferring it from a value. */
-            if ((best->version_len >> 16) < TRIM_VERSION) {
-                tr_pw_timeout_s = TRIM_PW_DEFAULT_S;
-                tr_st_migrated++;
-            } else {
-                tr_pw_timeout_s = best->pw_timeout_s;
+            /* Field-by-field, by the record's OWN version: default only the
+             * fields a record predates, never the ones it legitimately carries.
+             * A blanket "older -> defaults" would discard an operator's stored
+             * idle timeout on the v2 -> v3 step, which is exactly the data loss
+             * the migration path exists to avoid. The timeout became a real
+             * field at v2; the option word only at v3. */
+            {
+                const unsigned bver = best->version_len >> 16;
+                unsigned defaulted_something = 0u;
+                if (bver >= 2u) {
+                    tr_pw_timeout_s = best->pw_timeout_s;
+                } else {
+                    tr_pw_timeout_s = TRIM_PW_DEFAULT_S;
+                    defaulted_something = 1u;
+                }
+                if (bver >= 3u) {
+                    tr_ups_en = best->opt_bits & TRIM_OPT_UPS;
+                } else {
+                    tr_ups_en = 0u;   /* off, never the erased-flash word */
+                    defaulted_something = 1u;
+                }
+                if (defaulted_something) tr_st_migrated++;
             }
             tr_applied_packed = (unsigned)(((unsigned short)best->trim_r_88) << 16)
                               | (unsigned short)best->trim_l_88;
@@ -827,7 +894,7 @@ int csd_trim_journal_now(unsigned packed)
     s->pw_timeout_s = tr_pw_timeout_s;
     tr_applied_packed = packed;          /* publish for the single register writer */
     s->chk         = slot_checksum(s);
-    s->rsvd        = 0u;
+    s->opt_bits    = tr_ups_en ? TRIM_OPT_UPS : 0u;   /* v3: protected by chk */
 
     int ok = rewrote ? tr_rewrite_sector(sector, &res)
                      : tr_append_slot(tr_next_slot, sector, &res);

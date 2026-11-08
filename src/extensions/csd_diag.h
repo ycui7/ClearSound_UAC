@@ -102,7 +102,7 @@ int csd_diag_pw_timeout_get(void);
  * returns what actually happened: applied 1 only when the codec is genuinely
  * being fed a 384 kHz or 352.8 kHz frame clock. get() reports current state
  * without changing it. */
-int  csd_diag_ups_set(unsigned want, unsigned *applied,
+int  csd_diag_ups_set(unsigned want, unsigned persist, unsigned *applied,
                       unsigned *samfreq, unsigned *refusals);
 void csd_diag_ups_get(unsigned *applied, unsigned *samfreq, unsigned *refusals);
 /* Re-run tile[0]'s single volume applier so a trim change reaches regs 15/16.

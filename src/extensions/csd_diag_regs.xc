@@ -257,13 +257,14 @@ int csd_diag_identity_snapshot(csd_id_snapshot_t *snap)
  * takes FSR = frame clock and derives its target rate as FSR/8 (datasheet
  * v1.3 Table 3). A refusal is reported, not hidden: applied comes back 0 and
  * refusals increments. */
-int csd_diag_ups_set(unsigned want, unsigned *applied,
+int csd_diag_ups_set(unsigned want, unsigned persist, unsigned *applied,
                      unsigned *samfreq, unsigned *refusals)
 {
     unsigned a = 0u, sf = 0u, rf = 0u;
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_UPS_SET;
         uc_audiohw_diag <: (want ? 1u : 0u);
+        uc_audiohw_diag <: (persist ? 1u : 0u);
         uc_audiohw_diag :> a;
         uc_audiohw_diag :> sf;
         uc_audiohw_diag :> rf;

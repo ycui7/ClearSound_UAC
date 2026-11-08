@@ -1884,7 +1884,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
         return SCPI_RES_ERR;                /* the file's own idiom */
     }
     unsigned ap = 0u, sf = 0u, rf = 0u;
-    if (!csd_diag_ups_set(enable, &ap, &sf, &rf)) {
+    /* persist=1: an operator command is the only thing that journals the
+     * setting. A rate-change re-grant goes through the codec path with 0. */
+    if (!csd_diag_ups_set(enable, 1u, &ap, &sf, &rf)) {
         SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
         return SCPI_RES_OK;
     }

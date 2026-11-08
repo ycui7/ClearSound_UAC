@@ -75,6 +75,11 @@ void csd_trim_reset_defaults(void);
  * the newest valid record at boot, or the 300 s default. Range: -1..86400;
  * anything outside it makes the record invalid rather than being adopted. */
 void csd_trim_pw_timeout_set(int sec);
+/* Upsampling option (XMOS 8x + ES9219Q FIR bypass), persisted with the trims.
+ * Set is stored-only: the caller must call csd_trim_journal_now() to persist,
+ * so a rate-change re-grant does not append a record. Default off. */
+void     csd_trim_ups_set(unsigned enable);  /* not 'on': reserved word in XC */
+unsigned csd_trim_ups_get(void);
 int  csd_trim_pw_timeout_get(void);
 
 /* The trim pair this store last journalled or adopted, for tile[0]'s single
