@@ -677,14 +677,20 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[1]);
 #endif
-    csd_dsp_frame(sampsFromUsbToAudio);
 #ifdef CSD_UPSAMPLE_EN
-    /* Upsample + band-limit last, after the DSP and after the DoP guard, so DoP
-     * detection and the DSP both still see host-rate frames. No-op (frame
-     * untouched, returns 0) until csd_ups_arm() confirms a 384 kHz output clock.
-     * When the generator is armed its tone is upsampled too, which is what the
-     * acoustic cases want: it exercises the whole chain to the DAC words. */
-    csd_ups_frame(sampsFromUsbToAudio);
+    /* The upsampler IS the DSP in this build: it replaces the stream, it never
+     * adds to it. Armed (codec + I2S confirmed at 384 kHz) it owns the frame and
+     * the EQ path is bypassed, so exactly one stream reaches the mixer.
+     * Disarmed it returns 0 without touching the frame, and the normal DSP path
+     * runs. That ordering is deliberate: a codec that is not at 384 kHz falls
+     * back to the known-good behaviour instead of emitting words at the wrong
+     * rate. DoP detection ran already, on the host-rate frame, so a DSD stream
+     * still passes through byte-exact. */
+    if (!csd_ups_frame(sampsFromUsbToAudio)) {
+        csd_dsp_frame(sampsFromUsbToAudio);
+    }
+#else
+    csd_dsp_frame(sampsFromUsbToAudio);
 #endif
 #ifdef CSD_GEN_EN
     csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);

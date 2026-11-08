@@ -200,7 +200,12 @@ void csd_PowerAssistantTask(unsafe chanend c_pw)
                         unsigned f_  = csd_pw_host_frames();
                         int      st_ = (int)csd_power_state();
                         unsigned id_ = csd_power_idle_ms_dbg();
-                        unsigned bd_ = CSD_PW_IDLE_MS;
+                        /* The configured bound, read at run time. Deliberately
+                         * not CSD_PW_IDLE_MS: the compile-time default is the
+                         * build's intent, this is what the device is actually
+                         * using (it is persisted and restorable), and a trace
+                         * line should report the second. */
+                        int      bd_ = csd_power_get_timeout_sec();
                         unsigned mc_ = csd_pw_last_mclk();
                         /* Hoisted rather than inline: this line is only
                          * reachable on a clean build, and a malformed -D on the
@@ -209,7 +214,7 @@ void csd_PowerAssistantTask(unsafe chanend c_pw)
                          * keep each debug_printf well inside its argument
                          * limit. Same prefix so the rig can rejoin the halves. */
                         debug_printf("PWTRACE act=%u frames=%u state=%d\n", a_, f_, st_);
-                        debug_printf("PWTRACE  idle=%u/%u mclk=%u tick=%u\n", id_, bd_, mc_, tr);
+                        debug_printf("PWTRACE  idle=%u/%us mclk=%u tick=%u\n", id_, (unsigned)bd_, mc_, tr);
                     }
                 }
 #endif

@@ -17,6 +17,21 @@
 extern "C" {
 #endif
 
+/* C and XC give a bare '*' different pointer kinds, so xcc refuses to link the
+ * pair. The diagnostic is explicit:
+ *     Type of symbol csd_ups_frame has mismatch with previous definition
+ *     found:    unsigned pointer, C kind, in csd_ups_channel.c
+ *     previous: unsigned pointer, XC kind, in csd_dsp.xc
+ *     Did you mean to use *unsafe in the xc code to match the * in C?
+ * The implementation is C, so a declaration seen by an XC translation unit has
+ * to spell the pointer the way C does. One macro, both languages, one spelling
+ * of every prototype. */
+#ifdef __XC__
+#  define CSD_UPS_CPTR * unsafe
+#else
+#  define CSD_UPS_CPTR *
+#endif
+
 /* Host stream rate, in Hz. A change resets all filter history. */
 void csd_ups_set_input_rate(unsigned hz);
 
@@ -29,7 +44,7 @@ void csd_ups_reset(void);
 
 /* Process one stereo frame in place. s[0]=L, s[1]=R, Q31.
  * Returns 1 if the frame was rewritten, 0 if it passed through untouched. */
-int csd_ups_frame(unsigned *s);
+int csd_ups_frame(unsigned CSD_UPS_CPTR s);
 
 /* Diagnostics for the SCPI/MIDI surface. */
 unsigned csd_ups_diag_state(void);      /* 1 = armed and active */

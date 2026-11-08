@@ -146,3 +146,90 @@ gcc -O2 -Isrc/dsp -o /tmp/tu tools/dsp/test_upsample.c src/dsp/csd_upsample.c -l
    measurement of THD or noise.
 4. **Rate switching** is not plumbed: an unsupported rate emits nothing rather
    than a wrong-rate signal, and the caller must reset the cascade on rate change.
+
+
+## Scaffold (XC integration) -- 2026-11-07
+
+The upsampler is the DSP in this build. It **replaces** the stream; it never
+adds to it. Exactly one stream per channel reaches the mixer.
+
+### Modules
+
+| File | Language | Role |
+|---|---|---|
+| `src/dsp/csd_upsample.c` / `.h` | C | filter core: halfband cascade, band limit, polyphase reference |
+| `src/dsp/csd_dsp_taps.h` | C | generated Q30 coefficient tables |
+| `src/dsp/csd_ups_channel.c` | C | per-frame glue, delivery queues, arming state |
+| `src/extensions/csd_upsample_hook.h` | C/XC | public prototypes, callable from XC |
+| `src/extensions/csd_upsample.h` | C/XC | forwarding header: `src/dsp` is globbed for sources but is not on the XC include path |
+| `src/extensions/csd_dsp.xc` | XC | the seam, in the audio thread |
+
+### The seam
+
+In the I2S thread, where `csd_dsp_frame()` used to be called unconditionally:
+
+```c
+#ifdef CSD_UPSAMPLE_EN
+    if (!csd_ups_frame(sampsFromUsbToAudio)) {
+        csd_dsp_frame(sampsFromUsbToAudio);
+    }
+#else
+    csd_dsp_frame(sampsFromUsbToAudio);
+#endif
+```
+
+Armed, the upsampler owns the frame and the EQ path is bypassed. Disarmed, it
+returns 0 without touching the frame and the normal DSP path runs. A codec that
+is not at 384 kHz therefore falls back to known-good behaviour rather than
+emitting words at the wrong rate. DoP detection runs before this, on the
+host-rate frame, so a DSD stream still passes through byte-exact.
+
+### Arming contract
+
+`csd_ups_arm(out_hz)` is called from `csd_dsp_set_rate()` with `CSD_UPS_OUT_HZ`.
+Only `384000` enables the path. This is a refusal, not a default: upsampled
+words into a 48 kHz LRCLK are wrong by a factor of 8, which is not a degraded
+result but a corrupt one.
+
+### Build and qualify
+
+```
+bash tools/qualification/build_upsampler.sh      # clean XS3 build, upsampler on
+bash tools/dsp/xc_sim/run_sim_qualification.sh   # XS3 simulator == tester math
+```
+
+### Boundary rules that the toolchain enforces
+
+These are the four things that cost the most time, all of them compiler-checked:
+
+1. `in` and `out` are **reserved in XC**. gcc accepts them, so the host suite
+   stays green while the device build fails. Core parameters are `inbuf` /
+   `outbuf`.
+2. XC alias analysis rejects overlapping arguments (`scratch`, `scratch+4`) and
+   same-object in/out arguments. Every scratch buffer is its own object.
+3. A bare `*` is a **different pointer kind in C and in XC**, so a shared header
+   cannot declare a function implemented in C and called from XC:
+   `Type of symbol csd_ups_frame has mismatch with previous definition ... Did
+   you mean to use *unsafe in the xc code to match the * in C?` The header
+   spells pointers through `CSD_UPS_CPTR`, which is `* unsafe` under `__XC__`.
+4. Because of (3), the state structs must never appear in a signature an XC
+   translation unit sees. That is why the per-frame glue is C
+   (`csd_ups_channel.c`) rather than XC, and why the audio thread crosses into
+   it through plain `int`/`unsigned` only.
+
+Build flags come from a file, not an inline `-D` list: an inline list delivered
+`-DCSD_PW_IDLE_MS=<value>"` with a literal trailing quote, so the macro expanded
+to a string literal and produced parse errors at each use site. `od` on
+`flags.make` confirmed it. The header default is the same number.
+
+### Deferred by agreement
+
+* **Filter kernel design.** The scaffold is fixed; the kernel (stage shapes,
+  coefficients, the 15 kHz roll-off policy in the programme path) is a separate
+  discussion.
+* **Hardware clocking.** The codec and I2S must be configured at 384 kHz
+  independently of the USB stream rate. That is an audiohub/lib_xua matter, not
+  a frame-hook matter. Until it is done the path stays disarmed, by design.
+* **Headroom.** The core saturates at int32. A full-scale random sequence
+  legitimately overshoots the halfband, so full-scale programme material can
+  clip. Decide between headroom and an explicit clip policy with the kernel.
