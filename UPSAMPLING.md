@@ -239,14 +239,35 @@ to a string literal and produced parse errors at each use site. `od` on
 
 Two families, one kernel. `csd_up_out_fs()` is the single source of truth.
 
-| Input | Output | Ratio | Cascade stages |
-|---|---|---|---|
-| 48 000 Hz | 384 000 Hz | 8 | 3 |
-| 96 000 Hz | 384 000 Hz | 4 | 2 |
-| 192 000 Hz | 384 000 Hz | 2 | 1 |
-| 44 100 Hz | 352 800 Hz | 8 | 3 |
-| 88 200 Hz | 352 800 Hz | 4 | 2 |
-| 176 400 Hz | 352 800 Hz | 2 | 1 |
+| Input | Output | Ratio | Stage ratios | Stages |
+|---|---|---|---|---|
+| 48 000 Hz | 384 000 Hz | 8 | 2 . 2 . 2 | 3 |
+| 96 000 Hz | 384 000 Hz | 4 | 2 . 2 . 1 | 3 |
+| 192 000 Hz | 384 000 Hz | 2 | 2 . 1 . 1 | 3 |
+| 44 100 Hz | 352 800 Hz | 8 | 2 . 2 . 2 | 3 |
+| 88 200 Hz | 352 800 Hz | 4 | 2 . 2 . 1 | 3 |
+| 176 400 Hz | 352 800 Hz | 2 | 2 . 1 . 1 | 3 |
+
+Depth is uniform by request and by design: `CSD_UPS_STAGES` is 3 for every rate,
+and `csd_up_stage_plan()` returns the per-rate stage ratios.
+
+**Why a stage is 2x, and why depth needed making explicit.** A halfband's 62
+structural zeros exist only at exactly 2x -- that is what makes stage A cheap
+(40 multiplies per input sample instead of 127). So every real stage must be a
+2x, the total ratio is 2^stages, and integer stage ratios multiplying to the
+total are only 2.2.2, 2.2.1 and 2.1.1. Equal depth therefore means the
+short-rates run **padded stages**: a ratio-1 stage copies, applies no filter and
+adds no group delay, so the filtering that does exist is bit-identical to the
+minimal cascade. Verified: all six rate hashes unchanged by the change.
+
+**Rejected alternative.** Non-integer stage ratios (4 = 4/3 . 3/2 . 2) would
+give uniform depth without padding, but every stage becomes an
+interpolate-then-decite resampler and the halfband zeros disappear -- losing the
+very property that makes stage A cheap. Rejected.
+
+**Per-rate coefficients.** `csd_up_stage()` takes its coefficient pointer from
+the caller and the stage ratio from the plan. Today every stage uses the shared
+halfband table; giving a rate its own set is a table change, not a code change.
 
 **Only MCLK differs between the families.** The coefficient tables, the stage
 count, the band limit and the group delay in samples are all identical. That is

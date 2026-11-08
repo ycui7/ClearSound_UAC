@@ -66,10 +66,29 @@ typedef struct {
 } csd_hb_state;
 
 void csd_hb_reset(csd_hb_state *s);
+
+/* Always this many stages, whatever the rate. Integer stage ratios multiplying
+ * to the total are 2*2*2, 2*2*1 and 2*1*1, so the short-rates run padded
+ * stages: a stage of ratio 1 copies without filtering and adds no delay. See
+ * csd_up_stage_plan(). */
+#define CSD_UPS_STAGES 3u
+
+/* Stage ratios for this input rate, CSD_UPS_STAGES entries, largest first;
+ * 0 if the rate is in neither family. The product equals csd_up_ratio(). */
+const uint32_t *csd_up_stage_plan(uint32_t fs_in);
 /* n_in frames -> 2*n_in frames. Even outputs cost one multiply (centre tap);
  * odd outputs skip the 62 structural zeros and fold the symmetric remainder:
  * 33 multiplies per input sample instead of 127. */
 void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32_t *outbuf);
+
+/* One cascade stage, with the coefficient set supplied by the caller and the
+ * stage ratio taken from the plan. ratio 2 is the halfband (n_in*2 outputs);
+ * ratio 1 is a pass-through copy (n_in outputs, no filtering, no added delay),
+ * which is what lets every rate run the same number of stages. Passing h per
+ * stage is the seam for giving each rate its own coefficients later without
+ * changing the loop that runs them. */
+void csd_up_stage(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in,
+                  int32_t *outbuf, const int32_t *h, uint32_t ratio);
 
 /* REPLACEMENT, NOT MIXING. The cascade consumes the channel's incoming samples
  * and produces the ONE stream that is handed to the mixer. The original samples

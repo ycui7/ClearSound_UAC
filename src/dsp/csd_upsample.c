@@ -113,7 +113,15 @@ void csd_hb_reset(csd_hb_state *s) {
     for (uint32_t i = 0; i < CSD_HB_HIST; i++) s->hist[i] = 0;
 }
 
-void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32_t *outbuf) {
+void csd_up_stage(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in,
+                  int32_t *outbuf, const int32_t *h, uint32_t ratio) {
+    if (ratio == 1u) {
+        /* Padded stage. Pass the samples through: no filtering, no group delay,
+         * and the stage history is left untouched. Uniform depth therefore
+         * costs a copy, not a changed response. */
+        for (uint32_t n = 0; n < n_in; n++) outbuf[n] = inbuf[n];
+        return;
+    }
     /* 161 taps (N = 4m+1) with the centre at index 80, an EVEN index. So the
      * centre aligns with EVEN output samples: those are the identity branch.
      * The interpolated phase is the ODD outputs, built from the 80 odd-indexed
@@ -127,7 +135,7 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32
 
         int64_t acc = 0;
         for (uint32_t q = 0; q < 40u; q++) {
-            acc += (int64_t)csd_hb_coef[2u * q + 1u]
+            acc += (int64_t)h[2u * q + 1u]
                  * ((int64_t)s->hist[q] + (int64_t)s->hist[79u - q]);
         }
         acc >>= 30;
@@ -139,7 +147,43 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32
     }
 }
 
-/* ---------------- 2x cascade: 8x = 3 stages, 4x = 2, 2x = 1 -------------- */
+void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32_t *outbuf) {
+    csd_up_stage(s, inbuf, n_in, outbuf, csd_hb_coef, 2u);
+}
+
+/* Largest ratio first, so the padded 1x stages sit at the end of the chain and
+ * the real filtering happens while the data is still small. */
+const uint32_t *csd_up_stage_plan(uint32_t fs_in) {
+    static const uint32_t plan8[3] = { 2u, 2u, 2u };   /*  8x: 48k/44.1k  */
+    static const uint32_t plan4[3] = { 2u, 2u, 1u };   /*  4x: 96k/88.2k  */
+    static const uint32_t plan2[3] = { 2u, 1u, 1u };   /*  2x: 192k/176.4k */
+    switch (csd_up_ratio(fs_in)) {
+    case 8u: return plan8;
+    case 4u: return plan4;
+    case 2u: return plan2;
+    default: return 0;
+    }
+}
+
+/* ---------------- uniform-depth cascade ---------------------------------
+ *
+ * WHY THE DEPTH IS UNIFORM
+ * A halfband's structural zeros exist only at exactly 2x, so every real stage
+ * must be a 2x and the total ratio is 2^stages. Integer stage ratios that
+ * multiply to the total are therefore:
+ *      8x = 2*2*2      4x = 2*2*1      2x = 2*1*1
+ * Equal depth means the short-rates carry padded stages. A padded stage is a
+ * pass-through copy: no filtering, no added group delay, so the filters that
+ * do exist stay bit-identical to the minimal cascade and the group delay per
+ * rate does not change.
+ *
+ * The alternative -- non-integer stage ratios such as 4 = 4/3 * 3/2 * 2 --
+ * would make every stage an interpolate-then-decite resampler and destroy the
+ * halfband zeros, which is the whole reason stage A is cheap. Rejected.
+ *
+ * Each stage takes its coefficient pointer from the plan, so per-rate
+ * coefficient sets plug in without touching this loop.
+ */
 void csd_cascade_reset(csd_cascade_state *c) {
     for (uint32_t i = 0; i < 3u; i++) csd_hb_reset(&c->st[i]);
 }
@@ -152,25 +196,21 @@ void csd_cascade_reset(csd_cascade_state *c) {
 void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
                          const int32_t *inbuf, uint32_t n_in,
                          int32_t *outbuf, int32_t *tmp, int32_t *tmp2) {
-    /* Stage count comes from the ratio, so both families use this path
-     * unchanged: 176.4 -> 352.8 kHz takes one stage exactly as 192 -> 384 does.
-     * Chosen so no stage writes over samples it still has to read. */
-    switch (csd_up_ratio(fs_in)) {
-    case 2u:
-        csd_hb2_process(&c->st[0], inbuf, n_in, outbuf);
-        break;
-    case 4u:
-        csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
-        csd_hb2_process(&c->st[1], tmp, 2u * n_in, outbuf);
-        break;
-    case 8u:
-        csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
-        csd_hb2_process(&c->st[1], tmp, 2u * n_in, tmp2);
-        csd_hb2_process(&c->st[2], tmp2, 4u * n_in, outbuf);
-        break;
-    default:
-        /* Not a family rate: leave the output buffer alone rather than emit
-         * something at the wrong rate. */
-        break;
+    const uint32_t *plan = csd_up_stage_plan(fs_in);
+    if (plan == 0) return;      /* not a family rate: buffer left untouched */
+
+    /* One loop, CSD_UPS_STAGES iterations, for every rate in both families.
+     * Buffers ping-pong in -> tmp -> tmp2 -> out; each stage reads what the
+     * previous stage wrote and never overwrites samples it still needs. */
+    const int32_t *src = inbuf;
+    int32_t       *dst = tmp;
+    uint32_t n = n_in;
+    for (uint32_t i = 0; i < CSD_UPS_STAGES; i++) {
+        /* The last stage must land in the caller's output buffer. */
+        int32_t *const sink = (i + 1u == CSD_UPS_STAGES) ? outbuf : dst;
+        csd_up_stage(&c->st[i], src, n, sink, csd_hb_coef, plan[i]);
+        n *= plan[i];
+        src = sink;
+        dst = (dst == tmp) ? tmp2 : tmp;
     }
 }

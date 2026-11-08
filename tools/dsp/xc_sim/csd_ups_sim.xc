@@ -132,6 +132,21 @@ int run_all(void)
         expect("family rate is an exact multiple", o == rates[r] * rt);
         expect("family rate is 384k or 352.8k",
                o == 384000u || o == 352800u);
+
+        /* Uniform depth: always CSD_UPS_STAGES entries, and their product must
+         * be the total ratio -- a missing or extra stage would be a rate error
+         * hiding inside the loop. */
+        const uint32_t *plan = csd_up_stage_plan(rates[r]);
+        expect("stage plan exists", plan != 0);
+        if (plan) {
+            uint32_t prod = 1u;
+            for (unsigned i = 0; i < CSD_UPS_STAGES; i++) prod *= plan[i];
+            say("STAGES "); emit(rates[r]); say(":");
+            for (unsigned i = 0; i < CSD_UPS_STAGES; i++) { say(" "); emit(plan[i]); }
+            say("  n="); emit(CSD_UPS_STAGES); nl();
+            expect("stage product equals ratio", prod == rt);
+            expect("stage count is uniform", CSD_UPS_STAGES == 3u);
+        }
     }
 
     /* ---- 3b: a rate in neither family is refused, never approximated ---- */
@@ -143,6 +158,8 @@ int run_all(void)
             if (csd_up_out_fs(bad[i]) != 0u) ok = 0;
         }
         expect("non-family rates are refused", ok);
+        expect("non-family rates have no stage plan",
+               csd_up_stage_plan(44000u) == 0 && csd_up_stage_plan(32000u) == 0);
 
         /* Refusal must leave the buffer alone, not write zeros at a wrong rate. */
         csd_cascade_state c2; csd_cascade_reset(&c2);
