@@ -888,6 +888,16 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     c[i] <: s_hwcfg_samfreq;
                     c[i] <: s_osf_refusals;
                 }
+                else if (cmd == AUDIOHW_CMD_TRIM_UPS_GET)
+                {
+                    /* Same lazy-load guard the timeout read uses: if the store
+                     * has not been loaded yet (no stream, no SCPI query), the
+                     * answer would otherwise be the zero initialiser and the
+                     * option would look unset forever. */
+                    if (csd_trim_status_word(1u) == 0u) (void) csd_trim_boot_load();
+                    unsigned v = csd_trim_ups_get();
+                    c[i] <: v;
+                }
                 else if (cmd == AUDIOHW_CMD_UPS_GET)
                 {
                     c[i] <: s_osf_applied;
@@ -1317,6 +1327,19 @@ static inline void DAC_HWCFG_RATE(unsigned samFreq)
         uc_audiohw1 <: AUDIOHW_CMD_HWCFG_RATE;
         uc_audiohw1 <: samFreq;
     }
+}
+
+/* The persisted option, fetched from the tile that owns the flash store. One
+ * word, one round trip, taken at stream start -- never a bare read of the
+ * tile[0] static from here. */
+static inline unsigned DAC_TRIM_UPS_GET(void)
+{
+    unsigned v = 0u;
+    unsafe {
+        uc_audiohw1 <: AUDIOHW_CMD_TRIM_UPS_GET;
+        uc_audiohw1 :> v;
+    }
+    return v;
 }
 
 static inline unsigned DAC_UPS_SET(unsigned want, unsigned persist)
@@ -1770,6 +1793,38 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * runs. Writer: audiohub core; reader: tile[1] SCPI. */
     csd_mb_note_hwcfg(samFreq, mClk);
 #endif
+#ifdef CSD_UPSAMPLE_EN
+    /* ---- internal rate force (owner directive 2026-11-07) ------------------
+     * With the option on, the DAC runs at the family output rate regardless of
+     * what the host is streaming. Nothing new is invented: this is the same
+     * pair the host-driven path already drives on every rate change --
+     * sw_pll_fixed_clock(mClk) plus the codec register script -- handed the
+     * family values instead. lib_i2s derives BCLK and LRCLK as dividers of the
+     * MCLK pin (i2s_frame_master_impl.h:17), so the whole I2S fabric follows
+     * the one number. Nothing starves: the upsampler emits `ratio` output
+     * frames per input frame, so 8x data at 384 kHz LRCLK comes from a 48 kHz
+     * stream, and the USB feedback endpoint still tells the host 48 kHz.
+     *
+     * Only family input rates force (48/96/192 -> 384k, 44.1/88.2/176.4 ->
+     * 352.8k). Any other rate leaves samFreq and mClk exactly as the host
+     * asked, so the path that passed the 24-bit/384 kHz suite stays bit-for-bit
+     * untouched, and an unknown rate is never silently retimed.
+     *
+     * Accepted side effect: MCLK feeds the whole I2S fabric, so the mic path is
+     * retimed too. The owner has closed the ADC ("forget adc0"). */
+    const unsigned host_hz = samFreq;
+    csd_ups_set_want(DAC_TRIM_UPS_GET());
+    if (csd_ups_get_want()) {
+        const unsigned fam = csd_ups_expected_out_hz(samFreq);
+        if (fam != 0u) {
+            samFreq = fam;                 /* what the codec and I2S see */
+            mClk    = 128u * fam;          /* 49.152 MHz or 45.1584 MHz  */
+        }
+    }
+#else
+    const unsigned host_hz = samFreq;      /* no option: host rate is the rate */
+#endif
+
 #ifdef CSD_IDLE_POWER
     /* The assistant on this tile needs the MCLK the last real configuration
      * used, to hand the codec boot script. It cannot read csd_dsp_get_rate()
@@ -1783,7 +1838,7 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
 #if PCM_DSP_EN
     /* DSP state re-seeds with the new rate family + stream DSD mode.
      * Called from the audiohub core -- same single writer as the frame hook. */
-    csd_dsp_set_rate(samFreq);
+    csd_dsp_set_rate(host_hz);   /* stage A runs at the STREAM rate, not the wire rate */
     csd_dsp_set_dsd(dsdMode);
     csd_dsp_preset_boot();     /* no-op unless -DCSD_DSP_PRESET_DEFAULT=n */
 #endif
@@ -1791,7 +1846,7 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
     /* Display: report the rate to the tile[0] LED state machine (bring-over
      * fd9242e). Replaces the dead AudioHwRemote_LED_Update colour ladder, whose
      * GPIO_WR output was commented out — one display arbiter, one writer. */
-    DAC_LED_RATE(samFreq, dsdMode);
+    DAC_LED_RATE(host_hz, dsdMode);   /* the display means what the host is playing */
     // delay_milliseconds(10);
     {
         unsigned regVal = 0;
@@ -1847,7 +1902,12 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * the request, so the DSP can never be interpolating while the chip still
      * has its own FIR engaged. persist=0: a rate change must not append a
      * journal record. */
-    csd_ups_set_enabled(csd_trim_ups_get() ? DAC_UPS_SET(1u, 0u) : 0u);
+    /* Ask for the FIR bypass exactly when the force took effect: samFreq moved
+     * off the host rate only if the option is on AND the rate is in a family.
+     * Anywhere else the chip keeps its own filter, which is what its input
+     * rate actually needs. The codec's reply, not the request, sets the path. */
+    csd_ups_set_enabled((csd_ups_get_want() && samFreq != host_hz)
+                        ? DAC_UPS_SET(1u, 0u) : 0u);
 #endif
 
     /* ---- MCLK-change lock guard (owner directive 2026-11-06) -------------

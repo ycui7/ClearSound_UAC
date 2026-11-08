@@ -1892,6 +1892,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
     }
     /* Mirror into the audio path only what the codec actually accepted, so the
      * DSP can never be upsampling while the chip still has its own FIR on. */
+    /* Keep the tile[1] intent in step with the operator's command at once;
+     * the journal is the authority and the next stream start re-reads it. */
+    csd_ups_set_want(ap ? enable : 0u);
     csd_ups_set_enabled(ap);
     ups_reply(context);
     return SCPI_RES_OK;

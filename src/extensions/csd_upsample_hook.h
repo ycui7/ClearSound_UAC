@@ -70,6 +70,11 @@ void     csd_ups_set_enabled(unsigned enable);   /* 'on' is a reserved word in X
 unsigned csd_ups_is_enabled(void);
 unsigned csd_ups_diag_refusals(void);   /* enable attempts while not armed */
 
+/* Persisted intent, held on the audio tile. Written by the config path after it
+ * fetches the journal's value over the channel; read by the rate-change force. */
+void     csd_ups_set_want(unsigned w);
+unsigned csd_ups_get_want(void);
+
 #ifdef __cplusplus
 }
 #endif

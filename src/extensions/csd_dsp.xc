@@ -240,13 +240,26 @@ static void csd_dsp_clear_state(void)
 void csd_dsp_set_rate(unsigned hz)
 {
 #ifdef CSD_UPSAMPLE_EN
-    /* Host rate drives stage A. The output clock is whatever this build actually
-     * configures; CSD_UPS_OUT_HZ lets the board declare it. Declaring anything
-     * other than 384000 leaves the path disarmed rather than guessing. */
+    /* Stage A is driven by the STREAM rate; the wire rate is whatever this
+     * input's family dictates, and both sides now derive it from the same
+     * function -- csd_ups_expected_out_hz() is the single source of truth, so
+     * the interpolator and the MCLK the board applies cannot disagree. That
+     * agreement is what makes an 8x rate error impossible rather than merely
+     * unlikely, and it is why the 44.1 family works too: 352.8 kHz needs no
+     * second code path, only a different MCLK.
+     *
+     * CSD_UPS_OUT_HZ remains available as a build-time PIN for bench work
+     * (force one family, refuse the other); it no longer decides the normal
+     * case, which is what previously left the 44.1 family permanently disarmed
+     * in a build pinned to 384000. */
     csd_ups_set_input_rate(hz);
+    unsigned want_out = csd_ups_expected_out_hz(hz);
 #  ifdef CSD_UPS_OUT_HZ
-    csd_ups_arm(CSD_UPS_OUT_HZ);
+    if (want_out != (unsigned)CSD_UPS_OUT_HZ) {
+        want_out = 0u;      /* pinned build: the other family stays disarmed */
+    }
 #  endif
+    csd_ups_arm(want_out);
 #endif
     int idx = pick_table(hz);
 

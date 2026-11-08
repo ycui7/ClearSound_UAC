@@ -46,6 +46,17 @@ static unsigned          s_frames;       /* diagnostic */
 static unsigned s_enabled = 0u;
 static unsigned s_refusals = 0u;
 
+/* The operator's INTENT, kept on the tile that reads it. Deliberately separate
+ * from s_enabled: enabled is what the codec ACCEPTED, want is what the journal
+ * says. Reading the persisted flag directly here would be a cross-tile static
+ * read -- the tile[0] store writes it in csd_trim_boot_load(), which is not
+ * guaranteed to have run before the first stream, and this file's own history
+ * has that exact bug (the trim journal journalled zeros while seq climbed).
+ * tile[1] fetches it over the channel at stream start instead. */
+static volatile unsigned s_want = 0u;
+void     csd_ups_set_want(unsigned w) { s_want = w ? 1u : 0u; }
+unsigned csd_ups_get_want(void)       { return s_want; }
+
 void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
 {
     const unsigned now = enable ? 1u : 0u;

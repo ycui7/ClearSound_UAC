@@ -62,6 +62,7 @@ typedef enum
     AUDIOHW_CMD_UPS_SET,            //enable/disable XMOS upsampling + DAC OSF bypass
     AUDIOHW_CMD_UPS_GET,            //reply {applied, frame clock, refusals}
     AUDIOHW_CMD_HWCFG_RATE,         //tile[1] reports the frame clock just configured
+    AUDIOHW_CMD_TRIM_UPS_GET,       //tile[1] fetches the persisted upsampling intent
     AUDIOHW_CMD_IDENTITY
 } audioHwCmd_t;
 

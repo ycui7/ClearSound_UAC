@@ -11,7 +11,10 @@
 # the cause. The header default CSD_PW_IDLE_MS (300000u) in csd_power.h is the
 # same number, so passing nothing changes behaviour.
 #
-# CSD_UPS_OUT_HZ declares the rate the codec and I2S are configured for. The
+# CSD_UPS_OUT_HZ is deliberately NOT set: the board now derives the wire rate
+# from the input's family (csd_ups_expected_out_hz), so one build serves both
+# the 48-series -> 384 kHz and the 44.1-series -> 352.8 kHz lanes. Define it to
+# pin a bench run to a single family; anything else stays disarmed.
 # upsampler arms only at 384000; any other value leaves the DSP path in charge,
 # rather than emitting upsampled words at the wrong rate.
 #
@@ -34,7 +37,7 @@ export XCC_TARGET_PATH="$XMOS_HOME/targets:$XMOS_TOOL_PATH/targets:$XMOS_TOOL_PA
 export PATH="$XMOS_TOOL_PATH/bin:$PATH"
 
 FLAGS="-DPCM_DSP_EN=1;-DCSD_DIAG_MIDI=1;-DCSD_GEN_EN=1;-DMIXER=1;-DMAX_MIX_COUNT=0;-DCSD_LOOPBACK_TAP;-DSPECIALTYCIRCUITS_RELEASE;-DCSD_IDLE_POWER;-DCSD_PW_TRACE"
-FLAGS="$FLAGS;-DCSD_UPSAMPLE_EN=1;-DCSD_UPS_OUT_HZ=384000"
+FLAGS="$FLAGS;-DCSD_UPSAMPLE_EN=1"
 
 cmake -B build -DEXTRA_BUILD_FLAGS="$FLAGS" </dev/null > /tmp/ups_cmake.log 2>&1 \
   || { echo CMAKE-FAIL; tail -20 /tmp/ups_cmake.log; exit 1; }
