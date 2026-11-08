@@ -52,9 +52,29 @@ void csd_ups_arm(unsigned out_hz);
 /* Clear filter history and the delivery queues. */
 void csd_ups_reset(void);
 
-/* Process one stereo frame in place. s[0]=L, s[1]=R, Q31.
- * Returns 1 if the frame was rewritten, 0 if it passed through untouched. */
-int csd_ups_frame(unsigned CSD_UPS_CPTR s);
+/* ---- wire-rate contract (owner directive 2026-11-08: run at MCLK/128) ----
+ *
+ * UserBufferManagement is called once per HOST PAIR at the stream rate, but
+ * the I2S slots advance at the wire rate (LRCLK = MCLK/128, 384 kHz). One
+ * call cannot span that gap -- writing 8x words into a host-cadence buffer
+ * was the bug that garbled the wire. Two calls close it:
+ *
+ *   csd_ups_host_pair(l, r) -- one host pair IN, at host-pair cadence.
+ *       Runs stage A (halfband cascade) and pushes `ratio` outputs per
+ *       channel into the delivery queues. The frame is left untouched.
+ *
+ *   csd_ups_slot(ch, w)     -- one wire slot OUT, at LRCLK cadence. Pops one
+ *       output for channel ch, band-limits it (stage B), returns the word.
+ *       Returns w unchanged when the path is not active.
+ *
+ *   csd_ups_host_active()   -- 1 when enabled AND armed: the DSP frame path
+ *       must stand down so exactly one stream reaches the wire.
+ *
+ * Words pass by value on purpose: no XC/C pointer-kind disagreement across
+ * translation units (the CSD_UPS_CPTR history above), single machine word. */
+void     csd_ups_host_pair(int l, int r);
+int      csd_ups_slot(unsigned ch, int w);
+unsigned csd_ups_host_active(void);
 
 /* Diagnostics for the SCPI/MIDI surface. */
 unsigned csd_ups_diag_state(void);      /* 1 = armed and active */

@@ -31,7 +31,8 @@ static csd_cascade_state s_casc[2];
 static csd_bl_state      s_bl[2];
 static int32_t           s_q[2][8];      /* expanded samples awaiting delivery */
 static unsigned          s_q_wr[2], s_q_rd[2];
-static unsigned          s_phase;        /* calls since the last input consume */
+static unsigned          s_occ[2];       /* words in each ring, push++ pop-- */
+static int32_t           s_last[2];      /* last emitted word, underrun hold */
 static unsigned          s_in_hz;        /* host stream rate */
 static unsigned          s_out_hz;       /* confirmed I2S/codec rate, 0 = not armed */
 static unsigned          s_bypass;       /* 1 => pass frames through untouched */
@@ -81,9 +82,9 @@ void csd_ups_reset(void)
     csd_bl_reset(&s_bl[1]);
     for (unsigned c = 0; c < 2u; c++) {
         for (unsigned i = 0; i < 8u; i++) s_q[c][i] = 0;
-        s_q_wr[c] = 0u; s_q_rd[c] = 0u;
+        s_q_wr[c] = 0u; s_q_rd[c] = 0u; s_occ[c] = 0u;
+        s_last[c] = 0;
     }
-    s_phase = 0u;
 }
 
 void csd_ups_set_input_rate(unsigned hz)
@@ -117,50 +118,59 @@ void csd_ups_arm(unsigned out_hz)
     }
 }
 
-/* One frame: s[0]=L s[1]=R, both Q31. Returns non-zero when it wrote them, zero
- * when it left the frame alone (disarmed or unsupported rate). */
-int csd_ups_frame(unsigned CSD_UPS_CPTR s)   /* expands to plain '*' in C */
+unsigned csd_ups_host_active(void)
+{
+    /* Same predicate the interlock uses: enabled (codec accepted the OSF
+     * bypass), armed (wire really at the family rate), not bypassing. */
+    return (s_enabled && s_out_hz != 0u && !s_bypass) ? 1u : 0u;
+}
+
+/* One host pair in, at host-pair cadence (called from UserBufferManagement).
+ * Stage A only: the wire words come out of csd_ups_slot at LRCLK cadence.
+ * Balance proof: push `ratio` words per channel per pair; the audiohub loop
+ * pops exactly one word per channel per LRCLK, and one pair arrives every
+ * `ratio` LRCLKs -- occupancy returns to zero right before the next push. */
+void csd_ups_host_pair(int l, int r)
 {
     const unsigned ratio = csd_up_ratio(s_in_hz);
 
-    /* Every output rate is an 8x/4x/2x of a family member, so csd_up_ratio()
-     * already proves the family; s_out_hz must agree with it, which arm()
-     * enforces. Nothing here assumes 384 kHz specifically. */
-    if (!s_enabled) {
-        /* Option off: the DSP path owns the frame. Count an attempt only when
-         * something is clearly mis-wired, so 'off' stays distinguishable from
-         * 'on but refused'. */
-        return 0;
-    }
+    if (!s_enabled) return;               /* option off: nothing to queue */
     if (s_bypass || s_out_hz == 0u || ratio == 0u) {
-        s_refusals++;
-        return 0;                                          /* untouched */
+        s_refusals++;                     /* on but refused: count, no queue */
+        return;
     }
 
-    if (s_phase == 0u) {
-        /* Pull one host frame and expand it into the per-channel queues. */
-        int32_t lin = (int32_t)s[0], rin = (int32_t)s[1];
-        int32_t lo[8], ro[8];
-        int32_t ta0[8], tb0[8], ta1[8], tb1[8];
-        csd_cascade_process(&s_casc[0], s_in_hz, &lin, 1u, lo, ta0, tb0);
-        csd_cascade_process(&s_casc[1], s_in_hz, &rin, 1u, ro, ta1, tb1);
-        for (unsigned i = 0; i < ratio; i++) {
-            s_q[0][s_q_wr[0]] = lo[i]; s_q_wr[0] = (s_q_wr[0] + 1u) & 7u;
-            s_q[1][s_q_wr[1]] = ro[i]; s_q_wr[1] = (s_q_wr[1] + 1u) & 7u;
-        }
+    int32_t lin = (int32_t)l, rin = (int32_t)r;
+    int32_t lo[8], ro[8];
+    int32_t ta0[8], tb0[8], ta1[8], tb1[8];
+    csd_cascade_process(&s_casc[0], s_in_hz, &lin, 1u, lo, ta0, tb0);
+    csd_cascade_process(&s_casc[1], s_in_hz, &rin, 1u, ro, ta1, tb1);
+    for (unsigned i = 0; i < ratio; i++) {
+        s_q[0][s_q_wr[0]] = lo[i]; s_q_wr[0] = (s_q_wr[0] + 1u) & 7u;
+        s_q[1][s_q_wr[1]] = ro[i]; s_q_wr[1] = (s_q_wr[1] + 1u) & 7u;
+        s_occ[0]++; s_occ[1]++;
     }
-
-    /* Hand out one 384 kHz frame, then band-limit it. */
-    for (unsigned c = 0; c < 2u; c++) {
-        int32_t vin  = s_q[c][s_q_rd[c]];
-        int32_t vout = 0;
-        s_q_rd[c] = (s_q_rd[c] + 1u) & 7u;
-        csd_bl_process(&s_bl[c], &vin, 1u, &vout);
-        s[c] = (unsigned)vout;
-    }
-
-    s_phase++;
-    if (s_phase >= ratio) s_phase = 0u;
     s_frames++;
-    return 1;
+}
+
+/* One wire slot out, at LRCLK cadence (called from the audiohub loop, one
+ * channel per slot). Empty ring means the host stalled: hold the last word
+ * rather than emit stale ring memory -- an honest repeat, never a lie. */
+int csd_ups_slot(unsigned ch, int w)
+{
+    if (!csd_ups_host_active()) return w; /* not active: word untouched */
+    if (ch >= 2u)          return w;      /* not our channel */
+
+    if (s_occ[ch] == 0u) {
+        int32_t out = s_last[ch];
+        csd_bl_process(&s_bl[ch], &out, 0u, &out);  /* 0: state untouched */
+        return (int)s_last[ch];
+    }
+    int32_t vin  = s_q[ch][s_q_rd[ch]];
+    int32_t vout = 0;
+    s_q_rd[ch]   = (s_q_rd[ch] + 1u) & 7u;
+    s_occ[ch]--;
+    csd_bl_process(&s_bl[ch], &vin, 1u, &vout);
+    s_last[ch]   = vout;
+    return (int)vout;
 }

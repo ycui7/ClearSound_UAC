@@ -699,8 +699,14 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
      * back to the known-good behaviour instead of emitting words at the wrong
      * rate. DoP detection ran already, on the host-rate frame, so a DSD stream
      * still passes through byte-exact. */
-    if (!csd_ups_frame(sampsFromUsbToAudio)) {
+    if (!csd_ups_host_active()) {
         csd_dsp_frame(sampsFromUsbToAudio);
+    } else {
+        /* Wire-rate path (owner directive 2026-11-08): the pair goes into the
+         * queues; the wire words come out of csd_ups_slot in the audiohub
+         * loop, one per LRCLK slot. samplesOut is NOT rewritten here --
+         * writing 8x words into a host-cadence buffer was the bug. */
+        csd_ups_host_pair((int)sampsFromUsbToAudio[0], (int)sampsFromUsbToAudio[1]);
     }
 #else
     csd_dsp_frame(sampsFromUsbToAudio);

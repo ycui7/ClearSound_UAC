@@ -28,6 +28,11 @@ extern "C" {
 #include "csd_gen.h"
 #ifdef CSD_UPSAMPLE_EN
 #include "csd_upsample_hook.h"   /* csd_ups_set_enabled, for the persisted option */
+#ifdef CSD_UPS_ASYNC
+/* lib_xua audiohub's runtime USB->I2S ratio (xua_audiohub.xc). File scope:
+ * xcc refuses function declarations in local scope. */
+void xua_csd_set_usb_ratio(unsigned r);
+#endif
 #endif
 #include "csd_power_state.h"        /* csd_mb_note_hwcfg: proves the bring-up ran */
 #include "csd_trim_store.h" /* L/R trim persistence: this task is the ONLY
@@ -1916,6 +1921,15 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * rate actually needs. The codec's reply, not the request, sets the path. */
     csd_ups_set_enabled((csd_ups_get_want() && samFreq != host_hz)
                         ? DAC_UPS_SET(1u, 0u) : 0u);
+    /* The wire is the pacer (owner directive 2026-11-08): tell the audiohub
+     * loop to consume one host pair every `ratio` LRCLK frames, so the slot
+     * path emits 8x/4x/2x band-limited words at MCLK/128. Mirrors the codec's
+     * accepted reply, never the request: 1 unless the force actually landed. */
+    {
+        const unsigned fam = csd_ups_expected_out_hz(host_hz);
+        xua_csd_set_usb_ratio(csd_ups_is_enabled() && fam != 0u
+                              ? fam / host_hz : 1u);
+    }
 #endif
 
     /* ---- MCLK-change lock guard (owner directive 2026-11-06) -------------
