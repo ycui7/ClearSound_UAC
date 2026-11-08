@@ -1,29 +1,47 @@
 #include "csd_upsample.h"
 
-/* One table of the three; the ratio picks it. */
-static const int32_t *coef_for(uint32_t fs_in) {
+uint32_t csd_up_out_fs(uint32_t fs_in) {
     switch (fs_in) {
-    case 48000u: return csd_up48_coef;
-    case 96000u: return csd_up96_coef;
-    case 192000u: return csd_up192_coef;
-    default:     return 0;
+    case 48000u:
+    case 96000u:
+    case 192000u: return CSD_DSP_FS_OUT;      /* 48 series  -> 384 kHz   */
+    case 44100u:
+    case 88200u:
+    case 176400u: return CSD_DSP_FS_OUT_441;  /* 44.1 series -> 352.8 kHz */
+    default:      return 0u;                  /* not a family member      */
+    }
+}
+
+/* The prototype is defined per ratio and normalised against its own input
+ * rate, so 44.1 kHz and 48 kHz share the L=8 table exactly as they share the
+ * halfband. Selecting the table by rate instead would silently deny the whole
+ * 44.1 kHz family a prototype. */
+static const int32_t *coef_for(uint32_t fs_in) {
+    switch (csd_up_out_fs(fs_in) / (fs_in ? fs_in : 1u)) {
+    case 8u: return csd_up48_coef;
+    case 4u: return csd_up96_coef;
+    case 2u: return csd_up192_coef;
+    default: return 0;
     }
 }
 
 static uint32_t tpp_for(uint32_t fs_in) {
-    switch (fs_in) {
-    case 48000u: return CSD_UP48_TAPS_PER_PHASE;
-    case 96000u: return CSD_UP96_TAPS_PER_PHASE;
-    case 192000u: return CSD_UP192_TAPS_PER_PHASE;
-    default:     return 0u;
+    switch (csd_up_out_fs(fs_in) / (fs_in ? fs_in : 1u)) {
+    case 8u: return CSD_UP48_TAPS_PER_PHASE;
+    case 4u: return CSD_UP96_TAPS_PER_PHASE;
+    case 2u: return CSD_UP192_TAPS_PER_PHASE;
+    default: return 0u;
     }
 }
 
 uint32_t csd_up_ratio(uint32_t fs_in) {
-    return CSD_DSP_FS_OUT / (fs_in ? fs_in : 1u) == 8u ? 8u
-         : fs_in == 96000u ? 4u
-         : fs_in == 192000u ? 2u
-         : fs_in == 48000u ? 8u : 0u;
+    const uint32_t out = csd_up_out_fs(fs_in);
+    if (out == 0u || fs_in == 0u) return 0u;
+    const uint32_t r = out / fs_in;
+    /* Exact integer ratios only. A rate that divides unevenly is not in a
+     * family, and interpolating it with an 8-tap-phase kernel would be a wrong
+     * answer rather than a degraded one. */
+    return (r == 8u || r == 4u || r == 2u) ? r : 0u;
 }
 
 void csd_up_reset(csd_up_state *s, uint32_t fs_in) {
@@ -121,7 +139,7 @@ void csd_hb2_process(csd_hb_state *s, const int32_t *inbuf, uint32_t n_in, int32
     }
 }
 
-/* ---------------- 2x cascade to 384 kHz ------------------------------ */
+/* ---------------- 2x cascade: 8x = 3 stages, 4x = 2, 2x = 1 -------------- */
 void csd_cascade_reset(csd_cascade_state *c) {
     for (uint32_t i = 0; i < 3u; i++) csd_hb_reset(&c->st[i]);
 }
@@ -134,14 +152,25 @@ void csd_cascade_reset(csd_cascade_state *c) {
 void csd_cascade_process(csd_cascade_state *c, uint32_t fs_in,
                          const int32_t *inbuf, uint32_t n_in,
                          int32_t *outbuf, int32_t *tmp, int32_t *tmp2) {
-    if (fs_in == 192000u) {
+    /* Stage count comes from the ratio, so both families use this path
+     * unchanged: 176.4 -> 352.8 kHz takes one stage exactly as 192 -> 384 does.
+     * Chosen so no stage writes over samples it still has to read. */
+    switch (csd_up_ratio(fs_in)) {
+    case 2u:
         csd_hb2_process(&c->st[0], inbuf, n_in, outbuf);
-    } else if (fs_in == 96000u) {
+        break;
+    case 4u:
         csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
         csd_hb2_process(&c->st[1], tmp, 2u * n_in, outbuf);
-    } else if (fs_in == 48000u) {
+        break;
+    case 8u:
         csd_hb2_process(&c->st[0], inbuf, n_in, tmp);
         csd_hb2_process(&c->st[1], tmp, 2u * n_in, tmp2);
         csd_hb2_process(&c->st[2], tmp2, 4u * n_in, outbuf);
+        break;
+    default:
+        /* Not a family rate: leave the output buffer alone rather than emit
+         * something at the wrong rate. */
+        break;
     }
 }

@@ -29,7 +29,12 @@ gcc -O2 -Wall -x c -Isrc/dsp tools/dsp/xc_sim/csd_ups_sim.xc src/dsp/csd_upsampl
 /tmp/csd_sim_host > /tmp/csd_sim_host.txt || { echo "HOST-RUN-FAILED"; exit 1; }
 cat /tmp/csd_sim_host.txt
 
+# set +u around SetEnv: it references variables the caller has not set, and it
+# exits rather than returning, which "|| true" cannot catch. With set -u active
+# it kills this script silently at that line -- traced with bash -x.
+set +u
 source "$HOME/XMOS/XTC/15.3.0/SetEnv" </dev/null >/dev/null 2>&1 || true
+set -u
 export XMOS_TOOL_PATH="$HOME/XMOS/XTC/15.3.0"; export XMOS_HOME="$HOME/.xmos"
 export XMOS_CMAKE_PATH="$XMOS_TOOL_PATH/build/xcommon_cmake"
 export XCC_DEVICE_PATH="$XMOS_TOOL_PATH/configs:$XMOS_TOOL_PATH/configs/.deprecated"

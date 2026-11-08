@@ -233,3 +233,57 @@ to a string literal and produced parse errors at each use site. `od` on
 * **Headroom.** The core saturates at int32. A full-scale random sequence
   legitimately overshoots the halfband, so full-scale programme material can
   clip. Decide between headroom and an explicit clip policy with the kernel.
+
+
+## Rate families -- 48 series and 44.1 series
+
+Two families, one kernel. `csd_up_out_fs()` is the single source of truth.
+
+| Input | Output | Ratio | Cascade stages |
+|---|---|---|---|
+| 48 000 Hz | 384 000 Hz | 8 | 3 |
+| 96 000 Hz | 384 000 Hz | 4 | 2 |
+| 192 000 Hz | 384 000 Hz | 2 | 1 |
+| 44 100 Hz | 352 800 Hz | 8 | 3 |
+| 88 200 Hz | 352 800 Hz | 4 | 2 |
+| 176 400 Hz | 352 800 Hz | 2 | 1 |
+
+**Only MCLK differs between the families.** The coefficient tables, the stage
+count, the band limit and the group delay in samples are all identical. That is
+structural, not a coincidence: everything is selected by *ratio*, never by rate
+equality, because both families share the ratios 8, 4 and 2.
+
+Consequences of that design, each one compiler- or test-enforced:
+
+* `coef_for()` / `tpp_for()` pick the polyphase prototype by ratio. Picking by
+  rate would silently deny the whole 44.1 kHz family a prototype.
+* `csd_cascade_process()` picks its stage count from `csd_up_ratio()`. Rate
+  equality would have left 44.1 kHz with no path at all.
+* A rate in neither family returns ratio 0 and output rate 0, and the cascade
+  leaves the output buffer **untouched** -- it does not write zeros. Approximate
+  support for a rate that does not divide evenly would be a wrong answer, not a
+  degraded one.
+* `csd_ups_arm()` refuses a cross-family pairing: arming 44.1 kHz material at
+  384 kHz would be a ratio of 8.708, so the path is disabled instead.
+* `csd_ups_expected_out_hz(in_hz)` is what the board code should read to choose
+  MCLK, so the mapping has exactly one home.
+
+### What the identical taps mean at 352.8 kHz
+
+Stated for the later kernel discussion, not as a defect:
+
+* The halfband is normalised against its own output rate, so its image
+  rejection tracks the rate automatically.
+* The 511-tap band limit is a fixed coefficient set designed at 384 kHz with a
+  15 kHz corner. At 352.8 kHz the same coefficients place the corner at
+  15000 x 352.8/384 = 13.78 kHz.
+* Group delay is 255 samples of the band limit either way: 0.664 ms at 384 kHz,
+  0.723 ms at 352.8 kHz.
+
+### Verification
+
+`tools/dsp/xc_sim/run_sim_qualification.sh` -- exit 0 only when the XS3
+simulator report is byte-identical to the tester math. Currently 38 lines,
+covering all six rates, both family mappings, exact-multiple ratios, refusal of
+44 000 / 22 050 / 32 000 / 384 000 as inputs, and buffer-untouched behaviour on
+refusal.

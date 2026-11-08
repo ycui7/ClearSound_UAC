@@ -100,8 +100,10 @@ static void expect(const char *name, int ok)
 int run_all(void)
 {
     /* ---- 1..3: cascade at each supported input rate ---- */
-    const unsigned rates[3] = { 48000u, 96000u, 192000u };
-    for (unsigned r = 0; r < 3u; r++) {
+    /* Both families. The 44.1 kHz side is the new path: same kernel, same
+     * tables, output rate 352800 -- only MCLK differs. */
+    const unsigned rates[6] = { 48000u, 96000u, 192000u, 44100u, 88200u, 176400u };
+    for (unsigned r = 0; r < 6u; r++) {
         csd_cascade_state c;
         csd_cascade_reset(&c);
         int32_t xin[NIN], vout[NOUT_MAX];   /* 'in' is a reserved word in XC */
@@ -112,6 +114,8 @@ int run_all(void)
         for (unsigned i = 0; i < n; i++) vout[i] = 0x7BADF00D;
         csd_cascade_process(&c, rates[r], xin, NIN, vout, ta, tb);
         unsigned long long h = hash_of(vout, n);
+        say("FAMILY "); emit(rates[r]); say(" -> "); emit(csd_up_out_fs(rates[r]));
+        say(" ratio="); emit(csd_up_ratio(rates[r])); nl();
         say("CASCADE "); emit(rates[r]); say(" n="); emit(n);
         say(" hash="); emit(h); say(" head=");
         emit((unsigned)vout[0]); say(","); emit((unsigned)vout[1]);
@@ -120,6 +124,35 @@ int run_all(void)
         int written = 1;
         for (unsigned i = 0; i < n; i++) if (vout[i] == 0x7BADF00D) written = 0;
         expect("cascade all outputs written", written);
+        /* The mapping must be an exact integer multiple, and land on one of the
+         * two family rates -- a rate that divided unevenly is not a family
+         * member and must not be interpolated by an 8-phase kernel. */
+        const unsigned o = csd_up_out_fs(rates[r]);
+        const unsigned rt = csd_up_ratio(rates[r]);
+        expect("family rate is an exact multiple", o == rates[r] * rt);
+        expect("family rate is 384k or 352.8k",
+               o == 384000u || o == 352800u);
+    }
+
+    /* ---- 3b: a rate in neither family is refused, never approximated ---- */
+    {
+        const unsigned bad[4] = { 44000u, 22050u, 32000u, 384000u };
+        int ok = 1;
+        for (unsigned i = 0; i < 4u; i++) {
+            if (csd_up_ratio(bad[i]) != 0u) ok = 0;
+            if (csd_up_out_fs(bad[i]) != 0u) ok = 0;
+        }
+        expect("non-family rates are refused", ok);
+
+        /* Refusal must leave the buffer alone, not write zeros at a wrong rate. */
+        csd_cascade_state c2; csd_cascade_reset(&c2);
+        int32_t bin[8], bout[64], bta[16], btb[32];
+        for (unsigned i = 0; i < 64u; i++) bout[i] = (int32_t)0x5A5A5A5A;
+        for (unsigned i = 0; i < 8u;  i++) bin[i] = (int32_t)(0x11111111u * (i + 1u));
+        csd_cascade_process(&c2, 44000u, bin, 8u, bout, bta, btb);
+        int untouched = 1;
+        for (unsigned i = 0; i < 64u; i++) if (bout[i] != (int32_t)0x5A5A5A5A) untouched = 0;
+        expect("refused rate leaves the buffer alone", untouched);
     }
 
     /* ---- 4: halfband identity phase, exactly x[n-40] ---- */

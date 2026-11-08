@@ -35,8 +35,18 @@ extern "C" {
 /* Host stream rate, in Hz. A change resets all filter history. */
 void csd_ups_set_input_rate(unsigned hz);
 
-/* Confirm the real output clock. 384000 enables the path; anything else
- * disables it and clears state. */
+/* The output rate this input rate must be upsampled to: 384000 for the 48
+ * series (48/96/192 kHz), 352800 for the 44.1 series (44.1/88.2/176.4 kHz), 0
+ * if the rate belongs to neither family. MCLK is the only thing that differs
+ * between families -- the filters and their coefficients are identical -- so
+ * the board code should take its clock choice from here rather than from a
+ * private copy of the table. */
+unsigned csd_ups_expected_out_hz(unsigned in_hz);
+
+/* Confirm the real output clock, as configured by the board. Enables the path
+ * only when out_hz is the family rate for the current input rate; a mismatch
+ * (for example 44.1 kHz material armed at 384 kHz) disables the path and
+ * clears state rather than running at a non-integer ratio. */
 void csd_ups_arm(unsigned out_hz);
 
 /* Clear filter history and the delivery queues. */

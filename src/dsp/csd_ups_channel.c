@@ -37,7 +37,7 @@ static unsigned          s_out_hz;       /* confirmed I2S/codec rate, 0 = not ar
 static unsigned          s_bypass;       /* 1 => pass frames through untouched */
 static unsigned          s_frames;       /* diagnostic */
 
-unsigned csd_ups_diag_state(void) { return (s_out_hz == 384000u && !s_bypass) ? 1u : 0u; }
+unsigned csd_ups_diag_state(void) { return (s_out_hz != 0u && !s_bypass) ? 1u : 0u; }
 unsigned csd_ups_diag_frames(void) { return s_frames; }
 unsigned csd_ups_diag_in_hz(void)  { return s_in_hz; }
 unsigned csd_ups_diag_out_hz(void) { return s_out_hz; }
@@ -62,12 +62,28 @@ void csd_ups_set_input_rate(unsigned hz)
     if (hz != s_in_hz) { s_in_hz = hz; csd_ups_reset(); }
 }
 
+unsigned csd_ups_expected_out_hz(unsigned in_hz)
+{
+    /* One source of truth for the family mapping. The board code calls this to
+     * choose MCLK; this module calls it to validate arming. 384000 for the 48
+     * series, 352800 for the 44.1 series, 0 for anything else. */
+    return (unsigned)csd_up_out_fs((uint32_t)in_hz);
+}
+
 void csd_ups_arm(unsigned out_hz)
 {
     /* Called by the board code once it has actually configured the codec and the
-     * I2S clocks. Anything other than 384 kHz disables the path outright. */
-    if (out_hz != 384000u)      { s_out_hz = 0u;       s_bypass = 1u; csd_ups_reset(); }
-    else if (s_out_hz != 384000u) { s_out_hz = 384000u; s_bypass = 0u; csd_ups_reset(); }
+     * I2S clocks. Two families are acceptable -- 384 kHz and 352.8 kHz -- but the
+     * value must belong to the family the input rate is in. Arming 44.1 kHz
+     * material at 384 kHz would be a ratio of 8.708, not a filter setting: the
+     * path is disabled rather than run at a wrong rate. */
+    const unsigned want = csd_ups_expected_out_hz(s_in_hz);
+    if (out_hz == 0u || (want != 0u && out_hz != want) ||
+        (want == 0u && out_hz != 384000u && out_hz != 352800u)) {
+        s_out_hz = 0u; s_bypass = 1u; csd_ups_reset();
+    } else if (s_out_hz != out_hz) {
+        s_out_hz = out_hz; s_bypass = 0u; csd_ups_reset();
+    }
 }
 
 /* One frame: s[0]=L s[1]=R, both Q31. Returns non-zero when it wrote them, zero
@@ -76,7 +92,10 @@ int csd_ups_frame(unsigned CSD_UPS_CPTR s)   /* expands to plain '*' in C */
 {
     const unsigned ratio = csd_up_ratio(s_in_hz);
 
-    if (s_bypass || s_out_hz != 384000u || ratio == 0u) return 0;   /* untouched */
+    /* Every output rate is an 8x/4x/2x of a family member, so csd_up_ratio()
+     * already proves the family; s_out_hz must agree with it, which arm()
+     * enforces. Nothing here assumes 384 kHz specifically. */
+    if (s_bypass || s_out_hz == 0u || ratio == 0u) return 0;        /* untouched */
 
     if (s_phase == 0u) {
         /* Pull one host frame and expand it into the per-channel queues. */

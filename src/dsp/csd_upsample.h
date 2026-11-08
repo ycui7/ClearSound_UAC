@@ -1,6 +1,7 @@
 /* CSD upsampling DSP core -- portable C, no XMOS or RTOS dependency.
  *
- * Stage A  sinc polyphase interpolator: 48/96/192 kHz -> 384 kHz
+ * Stage A  sinc polyphase interpolator: 48/96/192 kHz -> 384 kHz, and
+ *          44.1/88.2/176.4 kHz -> 352.8 kHz. Same kernel, same taps.
  * Stage B  linear-phase 4th-order-equivalent band limit, corner 15 kHz
  *
  * Coefficients live in csd_dsp_taps.h, generated and property-tested by
@@ -21,8 +22,21 @@ typedef struct {
     uint32_t n_hist;                          /* taps per phase in use       */
 } csd_up_state;
 
-/* Output rate is always CSD_DSP_FS_OUT. Returns the integer ratio (8/4/2),
- * or 0 when the rate is unsupported -- never a silent wrong answer. */
+/* Two families, one kernel. Each input rate has exactly one valid output rate;
+ * the ratio is 8, 4 or 2 in both families, which is why every table and every
+ * stage count below is selected by RATIO rather than by rate.
+ *   48000 / 96000 / 192000  -> 384000
+ *   44100 / 88200 / 176400  -> 352800
+ * Only MCLK differs between the families; the filters are identical. */
+#define CSD_DSP_FS_OUT_441 352800u
+
+/* The one valid output rate for this input rate, or 0 if the rate is not a
+ * member of either family. This is the single source of truth: the board code
+ * uses it to pick MCLK, and the channel module uses it to validate arming. */
+uint32_t csd_up_out_fs(uint32_t fs_in);
+
+/* Integer ratio (8/4/2), or 0 when the rate is unsupported -- never a silent
+ * wrong answer. */
 uint32_t csd_up_ratio(uint32_t fs_in);
 
 void csd_up_reset(csd_up_state *s, uint32_t fs_in);
