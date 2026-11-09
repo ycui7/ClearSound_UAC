@@ -1649,133 +1649,9 @@ static SCPI_FPTR_CMD scpi_result_t diag_i2s_clear(scpi_t *context)
 }
 #endif /* !SPECIALTYCIRCUITS_RELEASE (part 1: MIXer/DIAG:I2S probes) */
 
-/* The loopback tap is a RIG INSTRUMENT and is compiled outside the release
- * gate: bit-exactness at 384 kHz has to be certified against the
- * release-optimised code that ships, and the debug image measured 58% of LRCLK
- * deltas missing their 32-BCLK budget, so it cannot certify timing at all.
- * Gated on CSD_LOOPBACK_TAP alone -- opted into by name, never automatic.
- * DEBUG:I2S? deliberately does NOT escape with it: its producer
+/* DEBUG:I2S? deliberately does NOT escape the release gate: its producer
  * csd_mb_note_i2s_delta is an empty stub in release builds, so the counter
  * would read a clean 0% bad. A number that lies is worse than no number. */
-#ifdef CSD_LOOPBACK_TAP
-/* DEBUG:LOOPback? -> enable,tx_frames
- * DEBUG:LOOPback <0|1>
- * DEBUG:LOOPback:CLEAR -> re-zero the frame counter, keep the arm state
- *
- * Arms the DAC->ADC loopback tap (contract in csd_gen.h). The rig arms,
- * streams the golden 384k/24-bit stimulus, records the capture stream and
- * compares; the counter here is the device-side witness that the tap really
- * ran -- a capture that matches a tap which never executed is the rig
- * echoing itself, so the rig REQUIRES tx_frames to have advanced across the
- * run, not just that bytes matched.
- *
- * Registered under CSD_LOOPBACK_TAP rather than the release gate: the tap is
- * never compiled into a shipping image at all, so the rows cannot leak into
- * one; and a validation build must be able to arm the tap whichever build
- * flavour (debug or release) it was built as, because the both-builds rule
- * applies to this gate too.
- */
-static SCPI_FPTR_CMD scpi_result_t loop_q(scpi_t *context)
-{
-    char buf[2 * 10 + 2];
-    unsigned en = 0, fr = 0, len = 0;
-    csd_mb_loop_get(&en, &fr);
-    const unsigned v[2] = { en, fr };
-    for (unsigned i = 0; i < 2u; i++) {
-        if (i) buf[len++] = ',';
-        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
-        if (n == 0) {
-            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
-            return SCPI_RES_ERR;
-        }
-        len += n;
-    }
-    SCPI_ResultCharacters(context, buf, len);
-    return SCPI_RES_OK;
-}
-
-/* DEBUG:LOOPback:INDEX? -> put_ch[0..3], take_ch[0..3], site0[0..3],
- * site1[0..3], build
- *
- * WHY THIS EXISTS. The tap writes tx[put_index] and reads tx[take_index], and
- * both sides derive their index from source that LOOKS right -- TX uses
- * frameCount+i at its write, RX uses the matching ((frameCount-2)&(per-1))+i
- * -- yet on hardware both captured channels return host R's word and host L
- * never appears, so at least one of those four indices is not what the source
- * says. Nothing in the capture stream can reveal which: a word alone carries no
- * record of the slot it was stored in. Reading the indices out of the device is
- * the only observation that separates "TX stored both channels into one slot"
- * from "RX asked for the wrong slot" from "the half-frame that injects L is not
- * compiled at all" -- and with AUD_TO_USB_RATIO==1 those three need different
- * fixes.
- *
- * site0/site1 are the two TX call sites (first and second half-frame). If only
- * one of them ever counts, only one channel is sampled and the other channel's
- * tx slot is whatever the previous frame left there -- which would reproduce
- * the collapse exactly.
- *
- * 'build' is CSD_LOOPBACK_TAP_BUILD (the tap's source revision), printed so a
- * rig can prove which tap it measured. A stale .xe answering with the OLD
- * row set is otherwise indistinguishable from a fresh one.
- */
-static SCPI_FPTR_CMD scpi_result_t loop_index_q(scpi_t *context)
-{
-    unsigned put_ch[4] = {0}, take_ch[4] = {0}, s0[4] = {0}, s1[4] = {0};
-    unsigned site_word[2] = {0}, tx[2] = {0};
-    csd_mb_loop_get_index(put_ch, take_ch, s0, s1);
-    csd_mb_loop_get_words(site_word, tx);
-    char buf[21 * 10 + 21];
-    unsigned len = 0;
-    const unsigned v[21] = { put_ch[0], put_ch[1], put_ch[2], put_ch[3],
-                             take_ch[0], take_ch[1], take_ch[2], take_ch[3],
-                             s0[0], s0[1], s0[2], s0[3],
-                             s1[0], s1[1], s1[2], s1[3],
-                             (unsigned)CSD_LOOPBACK_TAP_BUILD,
-                             /* 17..20: the WORDS. Counters prove the sites run
-                              * and with which index; they cannot show what the
-                              * site carried. With a constant per-channel
-                              * stimulus these four settle in one read whether
-                              * host L ever reaches samplesOut[0]. */
-                             site_word[0], site_word[1], tx[0], tx[1] };
-    for (unsigned i = 0; i < 21u; i++) {
-        if (i) buf[len++] = ',';
-        unsigned n = fmt_u32(v[i], buf + len, (unsigned)sizeof buf - len);
-        if (n == 0) {
-            SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
-            return SCPI_RES_ERR;
-        }
-        len += n;
-    }
-    SCPI_ResultCharacters(context, buf, len);
-    return SCPI_RES_OK;
-}
-
-static SCPI_FPTR_CMD scpi_result_t loop_set(scpi_t *context)
-{
-    const char *why = "";
-    uint32_t enable = 0;
-    if (!gen_u32(context, "enable", &enable, 0u, 1u, &why)) {
-        /* SCPI_ErrorPush, not SCPI_ErrorPushFormat: the latter is not in the
-         * libscpi build we link, and the mistake only surfaces at xmap -- the
-         * compiler never sees a declaration problem for an extern it trusts. */
-        (void)why;
-        SCPI_ErrorPush(context, SCPI_ERROR_DATA_TYPE_ERROR);
-        return SCPI_RES_ERR;
-    }
-    csd_mb_loop_set_enable(enable);
-    return SCPI_RES_OK;
-}
-
-static SCPI_FPTR_CMD scpi_result_t loop_clear(scpi_t *context)
-{
-    (void)context;
-    /* Re-arm with the same state: set_enable(1) zeroes payload + counter and
-     * leaves the tap armed, which is exactly what a rig wants between runs --
-     * no second command to race with. */
-    csd_mb_loop_set_enable(1u);
-    return SCPI_RES_OK;
-}
-#endif /* CSD_LOOPBACK_TAP */
 
 #ifndef SPECIALTYCIRCUITS_RELEASE   /* reopened: the remainder of the debug
                                      * block stays release-gated exactly as
@@ -1993,13 +1869,6 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "DEBUG:MIXer:DACPeak:CLEAR",.callback = mixer_dacpeak_clear },
     { .pattern = "DEBUG:I2S?",               .callback = diag_i2s_q },
     { .pattern = "DEBUG:I2S:CLEAR",          .callback = diag_i2s_clear },
-#endif
-#ifdef CSD_LOOPBACK_TAP
-    /* Outside the release gate with its callbacks above. */
-    { .pattern = "DEBUG:LOOPback?",          .callback = loop_q },
-    { .pattern = "DEBUG:LOOPback:INDEX?",    .callback = loop_index_q },
-    { .pattern = "DEBUG:LOOPback",           .callback = loop_set },
-    { .pattern = "DEBUG:LOOPback:CLEAR",     .callback = loop_clear },
 #endif
 #ifndef SPECIALTYCIRCUITS_RELEASE   /* reopened: rows below reference callbacks
                                      * that only exist in a debug build */
