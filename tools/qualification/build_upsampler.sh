@@ -38,6 +38,10 @@ export PATH="$XMOS_TOOL_PATH/bin:$PATH"
 
 FLAGS="-DPCM_DSP_EN=1;-DCSD_DIAG_MIDI=1;-DCSD_GEN_EN=1;-DMIXER=1;-DMAX_MIX_COUNT=0;-DSPECIALTYCIRCUITS_RELEASE;-DCSD_IDLE_POWER;-DCSD_PW_TRACE"
 FLAGS="$FLAGS;-DCSD_UPSAMPLE_EN=1;-DCSD_UPS_ASYNC"
+# Optional extra defines from the environment, used by the ADC1 pad-delay
+# sweep (~/.hermes/cache/scratch/pad_sweep.sh). Appended here, never passed
+# inline through the tool layer, per the warning above.
+if [ -n "${CSD_EXTRA_FLAGS:-}" ]; then FLAGS="$FLAGS;${CSD_EXTRA_FLAGS}"; fi
 
 cmake -B build -DEXTRA_BUILD_FLAGS="$FLAGS" </dev/null > /tmp/ups_cmake.log 2>&1 \
   || { echo CMAKE-FAIL; tail -20 /tmp/ups_cmake.log; exit 1; }
