@@ -24,6 +24,8 @@
 #include "csd_dsp_core.h"
 #include <string.h>
 #include <stdint.h>
+#include <xs1.h>   /* 2026-11-10: timerafter builtin for the EQ task's idle
+                    * select (all in-tree timerafter users include this too) */
 #ifdef CSD_DSP_DIAG_SLOTS
 #include <stdio.h>
 #endif
@@ -97,16 +99,105 @@ static struct {
 
 static unsigned next_head(unsigned h, unsigned n) { h++; return h >= n ? 0u : h; }
 
+/* Witnesses for the 384 kHz left-channel EQ fault (2026-11-10). Same rule as
+ * g_csd_bq_* in csd_dsp_bq.c: globals unconditional (the SCPI file does not
+ * receive CSD_EXTRA_FLAGS), increments behind CSD_EQ_DIAG_WITNESS, writer is
+ * the audiohub core only. ubm_calls counts UserBufferManagement entries (the
+ * host-pair delivery cadence); eq_frames/eq_delay_frames count the branches
+ * taken inside csd_dsp_frame; eq_ticks_max is the worst single burst, in
+ * reference (10 ns) ticks, around the two adsp_biquad VPU calls. REVERT:
+ * delete these, the guarded blocks, and the INFO? tail fields they feed. */
+unsigned g_csd_ubm_calls;
+unsigned g_csd_eq_frames;
+unsigned g_csd_eq_delay_frames;
+unsigned g_csd_eq_ticks_max;
+/* Sub-region UBM cost witnesses (2026-11-10): the audiohub loop at 384 kHz
+ * has ZERO compute margin (preset-0 control runs the loop at exactly the
+ * wire rate), so every UBM tick competes with the LRCLK deadline. Totals and
+ * maxima in reference (10 ns) ticks per region: 0 apply_pending, 1 pw_note
+ * pair, 2 gen block, 3 csd_dsp_frame, 4 whole UBM. REVERT with the block
+ * above. */
+unsigned g_csd_ubm_reg_tot[5];
+unsigned g_csd_ubm_reg_max[5];
+
+/* ===================== per-frame EQ relocation (2026-11-10) =================
+ * The audiohub loop generates LRCLK IN SOFTWARE: its compute time IS the wire
+ * rate (preset-0 control measured 383,736 frames/s at 384 kHz, i.e. the loop
+ * body costs ~260.6 reference ticks against the 260.4-tick frame period --
+ * zero margin). The mixer1 task is NOT a second schedule: with MAX_MIX_COUNT=0
+ * it is a synchronous relay INSIDE the per-frame exchange -- audiohub sends
+ * the token (StartSampleTransfer), then blocks in CompleteSampleTransferUsbChans
+ * on inuint(c_aud) until mixer1's GiveSamplesToDevice returns, so compute
+ * placed there serialises with the LRCLK deadline exactly as inline does
+ * (mixer.xc's own instrument documents it: "audio() BLOCKS between sending
+ * this token and getting the sample exchange back, and its I2S port deadline
+ * is the hard one"; ClearSoundDac.xn: the relay is "the dominant term"
+ * inside audio()'s half-frame deadline -- MIXER=0 preset 0 reached 0.9995
+ * capture fill where MIXER=1 sat at 0.764). It must therefore run on its own
+ * task/core, AN02011/AN02014 style: the bit-timed side publishes one word per
+ * channel per frame into a lock-free single-producer/single-consumer ring and
+ * takes back the filtered word; all biquad compute happens in csd_dsp_eq_task
+ * on its own core (tile[1], spawned from USER_MAIN_CORES). The per-slot pop
+ * never blocks and never computes: bounded stores/loads plus counter
+ * increments, nothing else.
+ *
+ * Ring discipline (no drop, no hold, no repeat -- owner rule):
+ *   counters are absolute frame numbers (wrap-safe subtraction);
+ *   a pushed frame is consumed exactly once by the task and emerges exactly
+ *   once on the out ring, in order;
+ *   if the in ring is FULL the task cannot keep up: push and pop are skipped
+ *   as a pair (the frame passes through unfiltered, sequence stays aligned),
+ *   g_csd_eq_overrun asserts -- this is a qualification failure, it must read
+ *   0 in every passing run;
+ *   if the out ring is EMPTY (pipeline fill on enable, or a dead task) the
+ *   frame likewise passes through unfiltered and g_csd_eq_underrun asserts.
+ * Latency: pipeline depth ~1 frame once the task is hot (the task drains
+ * immediately), bounded above by the ring (64 frames = 167 us at 384 kHz).
+ * The unity-kernel gate (CSD_PRESET=2 under -DCSD_EQ_UNITY_KERNEL) is
+ * unaffected by the fill frames because the delta kernel is the identity.
+ *
+ * Cross-thread visibility: same-tile DP-RAM globals driven through the
+ * csd_vol_load/csd_vol_store volatile-pointer accessors already proven in this
+ * file (xcc's single-writer model may otherwise hoist a plain load across the
+ * blocking calls of the streaming loop; the csd_vol_mailbox seqlock in the
+ * same app is the second precedent). Ring DATA words are accessed through
+ * volatile int casts for the same reason; each word is one aligned 32-bit
+ * access, so torn reads are impossible by width.
+ *
+ * The engine's own state (bq_state/bq_c/bq_ready) becomes task-owned: config
+ * and clear are REQUESTS posted by the audio core (csd_eq_cfg_post) and
+ * ADOPTED by the task before it touches the engine -- the same post/adopt
+ * doctrine as csd_dsp_preset_req. CSD_DSP_INLINE_EQ keeps the old inline
+ * branch compiled-out-but-present as the A/B control (the collapsed-rate arm
+ * of this investigation); disabling it is NOT deleting it.
+ *
+ * Storage and entry points live in csd_eq_ring.{h,c}: XC's whole-program
+ * parallel-usage analysis refuses plain globals touched from two par
+ * branches (measured: "use of 'usage.anon.N' violates parallel usage rules"
+ * at main.xc:537), while C statics behind scalar-only function calls are
+ * opaque to it -- the csd_vol_mailbox.c precedent. The per-frame path below
+ * is therefore two C calls (csd_eq_is_engaged + csd_eq_tx) plus two staged
+ * word reads: bounded stores/loads, no compute, no blocking. */
+#include "csd_eq_ring.h"
+
+static void csd_ubm_note(unsigned idx, unsigned a, unsigned b)
+{
+    unsigned d = b - a;
+    g_csd_ubm_reg_tot[idx] += d;
+    if (d > g_csd_ubm_reg_max[idx]) g_csd_ubm_reg_max[idx] = d;
+}
+
 static void csd_dsp_restart(void)
 {
     csd_dsp.head = 0;
     memset(csd_dsp.ring, 0, sizeof csd_dsp.ring);
     /* Re-arm the FIR for the active preset; never leave the FIR preset
-     * silently unfiltered (no degraded-mode bypass). */
-    if (csd_dsp.preset >= CSD_DSP_PRESET_FIR && csd_dsp.rateIdx >= 0)
-        CSD_ENGINE_CONFIG(csd_dsp.rateIdx);
-    else
-        CSD_ENGINE_CLEAR();
+     * silently unfiltered (no degraded-mode bypass). Post-adopt: the engine
+     * now belongs to the EQ task core, so the request goes through the
+     * cfg seq and the task executes config/clear itself (see the relocation
+     * block above). */
+    csd_eq_cfg_post(csd_dsp.preset >= CSD_DSP_PRESET_FIR && csd_dsp.rateIdx >= 0,
+                    csd_dsp.rateIdx >= 0 ? (unsigned)csd_dsp.rateIdx : 0u);
 }
 
 #if !(defined(CSD_GEN_EN) && defined(CSD_GEN_PREMIX))
@@ -199,6 +290,7 @@ void csd_dsp_frame(unsigned *s)
      * already, above, on the host-rate frame. */
 
     unsigned n = csd_dsp.n;
+    unsigned eq_pushed = 0u;   /* 1 = frame handed to the EQ task (it feeds) */
     if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset != 0u) {
         unsigned h = csd_dsp.head;
         if (csd_dsp.preset == 1u) {
@@ -208,25 +300,51 @@ void csd_dsp_frame(unsigned *s)
             const unsigned D = (n - 1u) / 2u;
             unsigned r = h + n - D;
             if (r >= n) r -= n;
+#ifdef CSD_EQ_DIAG_WITNESS
+            g_csd_eq_delay_frames++;
+#endif
             for (unsigned ch = 0; ch < 2; ch++) {
                 int32_t y = csd_dsp.ring[ch][r];      /* 'out' is an XC keyword */
                 csd_dsp.ring[ch][h] = (int32_t)s[ch];
                 s[ch] = (unsigned)y;
             }
             csd_dsp.head = next_head(h, n);
-        } else if (CSD_ENGINE_READY()) {
-            /* FIR preset: bass shelf. Default engine is the vendor biquad (VPU asm,
-             * O(1) per sample, no burst). The fd block engine sits behind
-             * CSD_DSP_ENGINE_FD -- measured ~11.9k ticks per 128-sample block per
-             * channel blows the per-LRCLK budget (~1.56k ticks at 384 kHz) and trips
-             * HandleSampleClock -> syncError, which stops the audiohub loop.
-             * Engine not ready: word passes unfiltered, the pre-existing
-             * degraded-free behaviour, never silently skipped by the resampler. */
+        }
+#ifdef CSD_DSP_INLINE_EQ
+        /* A/B control of the relocation measurement (see block above): the
+         * inline engine cost ~121-154 ticks per frame on the bit-timed loop
+         * and collapsed the software LRCLK from 383,736/s to 255,830/s at
+         * 384 kHz. Disabled by default (owner rule: disabled config stays
+         * with a why-note); define to reproduce the collapsed arm. */
+        else if (CSD_ENGINE_READY()) {
+            timer eqt; unsigned eq0, eq1;
+            eqt :> eq0;
             CSD_ENGINE_FRAME(s);
+            eqt :> eq1;
+            g_csd_eq_frames++;
+            { unsigned d = eq1 - eq0; if (d > g_csd_eq_ticks_max) g_csd_eq_ticks_max = d; }
+        }
+#endif
+        else {
+            /* Relocated EQ (see the relocation block above): ONE C call per
+             * frame does the whole O(1) hand-off -- engaged check, ring
+             * fullness, publish one word per channel, stage the filtered
+             * pair (or the input pair, honestly counted, when the pipeline
+             * is filling). No blocking, no compute. The return + staged
+             * words ARE this frame's wire pair on every path, so the
+             * assignment below is unconditional and bypass stays byte-exact
+             * by construction (identity values come back). */
+            s[0] = csd_eq_handoff(s[0], s[1]);
+            s[1] = csd_eq_stage_r;
+            eq_pushed = csd_eq_pushed;
         }
     }                                            /* else: byte-exact bypass */
 #ifdef CSD_UPSAMPLE_EN
-    csd_ups_feed((int)s[0], (int)s[1]);
+    /* Host-pair feed to the resampler client. Frames handed to the EQ task
+     * are fed there, AFTER filtering (same DSP->resampler order as before);
+     * every other frame (bypass, delay preset, fill/overrun pass-throughs)
+     * is fed here, exactly as before. */
+    if (!eq_pushed) csd_ups_feed((int)s[0], (int)s[1]);
 #endif
 }
 
@@ -294,8 +412,10 @@ void csd_dsp_set_rate(unsigned hz)
     csd_dsp.rateIdx = idx;
     if (idx >= 0) {
         csd_dsp.n = csd_dsp_rates[idx].num_taps;
+        /* Engine config is adopted by the EQ task core (post/adopt, see the
+         * relocation block); the audio core must not touch engine state. */
         if (csd_dsp.preset >= CSD_DSP_PRESET_FIR)
-            CSD_ENGINE_CONFIG(idx);   /* same-core writer; no lock needed */
+            csd_eq_cfg_post(1u, (unsigned)idx);
     }
 }
 
@@ -492,10 +612,18 @@ unsigned csd_dsp_diag_count(void) { return csd_diag_frames; }
 void UserBufferManagement(unsigned sampsFromUsbToAudio[],
                           unsigned sampsFromAudioToUsb[])
 {
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_ubm_calls++;
+    timer ubt; unsigned u0, u1, u2, u3, u4, u5;
+    ubt :> u0;
+#endif
     /* Adopt any preset the diagnostic thread posted, here at a frame boundary
      * where no sample is mid-computation. Only this thread writes csd_dsp.
      * See csd_dsp_set_preset for why the diagnostic thread may not. */
     csd_dsp_apply_pending_preset();
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u1; csd_ubm_note(0, u0, u1);
+#endif
 
 #ifdef CSD_IDLE_POWER
     /* Idle-power stream witness (TODO item 7). MUST stay at the entry, ahead
@@ -512,8 +640,14 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * A NON-ZERO DAC-bound frame is the only honest evidence of a stream:
      * LRCLK toggles with a silent bus. Cost: two compares on the pair, once
      * per frame, at the point where the host stream is actually pulled. */
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u2;
+#endif
     csd_pw_note_host_sample((unsigned)0, (int)sampsFromUsbToAudio[0]);
     csd_pw_note_host_sample((unsigned)1, (int)sampsFromUsbToAudio[1]);
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u3; csd_ubm_note(1, u2, u3);
+#endif
 #endif
 
 #ifdef CSD_DSP_DIAG_SLOTS
@@ -648,6 +782,9 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * NOW, not resurrected as a live wave eight frames after the host
      * returns to PCM. Gating only the emission keeps the cmd/adopted
      * handshake honest while the stream is not the generator's. */
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u2;
+#endif
     csd_gen_apply_pending();
     /* armed counted per frame: the rig measures emit vs suppressed by the
      * DELTA of the firmware's own counters across a stream segment -- the
@@ -662,6 +799,9 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     } else if (armed) {
         csd_gen_note(csd_dsp.dsd ? 1u : 2u);  /* suppressed: DSD vs DoP */
     }
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u3; csd_ubm_note(2, u2, u3);
+#endif
 #endif
 #ifdef CSD_GEN_PREMIX
     /* Mixer build: NOTHING happens here. The wave was summed upstream, on the
@@ -689,7 +829,14 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     /* Single frame path: the DSP runs the pair per its own preset, then
      * hands it to the resampler client (see csd_dsp_frame -- one block
      * engine, two independent clients, neither gates the other). */
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u4;
+#endif
     csd_dsp_frame(sampsFromUsbToAudio);
+#ifdef CSD_EQ_DIAG_WITNESS
+    ubt :> u5; csd_ubm_note(3, u4, u5);
+    csd_ubm_note(4, u0, u5);
+#endif
 #ifdef CSD_GEN_EN
     csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[1]);
@@ -707,6 +854,66 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     sampsFromAudioToUsb[1] = sampsFromUsbToAudio[1];
 #endif
 }
+
+/* ---- the relocated EQ task (see the relocation block above) ----------------
+ * Own core (spawned on tile[1] from USER_MAIN_CORES), own schedule: consume
+ * host pairs from the in ring, run the biquad, publish to the out ring. The
+ * only blocking construct is the idle backoff (a timer wait, so the scheduler
+ * can run the rest of the tile); it is on the EMPTY side and never delays the
+ * bit-timed loop, whose pop path is a pure memory transaction. Engine
+ * config/clear is executed HERE, adopting posted requests -- engine state has
+ * exactly one writer core after adoption. */
+extern void thread_speed(void);
+#ifndef CSD_DSP_INLINE_EQ
+/* Not compiled in the inline A/B arm: there the frame hook writes the EQ
+ * witnesses and a second writer would violate the parallel-usage rules. */
+void csd_dsp_eq_task(void)
+{
+    thread_speed();
+    unsigned applied_seq = 0xFFFFFFFFu, applied_eng = 0xFFFFFFFFu;
+    timer t;
+    unsigned deadline = 0u;
+    while (1) {
+        unsigned seq = csd_eq_cfg_seq_get();
+        unsigned eng = csd_eq_cfg_on_get();
+        if (seq != applied_seq || eng != applied_eng) {
+            applied_seq = seq; applied_eng = eng;
+            if (eng) CSD_ENGINE_CONFIG((int)csd_eq_cfg_idx_get());
+            else     CSD_ENGINE_CLEAR();
+            csd_eq_take_resync();     /* new engine epoch, clean pipeline   */
+            csd_eq_engage(eng && (unsigned)CSD_ENGINE_READY());
+        }
+        if (!csd_eq_take_ready()) {
+            /* Idle backoff (XC select/timerafter): re-seed from the live
+             * timer so a busy phase can never leave a stale deadline that
+             * degrades into a spin; 100 ticks keeps fill latency well under
+             * a frame while yielding the core to the rest of the tile. */
+            t :> deadline;
+            select { case t when timerafter(deadline + 100u) :> void: break; }
+            continue;
+        }
+#ifdef CSD_EQ_DIAG_WITNESS
+        timer eqt; unsigned e0, e1;
+        eqt :> e0;
+#endif
+        unsigned s[2];
+        s[0] = (unsigned)csd_eq_take_l();
+        s[1] = (unsigned)csd_eq_take_r();
+        CSD_ENGINE_FRAME(s);
+        csd_eq_take_commit(s[0], s[1]);
+#ifdef CSD_EQ_DIAG_WITNESS
+        eqt :> e1;
+        g_csd_eq_frames++;
+        { unsigned d = e1 - e0; if (d > g_csd_eq_ticks_max) g_csd_eq_ticks_max = d; }
+#endif
+#ifdef CSD_UPSAMPLE_EN
+        /* Frames that reached the task were filtered here, so the resampler
+         * client is fed AFTER the filter, in order, from here. */
+        csd_ups_feed((int)s[0], (int)s[1]);
+#endif
+    }
+}
+#endif /* !CSD_DSP_INLINE_EQ */
 
 #else /* !PCM_DSP_EN ------------------------------------------------------ */
 

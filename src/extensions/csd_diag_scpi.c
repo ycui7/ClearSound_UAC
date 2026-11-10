@@ -47,7 +47,7 @@
  * silently cut at 43 fields by this cap -- the tail we added was
  * invisible, which reads like 'the firmware did not change'.
  * REVERT: 320, and drop the tail fields. */
-#define REPLY_MAX 640
+#define REPLY_MAX 1024
 
 static unsigned reply_len;      /* bytes emitted by the current command */
 static unsigned reply_truncs;
@@ -55,7 +55,7 @@ static unsigned reply_truncs;
 /* Reply ring, owned here (next to the parser) and pulled byte-by-byte by the
  * XC transport. Overflow drops and counts -- it never blocks, because the
  * consumer is a core that must keep answering the USB endpoint. */
-#define REPLY_BYTES 512
+#define REPLY_BYTES 2048
 static unsigned char rbuf[REPLY_BYTES];
 static unsigned      rwr, rrd;
 static unsigned      reply_drops;
@@ -1844,7 +1844,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     /* 2026-11-10: 352 -> 640 to match REPLY_MAX; snprintf returns the
      * WOULD-BE length, so an undersized buffer here truncates INFO? at
      * ~43 fields. REVERT: 352. */
-    char buf[640];
+    char buf[1216];
     int n = snprintf(buf, sizeof(buf),
                      "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
                      csd_ups_armed(), csd_ups_is_enabled(), csd_ups_get_want(),
@@ -1890,7 +1890,23 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     extern unsigned g_csd_xt_ct, g_csd_xt_in, g_csd_xt_out;
     extern unsigned g_csd_xt_ct_n, g_csd_xt_in_n, g_csd_xt_out_n;
     extern unsigned g_csd_xt_ubm, g_csd_xt_ubm_n, g_csd_xt_ubm_max;
-    if (n > 0 && n < (int)sizeof(buf) - 8 - 28 * 11) {
+    extern unsigned g_csd_ubm_calls, g_csd_eq_frames, g_csd_eq_delay_frames,
+                    g_csd_eq_ticks_max;
+    extern unsigned g_csd_bq_calls[2], g_csd_bq_in_or[2], g_csd_bq_in_last[2];
+    extern unsigned g_csd_bq_out_last[2], g_csd_bq_in_nz[2];
+    extern unsigned g_csd_bq_out_or[2];
+    extern unsigned g_csd_bq_cfg_calls, g_csd_bq_clear_calls;
+    extern unsigned g_csd_lrclk_emit, g_csd_lrclk_ts_min, g_csd_lrclk_ts_max;
+    extern unsigned g_csd_ubm_reg_tot[5], g_csd_ubm_reg_max[5];
+    /* Relocated EQ task witnesses (2026-11-10, csd_dsp.xc): underrun = pop
+     * skipped (pipeline fill on enable, or dead task -- must be transient/0),
+     * overrun = push skipped (EQ task cannot sustain frame rate -- hard
+     * qualification failure, must read 0), occ_high = packed ring
+     * high-water (in << 16 | out), cfg_adopt = engine config adoptions run
+     * by the task. REVERT with the ring. */
+    extern unsigned g_csd_eq_underrun, g_csd_eq_overrun, g_csd_eq_occ_high;
+    extern unsigned g_csd_eq_cfg_adopt;
+    if (n > 0 && n < (int)sizeof(buf) - 8 - 60 * 11) {
         const unsigned ratio = xua_csd_get_usb_ratio();
         unsigned ph = xua_csd_get_mic_phase();
         const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
@@ -1912,7 +1928,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * probes from the end of the reply. */
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
-                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
                        * decimator. Same field COUNT, new meaning, so every
@@ -1942,7 +1960,48 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       g_csd_xfer_n, g_csd_xfer_ticks, g_csd_xfer_max,
                       g_csd_xt_ct, g_csd_xt_in, g_csd_xt_out,
                       g_csd_xt_ct_n, g_csd_xt_in_n, g_csd_xt_out_n,
-                      g_csd_xt_ubm, g_csd_xt_ubm_n, g_csd_xt_ubm_max);
+                      g_csd_xt_ubm, g_csd_xt_ubm_n, g_csd_xt_ubm_max,
+                      /* 16 more (2026-11-10): EQ-path witnesses for the
+                       * 384 kHz left-channel shelf fault. Names (append-only,
+                       * indices 55..70): ubm_calls, eq_frames, eq_delay_frames,
+                       * eq_ticks_max (10 ns ticks, worst burst around the two
+                       * adsp_biquad calls), bq_calls_l, bq_calls_r, bq_in_or_l,
+                       * bq_in_or_r, bq_in_last_l, bq_in_last_r, bq_out_last_l,
+                       * bq_out_last_r, bq_in_nz_l, bq_in_nz_r, bq_cfg_calls,
+                       * bq_clear_calls. Increments are gated by
+                       * CSD_EQ_DIAG_WITNESS (build flag); the globals exist
+                       * always so this file links without the flag. A dead
+                       * channel shows calls advancing with in_or stuck or
+                       * in_nz==0 while the other channel lives.
+                       * REVERT: delete these 16 fields. */
+                      g_csd_ubm_calls, g_csd_eq_frames, g_csd_eq_delay_frames,
+                      g_csd_eq_ticks_max,
+                      g_csd_bq_calls[0], g_csd_bq_calls[1],
+                      g_csd_bq_in_or[0], g_csd_bq_in_or[1],
+                      g_csd_bq_in_last[0], g_csd_bq_in_last[1],
+                      g_csd_bq_out_last[0], g_csd_bq_out_last[1],
+                      g_csd_bq_in_nz[0], g_csd_bq_in_nz[1],
+                      g_csd_bq_cfg_calls, g_csd_bq_clear_calls,
+                      g_csd_bq_out_or[0], g_csd_bq_out_or[1],
+                      g_csd_lrclk_emit, g_csd_lrclk_ts_min,
+                      g_csd_lrclk_ts_max,
+                      /* 10 more (2026-11-10): UBM sub-region cost witnesses
+                       * (indices 76..85): ap_tot,ap_max,pw_tot,pw_max,
+                       * gen_tot,gen_max,dsp_tot,dsp_max,ubm_tot,ubm_max --
+                       * reference (10 ns) ticks; divide tot by xt_ubm_n (or
+                       * ubm_calls) for the mean. REVERT: delete. */
+                      g_csd_ubm_reg_tot[0], g_csd_ubm_reg_max[0],
+                      g_csd_ubm_reg_tot[1], g_csd_ubm_reg_max[1],
+                      g_csd_ubm_reg_tot[2], g_csd_ubm_reg_max[2],
+                      g_csd_ubm_reg_tot[3], g_csd_ubm_reg_max[3],
+                      g_csd_ubm_reg_tot[4], g_csd_ubm_reg_max[4],
+                      /* 4 more (2026-11-10): relocated EQ task witnesses
+                       * (indices 86..89): eq_underrun, eq_overrun,
+                       * eq_occ_high (in<<16|out), eq_cfg_adopt. Passing runs
+                       * require eq_overrun == 0 and eq_underrun transient
+                       * (pipeline fill only). REVERT: delete these 4 fields. */
+                      g_csd_eq_underrun, g_csd_eq_overrun,
+                      g_csd_eq_occ_high, g_csd_eq_cfg_adopt);
     }
     if (n > 0) {
         if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */

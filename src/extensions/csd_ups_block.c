@@ -156,7 +156,18 @@ static void ups_reconfigure(void)
     }
     if (R < 2u || R > CSD_UPS_MAX_RATIO) return;
 
-    const csd_ups_bank_t *bank = &csd_ups_banks[R / 2u - 1u];
+    /* Bank index: the table is ordered {r2, r4, r8} (3 entries) and R is a
+     * power of two, so log2(R)-1 == (R >> 2) maps {2,4,8} -> {0,1,2}.
+     * The previous expression R/2-1 mapped them to {0,1,3}: ratio 8 read
+     * ONE PAST the end of csd_ups_banks[], its num_phases check failed on
+     * garbage, ups_phases stayed 0, every csd_ups_feed refused, and the
+     * wire emitted host words untouched (zero-order hold). Measured on the
+     * 2026-11-10 bench at 48k host: armed=1, ratio=8, blocks=0, pops=0,
+     * refusals +233,725 over the stream -- a tone was audible ONLY as the
+     * 8x-repeated host word. Ratios 4/2 were unaffected, which is why only
+     * the ratio-8 lane never computed. Host-side test_ups_block.py walks
+     * the array directly, so it could never see the C-side mis-indexing. */
+    const csd_ups_bank_t *bank = &csd_ups_banks[R >> 2u];
     if (bank->num_phases != R) return;
     for (unsigned p = 0u; p < R; p++) {
         const csd_ups_phase_t *ph = &bank->phases[p];
@@ -299,7 +310,11 @@ void csd_ups_feed(int l, int r)
      * ratio 8), NOT per slot. The witness counters below exist so the bench
      * can judge it against the LRCLK budget over DIAG:UPSAMPLing:INFO?. */
     const unsigned t0 = csd_ups_now();
-    const csd_ups_bank_t *bank = &csd_ups_banks[R / 2u - 1u];
+    /* Same index rule as ups_reconfigure (see the long comment there):
+     * R>>2 maps {2,4,8} -> {0,1,2}. It MUST match -- if feed indexed a
+     * different bank than the one that was validated and loaded, the
+     * compute would run on the wrong coefficient set. */
+    const csd_ups_bank_t *bank = &csd_ups_banks[R >> 2u];
     const unsigned shift = s_ratio_shift;
     for (unsigned c = 0u; c < 2u; c++) {
         int32_t *q = ups_q[c];

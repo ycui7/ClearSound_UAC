@@ -34,12 +34,48 @@ static const int32_t *bq_c = 0;                              // active coeffs
 static int32_t bq_lsh = 0;
 static int bq_ready = 0;
 
+/* CSD_EQ_UNITY_KERNEL (owner diagnostic 2026-11-10, Stage C of the preset-2
+ * proof): replace the shipped bass-shelf table with a DELTA kernel so the
+ * real EQ code path runs (preset >= 2, CSD_ENGINE_READY, adsp_biquad VPU
+ * call per frame per channel) but is mathematically transparent: y[t]=x[t].
+ * b0 = 2^30 in Q1.30 (lsh 0), every other coefficient zero: the accumulator
+ * is (2^30 * x) >> 30 = x exactly -- no rounding freedom, no state feedback,
+ * no saturation for any int32 input. This is NOT a preset change: numbering
+ * and semantics are untouched (0 off, 1 delay, >=2 loads this engine); a
+ * shipping build simply does not define the flag and the table above is used
+ * verbatim. REVERT: delete this block and the two lines marked UNITY below. */
+#ifdef CSD_EQ_UNITY_KERNEL
+static const int32_t bq_c_unity[5] = { 1 << 30, 0, 0, 0, 0 };
+#endif
+
+/* Witnesses for the 384 kHz left-channel EQ fault (2026-11-10). Globals are
+ * defined UNCONDITIONALLY (csd_diag_scpi.c does not receive CSD_EXTRA_FLAGS,
+ * same rule as g_csd_xfer_* in xua_audiohub.xc); only the increments are
+ * behind CSD_EQ_DIAG_WITNESS. Writers: audiohub core. Reader: diag thread,
+ * informational only. REVERT: delete these and the guarded increments, and
+ * drop the tail fields they feed from DIAG:UPSAMPLing:INFO?. */
+unsigned g_csd_bq_calls[2];      /* adsp_biquad invocations per channel */
+unsigned g_csd_bq_in_or[2];      /* OR of every input word, per channel */
+unsigned g_csd_bq_in_last[2];    /* last input word seen, per channel */
+unsigned g_csd_bq_out_last[2];   /* last output word returned, per channel */
+unsigned g_csd_bq_out_or[2];     /* OR of every output word, per channel */
+unsigned g_csd_bq_in_nz[2];      /* nonzero-input census, per channel */
+unsigned g_csd_bq_cfg_calls;     /* bq_config invocations */
+unsigned g_csd_bq_clear_calls;   /* bq_clear invocations */
+
 void csd_dsp_bq_config(int rate_idx)
 {
     bq_ready = 0;
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_bq_cfg_calls++;
+#endif
     if (rate_idx < 0 || (unsigned)rate_idx >= CSD_BQ_NUM_RATES) return;
     bq_c = csd_dsp_bq_rates[rate_idx].coeffs;
     bq_lsh = csd_dsp_bq_rates[rate_idx].lsh;
+#ifdef CSD_EQ_UNITY_KERNEL
+    bq_c = bq_c_unity;   /* UNITY: diagnostic delta kernel (see above) */
+    bq_lsh = 0;          /* UNITY */
+#endif
     memset(bq_state, 0, sizeof bq_state);
     bq_ready = 1;
 #ifdef CSD_DSP_DEBUG
@@ -49,17 +85,70 @@ void csd_dsp_bq_config(int rate_idx)
 #endif
 }
 
-void csd_dsp_bq_clear(void) { bq_ready = 0; bq_c = 0; }
+void csd_dsp_bq_clear(void) { bq_ready = 0; bq_c = 0;
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_bq_clear_calls++;
+#endif
+}
 int  csd_dsp_bq_ready(void) { return bq_ready; }
 
-/* Filter one stereo frame in place. One VPU call per channel: bounded work,
- * no loop over taps, safe inside the audiohub per-frame budget. */
+/* Filter one stereo frame in place.
+ *
+ * ENGINE COST, measured 2026-11-10 on this board (CSD_EQ_DIAG_WITNESS,
+ * DIAG:UPSAMPLing:INFO? fields eq_ticks_max / xt_ubm): the two per-frame
+ * adsp_biquad VPU asm calls cost ~98 reference (10 ns) ticks -- the UBM
+ * entry measured 87.8 ticks/call with the DSP branch bypassed and 185.8
+ * with it running. At 384 kHz the audiohub loop must complete a frame in
+ * ~2083 core cycles (2.6 us) and the preset-0 control already sits at the
+ * wire rate with no measurable margin, so +1 us of synchronous VPU work
+ * pushes the loop under the rate: the loop (which generates LRCLK in
+ * software) was measured running at 255,830 it/s instead of 384,000, with
+ * LRCLK emits bunched (ts deltas 0..98 instead of a steady cadence). The
+ * codec then free-runs its left channel (a ~93 Hz recovery artifact,
+ * present even with a mathematically transparent delta kernel, i.e. not
+ * filter arithmetic) while the right slot -- which does not straddle the
+ * per-iteration USB exchange -- keeps the tone. That is the 384 kHz
+ * left-channel shelf fault: a per-frame BUDGET overrun, not a data-path
+ * fault (bq_calls_l == bq_calls_r == one word per channel per frame, the
+ * delivery itself is symmetric).
+ *
+ * The scalar C section below is the same DF-I arithmetic the VPU asm
+ * implements (see csd_dsp_bq_selftest: acc = c0*x + c1*s0 + c2*s1 + c3*y1
+ * + c4*y2, y = acc >> (30 - lsh)), at ~1/5 the per-frame cost. VPU asm is
+ * kept behind CSD_DSP_BQ_VPU for offline comparison; it is NOT the default,
+ * because it cannot fit the 384 kHz per-slot budget and the owner rule
+ * forbids dropping or holding samples to make it fit. */
 void csd_dsp_bq_frame(unsigned s[2])
 {
     if (!bq_ready) return;
-    for (unsigned ch = 0; ch < 2; ch++)
+    const int sh = 30 - (int)bq_lsh;               /* Q(1+lsh).30 contract */
+    for (unsigned ch = 0; ch < 2; ch++) {
+#ifdef CSD_EQ_DIAG_WITNESS
+        g_csd_bq_calls[ch]++;
+        g_csd_bq_in_or[ch]  |= s[ch];
+        g_csd_bq_in_last[ch] = s[ch];
+        if (s[ch]) g_csd_bq_in_nz[ch]++;
+#endif
+#ifdef CSD_DSP_BQ_VPU
         s[ch] = (unsigned)adsp_biquad((int32_t)s[ch], (q2_30 *)bq_c,
                                       bq_state[ch], (left_shift_t)bq_lsh);
+#else
+        int32_t *stt = bq_state[ch];
+        int64_t acc = (int64_t)bq_c[0] * (int32_t)s[ch]
+                    + (int64_t)bq_c[1] * stt[0]
+                    + (int64_t)bq_c[2] * stt[1]
+                    + (int64_t)bq_c[3] * stt[2]
+                    + (int64_t)bq_c[4] * stt[3];
+        int32_t y = (int32_t)(acc >> sh);
+        stt[1] = stt[0]; stt[0] = (int32_t)s[ch];
+        stt[3] = stt[2]; stt[2] = y;
+        s[ch] = (unsigned)y;
+#endif
+#ifdef CSD_EQ_DIAG_WITNESS
+        g_csd_bq_out_last[ch] = s[ch];
+        g_csd_bq_out_or[ch] |= s[ch];
+#endif
+    }
 }
 
 #ifdef CSD_DSP_BQ_SELFTEST

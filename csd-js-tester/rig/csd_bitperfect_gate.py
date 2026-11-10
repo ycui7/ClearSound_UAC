@@ -262,10 +262,21 @@ def pin_path():
         gen_off = (gen_mode == 0)
     except Exception:
         gen_off = False
-    scpi("DIAG:DSP:PRESet 0")
+    # 2026-11-10 (preset-2 proof, owner task): the DSP preset is normally
+    # pinned to 0 (bypass). Env CSD_PRESET=2 (set by scratch/run_gate_armed.py
+    # with CSD_PRESET) runs the SAME gate over the FIR preset instead -- the
+    # only legitimate use being a build compiled with -DCSD_EQ_UNITY_KERNEL,
+    # where the coefficient table is a delta (b0=1) so the engine path runs
+    # but must be the identity; TEST1's all-zeros check and TEST2's
+    # zero-differing-bits bar are what PROVE that transparency, nothing here
+    # waives them. A shelf build under CSD_PRESET=2 fails the gate -- by
+    # design. REVERT: delete the getenv line and restore "DIAG:DSP:PRESet 0"
+    # / dsp_off.
+    want_preset = os.environ.get("CSD_PRESET", "0").strip() or "0"
+    scpi("DIAG:DSP:PRESet %s" % want_preset)
     p = scpi("DIAG:DSP:PRESet?")
-    log(f"  DIAG:DSP:PRESet?       : {p}")
-    dsp_off = p.strip().split(",")[0].strip() in ("0", "none", "NONE")
+    log(f"  DIAG:DSP:PRESet?       : {p}   (asked {want_preset})")
+    dsp_off = p.strip().split(",")[0].strip() == want_preset
     nvol, bad = set_host_volume_max()
     log(f"  ALSA Playback Volume   : set {nvol} controls to max; "
         f"non-max/muted left: {bad if bad else 'none'}")

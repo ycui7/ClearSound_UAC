@@ -11,6 +11,9 @@
  *  Called from the audiohub sample-exchange BEFORE the frame reaches I2S.
  *  s[] holds linear PCM two's-complement words (bit order as received). */
 void csd_dsp_frame(unsigned *s);
+/* Per-frame EQ task: own core, SPSC rings with UserBufferManagement (see the
+ * relocation block in csd_dsp.xc). Spawned on tile[1] by USER_MAIN_CORES. */
+void csd_dsp_eq_task(void);
 
 /** (Re)select the tap table for a sample rate (Hz, nearest supported wins).
  *  Resets state; call on every sample-rate change. */

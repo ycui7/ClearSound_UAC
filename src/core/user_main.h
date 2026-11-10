@@ -50,7 +50,8 @@ extern unsafe chanend uc_audiohw_diag;
  * core of its own. Removing the declaration alone would not free anything --
  * the par() entry below is what allocates the logical core, which is why that
  * entry is deleted too. */
-#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend);
+#define USER_MAIN_FUNCTION_DECLARATIONS     extern void process_xscope(chanend);\
+                                            extern void csd_dsp_eq_task(void);
 
                                             // on tile[0]: in buffered port:1 p_butt_up    = PORT_BUTTON_UP; \
                                             // on tile[0]: in buffered port:1 p_butt_down  = PORT_BUTTON_DOWN; 
@@ -139,6 +140,29 @@ extern unsafe chanend uc_audiohw_diag;
 #define CSD_PW_TILE1_ENTRY
 #endif
 
+/* Relocated per-frame EQ (2026-11-10): the biquad cannot live on the
+ * audiohub core -- that loop GENERATES LRCLK in software (preset-0 control
+ * 383,736/s at 384 kHz = zero compute margin; inline EQ collapsed it to
+ * 255,830/s), and the mixer1 task is a synchronous relay inside the same
+ * per-frame exchange, not a second schedule. It therefore runs as its own
+ * task on a free tile[1] logical core (xobjdump: >=3 unused threads), with
+ * an O(1) SPSC ring hand-off on the bit-timed side. See the relocation
+ * block in csd_dsp.xc. REVERT: delete this macro and its use in
+ * USER_MAIN_CORES below. */
+#ifdef PCM_DSP_EN
+#define CSD_EQ_TILE1_ENTRY                  csd_dsp_eq_task();
+#else
+#define CSD_EQ_TILE1_ENTRY
+#endif
+/* Inline A/B arm (CSD_DSP_INLINE_EQ): the task is not spawned -- the EQ runs
+ * in the frame hook (collapsed-rate control arm). Spawning it anyway would
+ * double-writer g_csd_eq_frames/-ticks_max (UBM + task) and the whole-program
+ * parallel-usage analysis rejects that. */
+#ifdef CSD_DSP_INLINE_EQ
+#undef CSD_EQ_TILE1_ENTRY
+#define CSD_EQ_TILE1_ENTRY
+#endif
+
 #define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
                             on tile[1]: {\
                                             par\
@@ -148,6 +172,7 @@ extern unsafe chanend uc_audiohw_diag;
                                                     uc_audiohw_diag = (chanend) c_audiohw[1];\
                                                 }\
                                                 CSD_PW_TILE1_ENTRY\
+                                                CSD_EQ_TILE1_ENTRY\
                                             }\
                                         }\
     \
