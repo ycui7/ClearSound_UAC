@@ -28,7 +28,7 @@ with open(S + "/dp_decode.raw", "wb") as f:
 print("dp_decode.raw", (22))
 EOF
 
-( cd ~/XMOS/XTC/15.3.0 && set +u && source ./SetEnv >/dev/null 2>&1
+( cd ~/XMOS-15.3.1 && set +u && source ./SetEnv >/dev/null 2>&1
   cd ~/sw-audio-sc/sw_usb_audio/clearsound_uac && exec xrun bin/2AMi2o2xxxxxd/ClearSoundDac_2AMi2o2xxxxxd.xe ) >/dev/null 2>&1 &
 LOAD=$!
 trap 'kill $LOAD 2>/dev/null' EXIT

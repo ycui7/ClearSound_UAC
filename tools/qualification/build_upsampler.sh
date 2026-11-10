@@ -1,5 +1,7 @@
 #!/bin/bash
-# Clean build of the firmware with the upsampler active (the upsampler IS the DSP).
+# Clean build of the firmware with the upsampler active (one block engine,
+# two independent clients: the DSP shelf and the sample-rate resampler each
+# own their enable -- see csd_dsp.xc / csd_ups_block.c).
 #
 # Self-contained on purpose: the scratch build_variant.sh this grew out of is
 # pruned after 24h, and a build recipe that vanishes is not a build recipe.
@@ -23,8 +25,8 @@
 cd "$HOME/sw-audio-sc/sw_usb_audio/clearsound_uac" || exit 9
 rm -rf build bin .build_2AMi2o2xxxxxd
 
-source "$HOME/XMOS/XTC/15.3.0/SetEnv" </dev/null >/dev/null 2>&1 || true
-export XMOS_TOOL_PATH="$HOME/XMOS/XTC/15.3.0"
+source "$HOME/XMOS-15.3.1/SetEnv" </dev/null >/dev/null 2>&1 || true
+export XMOS_TOOL_PATH="$HOME/XMOS-15.3.1"
 export XMOS_HOME="$HOME/.xmos"
 export XMOS_CMAKE_PATH="$XMOS_TOOL_PATH/build/xcommon_cmake"
 export XCC_DEVICE_PATH="$XMOS_TOOL_PATH/configs:$XMOS_TOOL_PATH/configs/.deprecated"

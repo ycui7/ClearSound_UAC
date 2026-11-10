@@ -8,7 +8,7 @@
 set -u
 APP=~/sw-audio-sc/sw_usb_audio/clearsound_uac
 XE=$APP/bin/2AMi2o2xxxxxd/ClearSoundDac_2AMi2o2xxxxxd.xe
-OBJ=~/XMOS/XTC/15.3.0/bin/xobjdump
+OBJ=~/XMOS-15.3.1/bin/xobjdump
 PY=/home/ycui/.hermes/hermes-agent/venv/bin/python
 fail=0
 

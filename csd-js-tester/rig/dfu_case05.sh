@@ -16,8 +16,8 @@ UPART=524288
 PID="20b1:0018"
 say() { echo; echo "### $*"; }
 
-source "$HOME/XMOS/XTC/15.3.0/SetEnv" </dev/null >/dev/null 2>&1
-export XMOS_TOOL_PATH="$HOME/XMOS/XTC/15.3.0" XMOS_HOME="$HOME/.xmos"
+source "$HOME/XMOS-15.3.1/SetEnv" </dev/null >/dev/null 2>&1
+export XMOS_TOOL_PATH="$HOME/XMOS-15.3.1" XMOS_HOME="$HOME/.xmos"
 export XMOS_CMAKE_PATH="$XMOS_TOOL_PATH/build/xcommon_cmake"
 export XCC_LIBRARY_PATH="$XMOS_TOOL_PATH/target/lib"
 export XCC_C_INCLUDE_PATH="$XMOS_TOOL_PATH/target/include:$XMOS_TOOL_PATH/target/include/clang"

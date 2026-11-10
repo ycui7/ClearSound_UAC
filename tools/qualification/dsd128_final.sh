@@ -29,7 +29,7 @@ import os
 print("dop128.raw bytes:", os.path.getsize(S + "/dop128.raw"), "expect:", nfr * 8)
 EOF
 
-( cd ~/XMOS/XTC/15.3.0 && set +u && source ./SetEnv >/dev/null 2>&1
+( cd ~/XMOS-15.3.1 && set +u && source ./SetEnv >/dev/null 2>&1
   cd ~/sw-audio-sc/sw_usb_audio/clearsound_uac && exec xrun bin/2AMi2o2xxxxxd/ClearSoundDac_2AMi2o2xxxxxd.xe ) >/dev/null 2>&1 &
 LOAD=$!
 trap 'kill $LOAD 2>/dev/null' EXIT

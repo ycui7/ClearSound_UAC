@@ -11,7 +11,7 @@
 #if PCM_DSP_EN
 
 #include "csd_dsp.h"
-#include "csd_upsample_hook.h"
+#include "csd_ups_block.h"     /* resampler client of the same block engine */
 #ifdef CSD_GEN_EN
 /* Interface only. csd_gen_core.h -- which carries the ~20 KB generated tables
  * as file-scope statics -- is included by exactly one translation unit,
@@ -185,31 +185,49 @@ void csd_dsp_frame(unsigned *s)
     }
 #endif
 
-unsigned n = csd_dsp.n;
-    if (n == 0u || csd_dsp.dsd || csd_dsp.dop || csd_dsp.preset == 0u) return;  // byte-exact bypass
-    unsigned h = csd_dsp.head;
-    if (csd_dsp.preset == 1u) {
-        /* DELAY preset: y[t] = x[t-D], D=(n-1)/2 (same delay the FIR applies).
-         * Ring size n: the value at index (t-D) mod n was written at t-D and
-         * has not been overwritten since. */
-        const unsigned D = (n - 1u) / 2u;
-        unsigned r = h + n - D;
-        if (r >= n) r -= n;
-        for (unsigned ch = 0; ch < 2; ch++) {
-            int32_t y = csd_dsp.ring[ch][r];      /* 'out' is an XC keyword */
-            csd_dsp.ring[ch][h] = (int32_t)s[ch];
-            s[ch] = (unsigned)y;
+    /* ONE block engine, TWO INDEPENDENT CLIENTS (owner directive 2026-11-10,
+     * correcting the merged "the upsampler IS the DSP / shelf stands down"
+     * doctrine -- that made the DSP subordinate to the sample-rate converter
+     * and killed effects at 384 kHz, where the resampler has no family entry
+     * at all). The DSP below runs on EVERY host rate, gated only by its own
+     * preset and the stream format (DSD/DoP bypass). The resampler is a
+     * second client: it takes the pair AFTER the DSP has filtered it, at
+     * host-pair cadence; when it is active its wire words replace the
+     * host-rate words at the I2S pop (csd_ups_slot). csd_ups_feed is a
+     * one-load no-op while the resampler client is off, so an unarmed stream
+     * pays nothing for the second client existing. DoP/DSD voting ran
+     * already, above, on the host-rate frame. */
+
+    unsigned n = csd_dsp.n;
+    if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset != 0u) {
+        unsigned h = csd_dsp.head;
+        if (csd_dsp.preset == 1u) {
+            /* DELAY preset: y[t] = x[t-D], D=(n-1)/2 (same delay the FIR applies).
+             * Ring size n: the value at index (t-D) mod n was written at t-D and
+             * has not been overwritten since. */
+            const unsigned D = (n - 1u) / 2u;
+            unsigned r = h + n - D;
+            if (r >= n) r -= n;
+            for (unsigned ch = 0; ch < 2; ch++) {
+                int32_t y = csd_dsp.ring[ch][r];      /* 'out' is an XC keyword */
+                csd_dsp.ring[ch][h] = (int32_t)s[ch];
+                s[ch] = (unsigned)y;
+            }
+            csd_dsp.head = next_head(h, n);
+        } else if (CSD_ENGINE_READY()) {
+            /* FIR preset: bass shelf. Default engine is the vendor biquad (VPU asm,
+             * O(1) per sample, no burst). The fd block engine sits behind
+             * CSD_DSP_ENGINE_FD -- measured ~11.9k ticks per 128-sample block per
+             * channel blows the per-LRCLK budget (~1.56k ticks at 384 kHz) and trips
+             * HandleSampleClock -> syncError, which stops the audiohub loop.
+             * Engine not ready: word passes unfiltered, the pre-existing
+             * degraded-free behaviour, never silently skipped by the resampler. */
+            CSD_ENGINE_FRAME(s);
         }
-        csd_dsp.head = next_head(h, n);
-    } else {
-    /* FIR preset: bass shelf. Default engine is the vendor biquad (VPU asm,
-     * O(1) per sample, no burst). The fd block engine sits behind
-     * CSD_DSP_ENGINE_FD -- measured ~11.9k ticks per 128-sample block per
-     * channel blows the per-LRCLK budget (~1.56k ticks at 384 kHz) and trips
-     * HandleSampleClock -> syncError, which stops the audiohub loop. */
-        if (!CSD_ENGINE_READY()) return;
-        CSD_ENGINE_FRAME(s);
-    }
+    }                                            /* else: byte-exact bypass */
+#ifdef CSD_UPSAMPLE_EN
+    csd_ups_feed((int)s[0], (int)s[1]);
+#endif
 }
 
 static int pick_table(unsigned hz)
@@ -239,28 +257,6 @@ static void csd_dsp_clear_state(void)
 
 void csd_dsp_set_rate(unsigned hz)
 {
-#ifdef CSD_UPSAMPLE_EN
-    /* Stage A is driven by the STREAM rate; the wire rate is whatever this
-     * input's family dictates, and both sides now derive it from the same
-     * function -- csd_ups_expected_out_hz() is the single source of truth, so
-     * the interpolator and the MCLK the board applies cannot disagree. That
-     * agreement is what makes an 8x rate error impossible rather than merely
-     * unlikely, and it is why the 44.1 family works too: 352.8 kHz needs no
-     * second code path, only a different MCLK.
-     *
-     * CSD_UPS_OUT_HZ remains available as a build-time PIN for bench work
-     * (force one family, refuse the other); it no longer decides the normal
-     * case, which is what previously left the 44.1 family permanently disarmed
-     * in a build pinned to 384000. */
-    csd_ups_set_input_rate(hz);
-    unsigned want_out = csd_ups_expected_out_hz(hz);
-#  ifdef CSD_UPS_OUT_HZ
-    if (want_out != (unsigned)CSD_UPS_OUT_HZ) {
-        want_out = 0u;      /* pinned build: the other family stays disarmed */
-    }
-#  endif
-    csd_ups_arm(want_out);
-#endif
     int idx = pick_table(hz);
 
     /* Honour a preset change made while no stream was running. This is the
@@ -690,27 +686,10 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[1]);
 #endif
-#ifdef CSD_UPSAMPLE_EN
-    /* The upsampler IS the DSP in this build: it replaces the stream, it never
-     * adds to it. Armed (codec + I2S confirmed at 384 kHz) it owns the frame and
-     * the EQ path is bypassed, so exactly one stream reaches the mixer.
-     * Disarmed it returns 0 without touching the frame, and the normal DSP path
-     * runs. That ordering is deliberate: a codec that is not at 384 kHz falls
-     * back to the known-good behaviour instead of emitting words at the wrong
-     * rate. DoP detection ran already, on the host-rate frame, so a DSD stream
-     * still passes through byte-exact. */
-    if (!csd_ups_host_active()) {
-        csd_dsp_frame(sampsFromUsbToAudio);
-    } else {
-        /* Wire-rate path (owner directive 2026-11-08): the pair goes into the
-         * queues; the wire words come out of csd_ups_slot in the audiohub
-         * loop, one per LRCLK slot. samplesOut is NOT rewritten here --
-         * writing 8x words into a host-cadence buffer was the bug. */
-        csd_ups_host_pair((int)sampsFromUsbToAudio[0], (int)sampsFromUsbToAudio[1]);
-    }
-#else
+    /* Single frame path: the DSP runs the pair per its own preset, then
+     * hands it to the resampler client (see csd_dsp_frame -- one block
+     * engine, two independent clients, neither gates the other). */
     csd_dsp_frame(sampsFromUsbToAudio);
-#endif
 #ifdef CSD_GEN_EN
     csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[1]);

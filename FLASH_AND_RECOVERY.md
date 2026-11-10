@@ -39,7 +39,7 @@ Release images are also produced through `xflash` for the factory/upgrade bins:
 xflash --factory-version 15.3 --upgrade 1 <xe> -o <bin>
 ```
 
-`xflash` lives in `~/XMOS/XTC/15.3.0/bin`. The board's known-good QSPI dump is
+`xflash` lives in `~/XMOS-15.3.1/bin`. The board's known-good QSPI dump is
 2 097 152 bytes; a read-back that is not that size means the flash geometry is
 not what the build expects, and flashing should stop there rather than proceed.
 
@@ -71,7 +71,7 @@ image read back over `*IDN?` after `xflash`.
 
 ## Recovery when a flash fails
 
-`xgdb` (and `xgdbserver`) are present in `~/XMOS/XTC/15.3.0/bin`, and JTAG access
+`xgdb` (and `xgdbserver`) are present in `~/XMOS-15.3.1/bin`, and JTAG access
 is the reason flashing is pre-authorised. Recovery sequence: attach over JTAG,
 confirm the device is reachable, then re-program the boot flash from the archived
 `.bin` — or from the last known-good release image, whose md5 is recorded in

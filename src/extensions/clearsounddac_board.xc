@@ -35,7 +35,7 @@ extern "C" {
 #if PCM_DSP_EN
 #include "csd_dsp.h"
 #ifdef CSD_UPSAMPLE_EN
-#include "csd_upsample_hook.h"   /* csd_ups_set_enabled, for the persisted option */
+#include "csd_ups_block.h"     /* the upsampling DSP block engine: option + fabric surface */
 #ifdef CSD_UPS_ASYNC
 /* lib_xua audiohub's runtime USB->I2S ratio (xua_audiohub.xc). File scope:
  * xcc refuses function declarations in local scope. */
@@ -189,6 +189,25 @@ static unsigned host_muted = 0;
  * change or a mute from tile[1] cannot quietly undo the bypass. */
 static unsigned s_osf_want     = 0;   /* requested by the config option   */
 static unsigned s_osf_applied  = 0;   /* what reg 7 bit 3 actually holds  */
+/* Operator-disable latch. DIAG:UPSAMPLing:STATe 0 is the operator's LAST
+ * explicit word: it must beat both the persisted journal (a lagged or failed
+ * flash write left the old enable coming back through TRIM_UPS_GET) and the
+ * board's own rate-change re-grant (DAC_UPS_SET(1,0) re-publishes
+ * s_osf_want=1, and the TRIM_UPS_GET OR-in used to feed that straight back
+ * into csd_AudioHwConfig -- a want bit that is only ever OR-ed in can never
+ * return to 0). The want=0 branch of UPS_SET is the only writer of 1 (only
+ * the SCPI disable path sends want=0); an explicit STATe 1 with persist=1
+ * clears it, the board's persist=0 re-grant must not. Boot default 0
+ * honours the persisted intent. */
+static unsigned s_osf_session_off = 0;
+static unsigned s_osf_force_landed = 0; /* last config really forced the wire
+                                         * rate (samFreq != host_hz): the ONLY
+                                         * legitimate cause of a family frame
+                                         * clock. A 384 kHz HOST stream puts
+                                         * s_hwcfg_samfreq at 384000 with no
+                                         * resampling at all, and bypassing
+                                         * the codec OSF FIR there starves the
+                                         * modulators -- the 384 kHz silence. */
 static unsigned s_hwcfg_samfreq = 0;  /* frame clock tile[1] configured   */
 static unsigned s_osf_refusals = 0;   /* enable attempts denied           */
 
@@ -856,10 +875,15 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 }
                 else if (cmd == AUDIOHW_CMD_HWCFG_RATE)
                 {
-                    /* tile[1] tells us the frame clock it has just configured.
-                     * This is what the interlock below reads: the codec's own
-                     * view of its input rate, not what the USB host asked for. */
+                    /* tile[1] reports the frame clock it has just configured
+                     * AND whether that config FORCED the rate (samFreq came
+                     * from the family map, not the host). The interlock below
+                     * reads the pair: a 384 kHz HOST stream also puts the
+                     * codec frame clock at 384000, with no resampling behind
+                     * it -- granting the OSF bypass for that was the 384 kHz
+                     * bench silence. */
                     c[i] :> s_hwcfg_samfreq;
+                    c[i] :> s_osf_force_landed;
                 }
                 else if (cmd == AUDIOHW_CMD_UPS_SET)
                 {
@@ -867,7 +891,14 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     c[i] :> want;
                     c[i] :> persist;
                     if (want) {
-                        if (s_hwcfg_samfreq == 384000u || s_hwcfg_samfreq == 352800u) {
+                        /* Grant the codec OSF bypass only where the resampler
+                         * client is legitimately running: the frame clock is
+                         * a family wire rate AND that clock is ours -- the
+                         * rate force landed on this or the last config. */
+                        const unsigned famclk =
+                            (s_hwcfg_samfreq == 384000u ||
+                             s_hwcfg_samfreq == 352800u) ? 1u : 0u;
+                        if (famclk && s_osf_force_landed) {
                             s_osf_want    = 1u;
                             s_osf_applied = 1u;
                         } else {
@@ -877,9 +908,24 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                             s_osf_applied = 0u;      at the next rate change */
                             s_osf_refusals++;
                         }
+                        if (persist) {
+                            /* The operator's explicit STATe 1 out-ranks any
+                             * earlier STATe 0 latch. The board's re-grant path
+                             * (rate-change mirror) sends persist=0 and must
+                             * NOT clear the latch: only an operator command
+                             * re-arms past an operator disable. */
+                            s_osf_session_off = 0u;
+                        }
                     } else {
                         s_osf_want    = 0u;
                         s_osf_applied = 0u;
+                        if (persist) {
+                            /* The OPERATOR's last word: beat the journal and
+                             * any racing re-grant until an explicit STATe 1.
+                             * persist=0 (the board's revoke path) must NOT
+                             * latch: it mirrors state, not intent. */
+                            s_osf_session_off = 1u;
+                        }
                     }
                     /* Land it now rather than waiting for the next mute. */
                     ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
@@ -912,7 +958,34 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                      * answer would otherwise be the zero initialiser and the
                      * option would look unset forever. */
                     if (csd_trim_status_word(1u) == 0u) (void) csd_trim_boot_load();
-                    unsigned v = csd_trim_ups_get();
+                    /* 2026-11-09, ratio 2 bring-up: honour the session intent.
+                     * WHY: AudioHwConfig asks this command for the upsampling
+                     * intent on EVERY rate change (line ~1833), and it used to
+                     * get only the flash store. So an operator enable was
+                     * erased at the next SET_INTERFACE: DIAG:UPSAMPLing:STATe 1
+                     * set s_osf_want here and journalled, yet the next
+                     * config re-read a 0 store, csd_ups_set_enabled(0) ran, and
+                     * xua_csd_set_usb_ratio(1) pinned the pacer to 1. Measured:
+                     * a 192 kHz stream drains in 0.45 s and the ADC1 mic shows
+                     * the tone at 2x with 77.6% zero wire slots -- one wire
+                     * slot per host frame instead of two.
+                     * CHANGE: OR in s_osf_want, this tile's RAM intent. The
+                     * flash journal is untouched (no csd_trim_ups_set here), so
+                     * nothing is persisted -- persistence stays deferred by
+                     * owner directive. s_osf_want is 0 until an explicit
+                     * DIAG:UPSAMPLing:STATe 1, so shipping behaviour is
+                     * unchanged; it resets on reboot.
+                     * 2026-11-10, two-clients fix: the OR term alone made the
+                     * want bit un-clearable from the config path -- the board's
+                     * own re-grant DAC_UPS_SET(1,0) re-publishes s_osf_want=1
+                     * and this reply feeds it straight back. The operator's
+                     * explicit STATe 0 now latches s_osf_session_off (tile[0]
+                     * UPS_SET want=0 branch), and until the next explicit
+                     * STATe 1 this answer is 0 regardless of store or re-grant.
+                     * REVERT: restore 'unsigned v = csd_trim_ups_get();' and
+                     * drop the OR term and the latch test. */
+                    unsigned v = s_osf_session_off ? 0u
+                                                   : (csd_trim_ups_get() | s_osf_want);
                     c[i] <: v;
                 }
                 else if (cmd == AUDIOHW_CMD_UPS_GET)
@@ -1336,13 +1409,17 @@ static inline void DAC_PLL_REGWRITE(unsigned reg, unsigned val)
 
 /* Report the frame clock tile[1] has configured, so the tile[0] interlock
  * decides on what the codec actually receives. */
-static inline void DAC_HWCFG_RATE(unsigned samFreq)
+static inline void DAC_HWCFG_RATE(unsigned samFreq, unsigned forceLanded)
 {
     /* A chanend cannot be initialised in a declaration in XC, so use the
-     * shared channel directly, as DAC_REGWRITE above does. */
+     * shared channel directly, as DAC_REGWRITE above does. The force flag
+     * travels with the frame clock: the OSF-grant interlock grants only for
+     * a family clock the rate force actually installed -- a 384 kHz HOST
+     * stream reaches 384000 without any resampling. */
     unsafe {
         uc_audiohw1 <: AUDIOHW_CMD_HWCFG_RATE;
         uc_audiohw1 <: samFreq;
+        uc_audiohw1 <: forceLanded;
     }
 }
 
@@ -1798,6 +1875,22 @@ void csd_AudioHwInit(const csd_config_t &config)
 /* Configures the external audio hardware for the required sample frequency.
  * See gpio.h for I2C helper functions and gpio access
  */
+/* Read the XS3 local timer (10 ns ticks) from C. Needed because the `timer`
+ * type exists only in XC, and app C translation units cannot claim a timer
+ * resource and also never receive CSD_EXTRA_FLAGS. The upsampling block
+ * engine reads it twice per COMPUTE BLOCK (once per frame_advance host
+ * pairs) for its worst-burst witness -- cost irrelevant at that cadence. */
+extern /* the shim is called from C; give xcc a C-kind prototype */
+unsigned csd_ups_now(void)
+{
+    timer t;
+    unsigned v;
+    t :> v;
+    return v;
+}
+
+void xua_csd_record_forced(unsigned samFreq, unsigned mClk);
+extern void xua_csd_set_fabric_force(unsigned hz);
 void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
                         unsigned sampRes_DAC, unsigned sampRes_ADC)
 {    
@@ -1831,11 +1924,26 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * retimed too. The owner has closed the ADC ("forget adc0"). */
     const unsigned host_hz = samFreq;
     csd_ups_set_want(DAC_TRIM_UPS_GET());
+    /* Default: no fabric override. Cleared on every reconfiguration so a rate
+     * change that does NOT want the family rate can never inherit a stale wire
+     * rate from the previous stream. */
+    xua_csd_set_fabric_force(0u);
     if (csd_ups_get_want()) {
         const unsigned fam = csd_ups_expected_out_hz(samFreq);
         if (fam != 0u) {
             samFreq = fam;                 /* what the codec and I2S see */
             mClk    = 128u * fam;          /* 49.152 MHz or 45.1584 MHz  */
+            /* Publish what we FORCED, so DIAG:UPSAMPLing:DIVider? can show it
+             * next to the curSamFreq/mClk/divide the audiohub actually
+             * programmed the ports with. The four-way config (codec 384k,
+             * ADC1 384k, USB out 48k, USB in 48k) is only real if BOTH agree;
+             * this is the only place that can reveal the split. */
+            xua_csd_record_forced(samFreq, mClk);
+            /* Publish the wire rate so the audiohub can re-clock the I2S
+             * fabric to it (see xua_csd_set_fabric_force in xua_audiohub.xc).
+             * Without this the ports keep the host rate and ADC1 never sees the
+             * wire. */
+            xua_csd_set_fabric_force(fam);
         }
     }
 #else
@@ -1907,32 +2015,72 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
                  (unsigned char)(0x02u |
                      (((mClk == (128u * samFreq)) ? 0x10u : 0x00u))));
 
-    /* Report the frame clock we have actually configured. The upsampling
-     * option's interlock judges this value -- what the codec really receives --
-     * and never the rate the host asked for. */
-    DAC_HWCFG_RATE(samFreq);
+    /* Report the frame clock we have actually configured, plus whether this
+     * configuration FORCED it (the family-rate force above, not the host).
+     * The upsampling option's interlock judges both -- what the codec really
+     * receives and whether that clock is ours (a 384 kHz host stream is
+     * not). */
+    DAC_HWCFG_RATE(samFreq, samFreq != host_hz ? 1u : 0u);
 
 #ifdef CSD_UPSAMPLE_EN
     /* Re-apply the persisted option at every rate change, because a rate change
      * is exactly when the option becomes legal or illegal again. The codec
      * replies with what it ACCEPTED; the audio path mirrors that reply, never
-     * the request, so the DSP can never be interpolating while the chip still
-     * has its own FIR engaged. persist=0: a rate change must not append a
-     * journal record. */
-    /* Ask for the FIR bypass exactly when the force took effect: samFreq moved
-     * off the host rate only if the option is on AND the rate is in a family.
-     * Anywhere else the chip keeps its own filter, which is what its input
-     * rate actually needs. The codec's reply, not the request, sets the path. */
-    csd_ups_set_enabled((csd_ups_get_want() && samFreq != host_hz)
-                        ? DAC_UPS_SET(1u, 0u) : 0u);
+     * the request, so the block engine can never be interpolating while the
+     * chip still has its own FIR engaged. persist=0: a rate change must not
+     * append a journal record.
+     *
+     * The engine learns the two rates that decide everything: the host rate
+     * (family decision, ratio, bank selection) and the wire rate this
+     * configuration actually installed (arming validation -- a wire rate
+     * outside the host's family disarms rather than running at a non-integer
+     * ratio). CSD_UPS_OUT_HZ remains available as a build-time PIN for bench
+     * work (force one family, refuse the other); it does not decide the
+     * normal case. */
+    csd_ups_note_stream_rate(host_hz);
+    const unsigned ups_fam = csd_ups_expected_out_hz(host_hz);
+#  ifdef CSD_UPS_OUT_HZ
+    const unsigned ups_wire = (ups_fam == (unsigned)CSD_UPS_OUT_HZ) ? ups_fam : 0u;
+#  else
+    const unsigned ups_wire = ups_fam;
+#  endif
+    csd_ups_note_wire_rate(ups_wire);
+    /* 2026-11-09, ratio 2 bring-up: a non-family configuration must not tear
+     * down a live family stream. Same reason as the rate refusal in
+     * csd_ups_note_stream_rate: the 384 kHz microphone re-config arrives here
+     * with no direction flag, and used to run csd_ups_set_enabled(0) +
+     * xua_csd_set_usb_ratio(1) under a playing 192 kHz stream (measured: ratio
+     * pinned to 1, mic at tone x 2, one wire slot per host frame). While the
+     * engine is armed, only a family input rate may change the codec grant or
+     * the pacer. */
+    if (ups_fam != 0u || !csd_ups_armed()) {
+        /* The codec OSF bypass belongs to the RESAMPLER client, and its
+         * tile[0] copy must follow the client in BOTH directions: mirror
+         * intent with a grant when the force is active, and explicitly
+         * REVOKE on the channel when it is not, so a codec-side grant can
+         * never outlive the client (a grant landing between an operator's
+         * STATe 0 write and this pass used to leave reg 7 bypassed with
+         * enabled reading 0 -- starved modulators, silence). The revoke
+         * sends persist=0 and touches neither the journal nor the
+         * operator-disable latch. */
+        if (csd_ups_get_want() && samFreq != host_hz)
+            csd_ups_set_enabled(DAC_UPS_SET(1u, 0u));
+        else {
+            if (csd_ups_armed() || csd_ups_is_enabled())
+                (void)DAC_UPS_SET(0u, 0u);
+            csd_ups_set_enabled(0u);
+        }
+    }
     /* The wire is the pacer (owner directive 2026-11-08): tell the audiohub
-     * loop to consume one host pair every `ratio` LRCLK frames, so the slot
-     * path emits 8x/4x/2x band-limited words at MCLK/128. Mirrors the codec's
+     * loop to consume one host pair every `ratio` LRCLK frames, so the engine
+     * emits 8x/4x/2x band-limited words at MCLK/128. Mirrors the codec's
      * accepted reply, never the request: 1 unless the force actually landed. */
     {
-        const unsigned fam = csd_ups_expected_out_hz(host_hz);
-        xua_csd_set_usb_ratio(csd_ups_is_enabled() && fam != 0u
-                              ? fam / host_hz : 1u);
+        /* 2026-11-09: same guard -- a non-family re-config leaves the pacer
+         * alone while a family stream is armed. */
+        if (ups_fam != 0u || !csd_ups_armed())
+        xua_csd_set_usb_ratio(csd_ups_is_enabled() && ups_wire != 0u
+                              ? ups_wire / host_hz : 1u);
     }
 #endif
 

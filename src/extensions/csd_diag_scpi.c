@@ -22,7 +22,7 @@
 #include "csd_identity.h"
 #include "csd_gen.h"
 #include "csd_power.h"          /* POWER:TIMEout, owner case 14 */
-#include "csd_upsample_hook.h"  /* DIAG:UPSAMPLing, XMOS 8x + ES9219Q FIR bypass */
+#include "csd_ups_block.h"  /* DIAG:UPSAMPLing, the DSP block engine behind it */
 /* L/R trim persistence (TODO 3) is reached through csd_diag.h's proxy calls,
  * never by including csd_trim_store.h: that header's entry points drive the
  * tile[0] SQI ports and may only be called by the tile[0] codec server. */
@@ -42,7 +42,12 @@
 #define CSD_IDN_FIRMWARE CSD_FW_VERSION
 
 /* ---- output plumbing -------------------------------------------------- */
-#define REPLY_MAX 320
+/* 2026-11-10: 320 -> 640. WHY: DIAG:UPSAMPLing:INFO? grew to 46 fields
+ * (raw ADC1 witness + DoSampleTransfer stall statistics) and the reply was
+ * silently cut at 43 fields by this cap -- the tail we added was
+ * invisible, which reads like 'the firmware did not change'.
+ * REVERT: 320, and drop the tail fields. */
+#define REPLY_MAX 640
 
 static unsigned reply_len;      /* bytes emitted by the current command */
 static unsigned reply_truncs;
@@ -1750,6 +1755,279 @@ static SCPI_FPTR_CMD scpi_result_t ups_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* 2026-11-09, ratio 2 bring-up: read-only truth table for the upsampler.
+ * WHY: DIAG:UPSAMPLing:STATe? reports the CODEC's OSF grant as field 2, so it
+ * cannot distinguish 'interpolator armed and pacing' from 'never armed, pacer
+ * pinned to 1'. That blind spot cost a full day: the wire emitted one word per
+ * host frame at every setting of that flag while it read 1,1,384000,0,0.
+ * CHANGE: new row, no data path touched. Reply order:
+ *   armed,enabled,want,in_hz,out_hz,ratio,frames,popsL,popsR,repsL,repsR,occHL,occHR
+ * A healthy ratio-2 stream must show armed=1, ratio=2, in=192000, out=384000,
+ * and pops ~= ratio * frames per channel. pops stuck at 0 with reps climbing
+ * means the ring is starved -- the audiohub is not pacing.
+ * REVERT: delete this callback and its table row. */
+extern unsigned xua_csd_get_usb_ratio(void);   /* lib_xua, xua_audiohub.xc */
+/* 2026-11-09 mic decimation phase: the phase bound lives in the audiohub
+ * (file-scope, owner compute constraint 2026-11-09 -- the hot loop must own
+ * its compare operand); this task only sets and reads it, same pattern as
+ * xua_csd_set_usb_ratio. REVERT: delete these two externs with the PHASE
+ * callbacks and rows. */
+extern void     xua_csd_set_mic_phase(unsigned p);
+extern unsigned xua_csd_get_mic_phase(void);
+/* lib_xua, xua_audiohub.xc: port decimator observation (see the decimator
+ * there -- declared locally like the ratio/mic-phase externs above). */
+extern unsigned xua_csd_get_decim_slot(void);
+extern unsigned xua_csd_get_decim_pub(void);
+/* AUTO sentinel shared with the audiohub (xua_audiohub.xc
+ * CSD_MIC_PHASE_AUTO_X must equal this; the decimator lives there). */
+#define CSD_MIC_PHASE_AUTO 0xFFFFFFFFu
+/* lib_xua, xua_ep0_uacreqs.xc: what the USB host asked the single shared clock
+ * for, in order. See the recorder there for the reason. ok: 1 accepted,
+ * 0 rejected by the family check, 2 seen but equal to the current value. */
+extern unsigned xua_csd_clk_reqs(void);
+extern unsigned xua_csd_clk_accepted(void);
+extern unsigned xua_csd_clk_rejected(void);
+extern unsigned xua_csd_clk_hist_hz(unsigned i);
+extern unsigned xua_csd_clk_hist_ok(unsigned i);
+
+/* 2026-11-09, ratio 2 bring-up: read-only. Separates 'the host never asked for
+ * 192 kHz' from 'the host asked and the mic's 384 kHz request overwrote it'.
+ * Reply: reqs,accepted,rejected, then 8 x (hz:ok), oldest slot first is index 0
+ * of a wrapping ring. REVERT: delete this callback and its table row. */
+static SCPI_FPTR_CMD scpi_result_t ups_clk_q(scpi_t *context)
+{
+    char buf[256];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u",
+                     xua_csd_clk_reqs(), xua_csd_clk_accepted(), xua_csd_clk_rejected());
+    for (unsigned i = 0u; i < 8u && n > 0 && n < (int)sizeof(buf) - 12; i++) {
+        n += snprintf(buf + n, sizeof(buf) - n, ",%u:%u",
+                      xua_csd_clk_hist_hz(i), xua_csd_clk_hist_ok(i));
+    }
+    if (n > 0) SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+/* 2026-11-09 DIAG:UPSAMPLing:DIVider? (assistant). Reports the EXACT triple the
+ * audiohub used to program the I2S ports -- curSamFreq, mClk, divide, numBits,
+ * dsdMode -- next to what this board tried to force (forced_samFreq,
+ * forced_mClk, seq). WHY: the owner's config gate is 'ES9219Q at 384k, ADC1 at
+ * 384k, USB out 48k, USB in 48k'. divide = mClk/(curSamFreq*numBits) at
+ * xua_audiohub.xc:1192 is the only thing that sets the wire frequency, and it
+ * reads the host's SET_CUR value, not the board's forced one, so this is the
+ * measurement that decides whether that config is achievable as written.
+ * Expected BCLK = mClk/divide; expected LRCLK = BCLK/numBits.
+ * REVERT: delete this callback and its table entry. */
+extern unsigned g_csd_div_curSamFreq, g_csd_div_mClk, g_csd_div_divide;
+extern unsigned g_csd_div_numBits, g_csd_div_dsdMode;
+extern unsigned g_csd_forced_samFreq, g_csd_forced_mClk, g_csd_forced_seq;
+static SCPI_FPTR_CMD scpi_result_t ups_div_q(scpi_t *context)
+{
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u",
+                     g_csd_div_curSamFreq, g_csd_div_mClk, g_csd_div_divide,
+                     g_csd_div_numBits, g_csd_div_dsdMode,
+                     g_csd_forced_samFreq, g_csd_forced_mClk, g_csd_forced_seq);
+    if (n > 0) SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
+{
+    /* 2026-11-09: widened 192 -> 352. WHY: the mic-phase tail below appends
+     * 12 more fields; ten u32 digits + comma per field makes the old size
+     * reachable, and snprintf returns the WOULD-BE length, which the reply
+     * call below then used -- an out-of-bounds read of `buf` at truncation,
+     * latent before because the 18-field worst case (~200 B) was rare. The
+     * clamp turns any future truncation into a short-but-in-bounds reply;
+     * SCPI_Write's own REPLY_MAX cap and reply_truncs counter stay the host
+     * visible truncation report. REVERT for both: restore char buf[192] and
+     * drop the clamp line. */
+    /* 2026-11-10: 352 -> 640 to match REPLY_MAX; snprintf returns the
+     * WOULD-BE length, so an undersized buffer here truncates INFO? at
+     * ~43 fields. REVERT: 352. */
+    char buf[640];
+    int n = snprintf(buf, sizeof(buf),
+                     "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                     csd_ups_armed(), csd_ups_is_enabled(), csd_ups_get_want(),
+                     csd_ups_diag_in_hz(), csd_ups_diag_out_hz(),
+                     xua_csd_get_usb_ratio(), csd_ups_diag_frames(),
+                     csd_ups_diag_pops(0u), csd_ups_diag_pops(1u),
+                     csd_ups_diag_repeats(0u), csd_ups_diag_repeats(1u),
+                     csd_ups_diag_occ_high(0u), csd_ups_diag_occ_high(1u),
+                     csd_ups_diag_rate_rejects(),
+                     /* Block-engine witnesses replacing the 2026-11-09 tile
+                      * probe (same four slots, same positions: append-only
+                      * alignment rule): computes run, worst compute burst in
+                      * 10 ns ticks, rate hand-overs seen, last rate asked. */
+                     csd_ups_diag_blocks(), csd_ups_diag_block_ticks_max(),
+                     csd_ups_diag_rate_calls(), csd_ups_diag_last_req_hz());
+    /* 2026-11-09 mic decimation phase (owner request). WHY: the rig must be
+     * able to prove the phase took effect rather than trust the setter, and
+     * INFO? is the one reply the rig already parses positionally.
+     * CHANGE: 12 fields APPENDED at the end, original 18 untouched in place
+     * and order (append-only rule): phase,ratio,mode,cycles,fallbacks,
+     * hits0..hits7. phase = EFFECTIVE slot (AUTO reported as ratio-1, the
+     * slot it actually latches); mode 0=auto,1=operator-set; cycles = mic
+     * capture transfers; hits[s] = transfers whose word came from slot s;
+     * fallbacks = transfers where the selected phase never arrived. Counter
+     * scale: cycles is per transfer event, hits and fallbacks are PER CHANNEL
+     * (two increments per cycle) -- L and R latch independently, and a
+     * one-sided miss (e.g. only one fill site calling note) must be visible.
+     * Proof for phase p: delta(hits[p]) == 2 * delta(cycles) with fallbacks
+     * flat. REVERT: delete this block and widen the format string back. */
+    /* 2026-11-09: 6 more trailing fields (phase-origin alignment record).
+     * Append-only, so every field index that existing parsers rely on is
+     * unchanged. REVERT: drop the six fields and restore '13 * 11'. */
+    /* Raw ADC1 witness fields appended 2026-11-09 (cnt0,cnt1,or0,or1,sum0,
+     * sum1): what the IN instructions on the ADC ports actually returned.
+     * Needed because the buffer-level evidence cannot distinguish "the port
+     * read nothing" from "something overwrote it later". Append-only again,
+     * so all existing field indices hold. REVERT: drop 6 specifiers/args and
+     * restore '19 * 11'. */
+    extern unsigned g_csd_adc_cnt[2];
+    extern unsigned g_csd_adc_or[2];
+    extern unsigned g_csd_adc_sum[2];
+    extern unsigned g_csd_xfer_n, g_csd_xfer_ticks, g_csd_xfer_max;
+    extern unsigned g_csd_xt_ct, g_csd_xt_in, g_csd_xt_out;
+    extern unsigned g_csd_xt_ct_n, g_csd_xt_in_n, g_csd_xt_out_n;
+    extern unsigned g_csd_xt_ubm, g_csd_xt_ubm_n, g_csd_xt_ubm_max;
+    if (n > 0 && n < (int)sizeof(buf) - 8 - 28 * 11) {
+        const unsigned ratio = xua_csd_get_usb_ratio();
+        unsigned ph = xua_csd_get_mic_phase();
+        const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
+        if (ph == CSD_MIC_PHASE_AUTO) ph = (ratio > 0u) ? (ratio - 1u) : 0u;
+        n += snprintf(buf + n, sizeof(buf) - (unsigned)n,
+                      /* 2026-11-09 fix (found by sa-0-5865978d): this format
+                       * string lost its LEADING comma when the alignment fields
+                       * were appended, so the last base field and `phase` merged
+                       * ("48000"+"7" -> "480007") and the reply parsed as 36
+                       * fields instead of 37, silently shifting every positional
+                       * reader. CHANGE: leading comma restored, 19 specifiers for
+                       * 19 arguments (phase,ratio,mode,cycles,fallbacks,
+                       * hits0..7,align_slot,qrd0,qrd1,occ0,occ1,cycles).
+                       * REVERT: remove the leading comma (do not -- it is a bug). */
+                      /* 2026-11-10: specifier count and argument count are the
+                       * contract; check both (a truncated silent field drop is
+                       * how the 28/28 bug hid). The tail is 37 fields after the
+                       * 2026-11-10 removal of the six deleted-engine timer
+                       * probes from the end of the reply. */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                      ph, ratio, mode,
+                      /* 2026-11-10: these 16 fields reported the deleted latch
+                       * decimator. Same field COUNT, new meaning, so every
+                       * positional reader stays aligned (the field-count bug in
+                       * the note above is why count is sacred). F1 = the count
+                       * the port decimator presents, F2 = words it has presented
+                       * to the mic stream (expect ~= host_rate x seconds); F3..F16
+                       * reserved at 0 for the phase sweep. */
+                      xua_csd_get_decim_slot(), xua_csd_get_decim_pub(),
+                      0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                      /* raw ADC1 witness (see xua_audiohub.xc): all zero with a
+                       * nonzero stimulus means the IN instructions never saw the
+                       * wire; nonzero means the loss is downstream of the read. */
+                      g_csd_adc_cnt[0], g_csd_adc_cnt[1],
+                      g_csd_adc_or[0], g_csd_adc_or[1],
+                      g_csd_adc_sum[0], g_csd_adc_sum[1],
+                      /* 3 more (2026-11-10): transfer count, total stall ticks,
+                       * worst stall tick -- 10 ns units. UNCONDITIONAL on
+                       * purpose: this file is C and does NOT receive
+                       * CSD_EXTRA_FLAGS (measured: with the fields behind
+                       * #ifdef CSD_XFER_TIMING the reply stayed at 43 fields
+                       * although the flag was present for the XC sources), so a
+                       * gated readout is an invisible no-op. The globals are
+                       * defined unconditionally in xua_audiohub.xc; only the
+                       * increments are gated, so a build without the flag reads
+                       * three zeros. */
+                      g_csd_xfer_n, g_csd_xfer_ticks, g_csd_xfer_max,
+                      g_csd_xt_ct, g_csd_xt_in, g_csd_xt_out,
+                      g_csd_xt_ct_n, g_csd_xt_in_n, g_csd_xt_out_n,
+                      g_csd_xt_ubm, g_csd_xt_ubm_n, g_csd_xt_ubm_max);
+    }
+    if (n > 0) {
+        if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */
+        SCPI_ResultCharacters(context, buf, n);
+    }
+    return SCPI_RES_OK;
+}
+
+/* ---- DIAG:UPSAMPLing:PHASE -- mic decimation phase (owner request 2026-11-09)
+ *
+ * "we need to have phase parameter to pick which sample to output during
+ *  the downsample process ... for 48K fs we need to run bit-perfect test 8
+ *  times with all 8 phase" -- the mic side decimates wire-rate slots to the
+ * host rate once per `ratio` frames (the port decimator in
+ * xua_audiohub.xc); this is the control that picks the slot. MIDI is the same
+ * SCPI engine (SysEx carries the ASCII text through csd_scpi_begin/put/end),
+ * so these two rows are the MIDI surface too -- no separate MIDI parsing, by
+ * design.
+ *
+ * Set: DIAG:UPSAMPLing:PHASE <0..7> (8 = back to AUTO). Validated TWICE: the
+ * literal range by gen_u32, then against the CURRENT live ratio -- phase
+ * >= ratio is
+ * rejected with -221 ILLEGAL_PARAMETER_VALUE (a phase that can never fire is
+ * a rig bug waiting to read as a silent pass, the vacuous-pass shape this
+ * project has been bitten by twice). The host tells rejected from accepted
+ * by SYSTem:ERRor:NEXT? (empty queue == accepted) and always by
+ * DIAG:UPSAMPLing:PHASE? re-reading what is in effect. The file's own
+ * constraint applies: no free-form reason string (device-dependent error
+ * info is off -- see push_hw_error), so the code plus the readback is the
+ * contract. A successful set replies "phase,ratio" so a one-shot command
+ * still confirms the accepted pair.
+ *
+ * ratio == 1 (stock capture): only phase 0 is settable and even it is
+ * inert -- the per-slot compare in the audiohub runs against
+ * CSD_MIC_SLOT_NEVER at ratio 1 (the boot value and the ratio-setter reset;
+ * the owner compute constraint allows only a load + compare per slot there,
+ * never a taken branch), and the transfer-point overwrite is guarded by
+ * g_csd_usb_ratio > 1u, so the banked bit-perfect capture results are
+ * untouched whether or not this command was ever used.
+ *
+ * REVERT: delete these two callbacks and their two table rows. */
+static SCPI_FPTR_CMD scpi_result_t ups_phase_set(scpi_t *context)
+{
+    const char *why = "phase";
+    uint32_t v;
+    /* 0..7 = latch that slot; 8 = return to AUTO (the default). 8 is not a
+     * phase -- it is the reset token, so the "phase >= ratio rejected" rule
+     * applies to 0..7 only. Any other spelling fails gen_u32. */
+    if (!gen_u32(context, "phase", &v, 0u, 8u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    const unsigned ratio = xua_csd_get_usb_ratio();
+    if (v < 8u && v >= ratio) {
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    xua_csd_set_mic_phase(v);   /* >= 8 clamps to AUTO in the audiohub setter */
+    char buf[24];
+    /* (unsigned) casts: xcore's uint32_t is unsigned long, and %u with a
+     * long argument drew -Wformat here; the reply digits are unchanged. */
+    int n = snprintf(buf, sizeof(buf), "%u,%u", (unsigned)v, ratio);
+    if (n > 0) SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
+/* Query: DIAG:UPSAMPLing:PHASE? -> "phase,ratio,mode".
+ * phase is the EFFECTIVE slot: an unset (AUTO) phase is reported as ratio-1
+ * -- the slot it actually latches, which is today's implicit decimation --
+ * so the reply answers "what is being captured right now", not "what was
+ * last typed". mode separates auto (0) from operator-set (1) without
+ * changing the phase field's meaning. REVERT: delete with its row. */
+static SCPI_FPTR_CMD scpi_result_t ups_phase_q(scpi_t *context)
+{
+    const unsigned ratio = xua_csd_get_usb_ratio();
+    unsigned ph = xua_csd_get_mic_phase();
+    const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
+    if (ph == CSD_MIC_PHASE_AUTO) ph = (ratio > 0u) ? (ratio - 1u) : 0u;
+    char buf[24];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u", ph, ratio, mode);
+    if (n > 0) SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
 {
     uint32_t enable = 0u;
@@ -1852,6 +2130,17 @@ static const scpi_command_t csd_commands[] = {
      * Reply is "xmos_en,applied,frame_hz,codec_refusals,ups_refusals". */
     { .pattern = "DIAG:UPSAMPLing:STATe",   .callback = ups_set           },
     { .pattern = "DIAG:UPSAMPLing:STATe?",  .callback = ups_q             },
+    /* Read-only truth table (see ups_info_q): armed/enabled/want/rates/ratio
+     * plus the pop side of the ring. New 2026-11-09; REVERT: delete this row. */
+    { .pattern = "DIAG:UPSAMPLing:INFO?",   .callback = ups_info_q        },
+    /* Host clock-request history (see ups_clk_q). REVERT: delete this row. */
+    { .pattern = "DIAG:UPSAMPLing:CLK?",    .callback = ups_clk_q         },
+    { .pattern = "DIAG:UPSAMPLing:DIVider?", .callback = ups_div_q        },
+    /* Mic decimation phase (owner request 2026-11-09): set 0..ratio-1, read
+     * effective phase + ratio + auto/operator mode. MIDI carries the same
+     * text as SysEx -- see ups_phase_set. REVERT: delete these two rows. */
+    { .pattern = "DIAG:UPSAMPLing:PHASE",   .callback = ups_phase_set     },
+    { .pattern = "DIAG:UPSAMPLing:PHASE?",  .callback = ups_phase_q       },
     { .pattern = "VOLume:TRIM:LOAD",        .callback = vol_trim_load     },
     { .pattern = "VOLume:TRIM:SAVe",        .callback = vol_trim_save     },
     { .pattern = "VOLume:TRIM:RESET",       .callback = vol_trim_reset    },

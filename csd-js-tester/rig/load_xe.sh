@@ -25,7 +25,7 @@ pkill -x xrun 2>/dev/null
 pkill -x xgdbserver 2>/dev/null
 sleep 2
 
-cd ~/XMOS/XTC/15.3.0 && set +u && source ./SetEnv >/dev/null 2>&1
+cd /home/ycui/XMOS-15.3.1 && set +u && source ./SetEnv >/dev/null 2>&1
 export XMOS_LICENSE_FILE=/home/ycui/workspace/xmos-installer/xTime_key.txt
 
 LOG=$(mktemp /tmp/run_xe.XXXXXX.log)
@@ -33,7 +33,7 @@ LOG=$(mktemp /tmp/run_xe.XXXXXX.log)
 # the subshell itself holding this script's stdout pipe, so a piped consumer
 # (`| tail`) never saw EOF and the rig's result stayed trapped in the pipe
 # after the rig exited -- the run looked hung at 6 minutes for a 1 minute soak.
-( cd ~/XMOS/XTC/15.3.0 && set +u && source ./SetEnv >/dev/null 2>&1
+( cd /home/ycui/XMOS-15.3.1 && set +u && source ./SetEnv >/dev/null 2>&1
   export XMOS_LICENSE_FILE=/home/ycui/workspace/xmos-installer/xTime_key.txt
   # --xscope is REQUIRED for any device-side output on XS3: --io alone leaves
   # the log at 0 bytes no matter what the firmware prints (measured
