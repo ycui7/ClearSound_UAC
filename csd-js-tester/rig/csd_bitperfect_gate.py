@@ -264,14 +264,14 @@ def pin_path():
         gen_off = False
     # 2026-11-10 (preset-2 proof, owner task): the DSP preset is normally
     # pinned to 0 (bypass). Env CSD_PRESET=2 (set by scratch/run_gate_armed.py
-    # with CSD_PRESET) runs the SAME gate over the FIR preset instead -- the
-    # only legitimate use being a build compiled with -DCSD_EQ_UNITY_KERNEL,
-    # where the coefficient table is a delta (b0=1) so the engine path runs
-    # but must be the identity; TEST1's all-zeros check and TEST2's
-    # zero-differing-bits bar are what PROVE that transparency, nothing here
-    # waives them. A shelf build under CSD_PRESET=2 fails the gate -- by
-    # design. REVERT: delete the getenv line and restore "DIAG:DSP:PRESet 0"
-    # / dsp_off.
+    # with CSD_PRESET) runs the SAME gate over the EQ engine path -- legitimate
+    # because the SHIPPED DEFAULT kernel is now the unity/identity section
+    # (b0=2^30, rest 0; owner design change 2026-11-10), so PRESet 2 with no
+    # coefficient writes must be the identity on the shipping image. Host-
+    # composed kernels are loaded over DIAG:DSP:COEFFicient (the former shelf
+    # or anything else); a non-unity kernel under CSD_PRESET=2 fails the gate
+    # -- by design. TEST1's all-zeros check and TEST2's zero-differing-bits
+    # bar are what PROVE that transparency, nothing here waives them.
     want_preset = os.environ.get("CSD_PRESET", "0").strip() or "0"
     scpi("DIAG:DSP:PRESet %s" % want_preset)
     p = scpi("DIAG:DSP:PRESet?")

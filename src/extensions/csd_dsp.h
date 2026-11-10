@@ -30,6 +30,24 @@ unsigned csd_dsp_diag_dop_latched(void);
 void csd_dsp_set_preset(unsigned p);
 unsigned csd_dsp_get_preset(void);
 
+/** Host-side coefficient aperture (DIAG:DSP:COEFFicient, 2026-11-10): the
+ *  single biquad section's five Q1.30 coefficients [b0,b1,b2,-a1,-a2],
+ *  index 0..4. The SHIPPED DEFAULT kernel is unity (identity), so preset
+ *  >= 2 is transparent out of the box; real kernels are host-loaded. The
+ *  EQ task adopts writes through the same config/resync/engage path a
+ *  PRESet change drives (csd_dsp_eq_task polls csd_dsp_bq_coef_seq beside
+ *  cfg_seq). Volatile contract: a reboot, any PRESet write, or a real
+ *  sample-rate change restores the shipped default. write returns 1 on
+ *  acceptance; read is the live/request-side value; diag_kernel_src is
+ *  the task-applied truth (0 shipped, 1 override) = INFO? eq_kernel_src.
+ *  All entry points run on the diagnostic thread except restore (also the
+ *  audio thread, on a real rate change) and coef_seq (EQ task poll). */
+int csd_dsp_bq_coef_write(unsigned idx, int32_t value);
+void csd_dsp_bq_coef_restore(void);
+int32_t csd_dsp_bq_coef_read(unsigned idx);
+unsigned csd_dsp_bq_coef_seq(void);
+unsigned csd_dsp_bq_diag_kernel_src(void);
+
 /** Apply the compile-time default preset (-DCSD_DSP_PRESET_DEFAULT=n); no-op otherwise. Call once at boot. */
 void csd_dsp_preset_boot(void);
 

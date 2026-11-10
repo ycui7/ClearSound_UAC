@@ -1,4 +1,9 @@
-// CSD PCM bass shelf -- XMOS lib_audio_dsp adsp_biquad (VPU assembly).
+// CSD PCM EQ section -- one 2nd-order DF-I biquad, scalar C path.
+//
+// SHIPPED DEFAULT kernel (2026-11-10 owner design change): the identity.
+// Preset >= 2 is transparent out of the box; kernels (the former bass shelf
+// or anything the tester composes) are host-loaded over
+// DIAG:DSP:COEFFicient -- see the aperture block below.
 //
 // Why a biquad and not the fd block FIR: the block engine is arithmetically
 // correct (vendor fd_block_fir test passes on this XU316, and our adapter
@@ -24,6 +29,7 @@
 #include <stdint.h>
 #include "dsp/adsp.h"
 #include "csd_dsp_bq_coeffs.h"
+#include "csd_eq_ring.h"   /* csd_eq_cfg_idx_get: rate stamp for coef posts */
 
 #ifdef CSD_DSP_DEBUG
 #include <stdio.h>
@@ -34,19 +40,152 @@ static const int32_t *bq_c = 0;                              // active coeffs
 static int32_t bq_lsh = 0;
 static int bq_ready = 0;
 
-/* CSD_EQ_UNITY_KERNEL (owner diagnostic 2026-11-10, Stage C of the preset-2
- * proof): replace the shipped bass-shelf table with a DELTA kernel so the
- * real EQ code path runs (preset >= 2, CSD_ENGINE_READY, adsp_biquad VPU
- * call per frame per channel) but is mathematically transparent: y[t]=x[t].
- * b0 = 2^30 in Q1.30 (lsh 0), every other coefficient zero: the accumulator
- * is (2^30 * x) >> 30 = x exactly -- no rounding freedom, no state feedback,
- * no saturation for any int32 input. This is NOT a preset change: numbering
- * and semantics are untouched (0 off, 1 delay, >=2 loads this engine); a
- * shipping build simply does not define the flag and the table above is used
- * verbatim. REVERT: delete this block and the two lines marked UNITY below. */
-#ifdef CSD_EQ_UNITY_KERNEL
-static const int32_t bq_c_unity[5] = { 1 << 30, 0, 0, 0, 0 };
+/* Host coefficient aperture + shipped default (2026-11-10, owner design
+ * change). The SHIPPED DEFAULT kernel is the unity/identity section:
+ * b0 = 2^30 in Q1.30 (lsh 0), everything else zero -- the accumulator is
+ * (2^30 * x) >> 30 = x exactly for any int32 input: no rounding freedom, no
+ * state feedback, no saturation. Preset >= 2 is therefore TRANSPARENT out of
+ * the box and the product applies no EQ by default (the former bass shelf is
+ * now just one kernel a host may load -- tools/dsp/gen_biquad.py keeps its
+ * design and gate and prints sets with `--shelf <fs>`).
+ *
+ * The state below is the request side of DIAG:DSP:COEFFicient. Discipline,
+ * same doctrine as csd_dsp_preset_req and csd_eq_cfg_post:
+ *   - payload words first, seq last, all volatile; every word an aligned
+ *     32-bit access in un-cached DP RAM (csd_eq_ring.c rule), so torn reads
+ *     are impossible by width and a seq change is the publication event;
+ *   - the DIAGNOSTIC thread posts (csd_dsp_bq_coef_write/_restore); the
+ *     AUDIO thread also restores on a real rate change (csd_dsp_set_rate).
+ *     Two writers on en/seq is the same documented situation the preset
+ *     request word has had since the idle-power bypass: a concurrent rate
+ *     change and coefficient post resolves either way and converges, and
+ *     every writer leaves a complete, valid request;
+ *   - the EQ TASK adopts through the SAME config/resync/engage adoption a
+ *     PRESet change drives (csd_dsp_eq_task polls the seq beside cfg_seq):
+ *     bq_c is (re)pointed only inside csd_dsp_bq_config, so the table is
+ *     never poked under the running engine and the bit-timed loop pays
+ *     NOTHING for this aperture -- zero new instructions on the audio core,
+ *     one volatile load per task iteration;
+ *   - VOLATILE BY CONTRACT: RAM only, never journalled or persisted. A
+ *     reboot, any PRESet write, or a sample-rate change returns the engine
+ *     to the shipped default (unity). A board cannot sit in a shipping
+ *     configuration wearing a tester kernel.
+ *   - applied state (coef_src, the per-frame coefficient copy) is task-
+ *     written; the SCPI readback answers from the REQUEST side (what the
+ *     host composed) exactly like PRESet? reports the posted request, and
+ *     the task-applied truth is INFO? field eq_kernel_src. */
+static volatile int32_t  coef_word[5];    /* payload: host-composed kernel  */
+static volatile unsigned coef_en;         /* 1 = override in force          */
+static volatile unsigned coef_rate;       /* rate idx the post was made for */
+static volatile unsigned coef_seq;        /* bumped after every payload edit*/
+static int32_t coef_live[5];              /* task-owned live copy: per-frame reads
+                                           * never touch the request payload  */
+static volatile unsigned coef_src;        /* 0 shipped default, 1 override (task) */
+
+/* Host kernels are Q1.30 with lsh 0 by contract (the single shipping
+ * section's format; lsh is deliberately not host-settable). */
+#define CSD_BQ_HOST_LSH 0
+
+/* Witness globals are defined unconditionally further down this TU (the SCPI
+ * file reads them); forward-declare the two the config/clear paths bump. */
+extern unsigned g_csd_bq_cfg_calls, g_csd_bq_clear_calls;
+
+void csd_dsp_bq_config(int rate_idx)
+{
+    bq_ready = 0;
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_bq_cfg_calls++;
 #endif
+    if (rate_idx < 0 || (unsigned)rate_idx >= CSD_BQ_NUM_RATES) return;
+    const unsigned ri = (unsigned)rate_idx;
+
+    /* Adopt a host-composed kernel only if one is in force FOR THIS RATE.
+     * The payload is copied only while coef_seq is stable, so a post that
+     * lands mid-copy can never half-apply: coef_seq differing sends the EQ
+     * task around its poll again and config runs once more. */
+    unsigned s = 0u, en = 0u, rt = 0u;
+    int32_t w[5];
+    for (unsigned tries = 0; tries < 4u; tries++) {
+        s = coef_seq;
+        en = coef_en; rt = coef_rate;
+        for (unsigned i = 0; i < 5u; i++) w[i] = coef_word[i];
+        if (coef_seq == s) break;
+    }
+    if (en && rt == ri) {
+        for (unsigned i = 0; i < 5u; i++) coef_live[i] = w[i];
+        bq_c = coef_live;
+        bq_lsh = CSD_BQ_HOST_LSH;
+        coef_src = 1u;
+    } else {
+        bq_c = csd_dsp_bq_rates[ri].coeffs;   /* shipped default (unity) */
+        bq_lsh = csd_dsp_bq_rates[ri].lsh;
+        coef_src = 0u;
+    }
+    memset(bq_state, 0, sizeof bq_state);
+    bq_ready = 1;
+#ifdef CSD_DSP_DEBUG
+    printf("CSDHQ: config rate=%u lsh=%d c=[%d,%d,%d,%d,%d]\n",
+           csd_dsp_bq_rates[ri].rate, (int)bq_lsh,
+           (int)bq_c[0], (int)bq_c[1], (int)bq_c[2], (int)bq_c[3], (int)bq_c[4]);
+#endif
+}
+
+void csd_dsp_bq_clear(void) { bq_ready = 0; bq_c = 0; coef_src = 0u;
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_bq_clear_calls++;
+#endif
+}
+int  csd_dsp_bq_ready(void) { return bq_ready; }
+
+/* ---- aperture entry points (see the aperture block above) --------------
+ * All run on the DIAGNOSTIC thread except csd_dsp_bq_coef_restore (also the
+ * AUDIO thread, on a real rate change) and csd_dsp_bq_coef_seq (EQ task
+ * poll). csd_dsp_bq_coef_read is a readback helper for the SCPI thread.
+ * Scalar-only parameters, like every cross-thread call in this app
+ * (csd_trim_store.h lesson: C functions with pointer parameters do not link
+ * from XC). */
+static const int32_t *coef_default_for(unsigned rate_idx)
+{
+    if (rate_idx >= CSD_BQ_NUM_RATES) rate_idx = 0;
+    return csd_dsp_bq_rates[rate_idx].coeffs;
+}
+
+int csd_dsp_bq_coef_write(unsigned idx, int32_t value)
+{
+    if (idx >= 5u) return 0;                 /* single section, 5 coeffs */
+    if (!coef_en) {
+        /* First write of a generation starts from the shipped default for
+         * the rate the engine is currently posted for, so partial
+         * composition (patch one coefficient) is well defined; the stamp is
+         * the config-time rate match below. */
+        const unsigned rt = csd_eq_cfg_idx_get();
+        const int32_t *base = coef_default_for(rt);
+        for (unsigned i = 0; i < 5u; i++) coef_word[i] = base[i];
+        coef_rate = rt;
+        coef_en = 1u;
+    }
+    coef_word[idx] = value;
+    coef_seq++;                              /* payload first, seq last */
+    return 1;
+}
+
+void csd_dsp_bq_coef_restore(void)
+{
+    if (!coef_en) return;                    /* nothing to clear: no churn */
+    coef_en = 0u;                            /* back to the SHIPPED DEFAULT:
+                                              * unity, not the old shelf    */
+    coef_seq++;
+}
+
+int32_t csd_dsp_bq_coef_read(unsigned idx)
+{
+    if (idx >= 5u) return 0;                 /* callers validate; belt only */
+    if (coef_en) return coef_word[idx];
+    return coef_default_for(csd_eq_cfg_idx_get())[idx];
+}
+
+unsigned csd_dsp_bq_coef_seq(void)      { return coef_seq; }
+unsigned csd_dsp_bq_diag_kernel_src(void) { return coef_src; }
 
 /* Witnesses for the 384 kHz left-channel EQ fault (2026-11-10). Globals are
  * defined UNCONDITIONALLY (csd_diag_scpi.c does not receive CSD_EXTRA_FLAGS,
@@ -62,35 +201,6 @@ unsigned g_csd_bq_out_or[2];     /* OR of every output word, per channel */
 unsigned g_csd_bq_in_nz[2];      /* nonzero-input census, per channel */
 unsigned g_csd_bq_cfg_calls;     /* bq_config invocations */
 unsigned g_csd_bq_clear_calls;   /* bq_clear invocations */
-
-void csd_dsp_bq_config(int rate_idx)
-{
-    bq_ready = 0;
-#ifdef CSD_EQ_DIAG_WITNESS
-    g_csd_bq_cfg_calls++;
-#endif
-    if (rate_idx < 0 || (unsigned)rate_idx >= CSD_BQ_NUM_RATES) return;
-    bq_c = csd_dsp_bq_rates[rate_idx].coeffs;
-    bq_lsh = csd_dsp_bq_rates[rate_idx].lsh;
-#ifdef CSD_EQ_UNITY_KERNEL
-    bq_c = bq_c_unity;   /* UNITY: diagnostic delta kernel (see above) */
-    bq_lsh = 0;          /* UNITY */
-#endif
-    memset(bq_state, 0, sizeof bq_state);
-    bq_ready = 1;
-#ifdef CSD_DSP_DEBUG
-    printf("CSDHQ: config rate=%u lsh=%d c=[%d,%d,%d,%d,%d]\n",
-           csd_dsp_bq_rates[rate_idx].rate, (int)bq_lsh,
-           (int)bq_c[0], (int)bq_c[1], (int)bq_c[2], (int)bq_c[3], (int)bq_c[4]);
-#endif
-}
-
-void csd_dsp_bq_clear(void) { bq_ready = 0; bq_c = 0;
-#ifdef CSD_EQ_DIAG_WITNESS
-    g_csd_bq_clear_calls++;
-#endif
-}
-int  csd_dsp_bq_ready(void) { return bq_ready; }
 
 /* Filter one stereo frame in place.
  *

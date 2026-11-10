@@ -151,6 +151,22 @@ static unsigned fmt_u32_hex(uint32_t v, char *out, unsigned cap)
     return i;
 }
 
+/* Signed decimal: one leading '-', magnitude via fmt_u32. The magnitude is
+ * negated in int64 before the cast so INT32_MIN survives (the vol_trim_q
+ * inline pattern, factored out for the two COEFFicient replies).
+ * NUL-terminates, returns the digit count, 0 if it would not fit. */
+static unsigned fmt_s32(int32_t v, char *out, unsigned cap)
+{
+    if (v < 0 && cap >= 2u) {
+        out[0] = '-';
+        unsigned n = fmt_u32((uint32_t)(-(int64_t)v), out + 1, cap - 1u);
+        if (n == 0) { out[0] = 0; return 0; }
+        out[1 + n] = 0;
+        return n + 1u;
+    }
+    return fmt_u32((uint32_t)v, out, cap);
+}
+
 /* ---- number parsing we own -------------------------------------------- */
 /* Register addresses and values are conventionally written in hex. Whether
  * this library's numeric path accepts a 0x prefix is not documented, so we do
@@ -493,6 +509,111 @@ static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context)
         return SCPI_RES_ERR;
     }
     csd_dsp_set_preset((unsigned)v);
+    /* Volatility contract (2026-11-10): any PRESet write returns the engine
+     * to the SHIPPED DEFAULT kernel -- unity/identity, not the old shelf --
+     * so a tester-composed kernel can never survive into a preset change.
+     * See the aperture block in csd_dsp_bq.c. */
+    csd_dsp_bq_coef_restore();
+    return SCPI_RES_OK;
+}
+
+/* ---- DIAG:DSP:COEFFicient -- host-side kernel aperture (2026-11-10) -----
+ * The single shipping biquad section exposes its five Q1.30 coefficients
+ * [b0, b1, b2, -a1, -a2] for per-index read and write. THE SHIPPED DEFAULT
+ * IS THE UNITY/IDENTITY KERNEL (b0 = 1073741824 = 2^30, rest 0): the
+ * DEFault form below restores UNITY, NOT the former bass shelf -- the shelf
+ * is no longer shipped behaviour, it is one kernel among many that a host
+ * loads through this aperture (tools/dsp/gen_biquad.py `--shelf <fs>`
+ * prints a quantised, gated set).
+ *
+ * Set:    DIAG:DSP:COEFFicient <0..4>,<value>
+ *         Parameters are COMMA-separated, like every multi-parameter command
+ *         on this device (GENerator:*): libscpi's lexer drops a
+ *         space-separated second parameter before the callback runs (proved
+ *         on hardware 2026-11-10: "COEFFicient 0 12345" leaves the table
+ *         untouched and queues no error, "COEFFicient 0,12345" takes).
+ *         <value> is a signed Q1.30 integer. Bare DECIMAL works
+ *         ("1073741824", "-1068721454"); QUOTE anything else -- the libscpi
+ *         lexer rejects/quietly drops bare 0x tokens, exactly the trap
+ *         documented above b64_decode for register payloads, so hex and
+ *         mixed spellings must be quoted: 0,"0x40000000", 0,"-0x80000000"
+ *         (both verified on hardware). Out-of-int32 values are REJECTED
+ *         with -224 ILLEGAL_PARAMETER_VALUE, never clamped (parse_snum's
+ *         reject-never-wrap rule); a bad index gets -224 too; a non-numeric
+ *         first parameter gets -151. Set half answers nothing (the client's
+ *         no-'?'-means-silent contract, see csd_diag.py _run_commands);
+ *         confirmation is DIAG:DSP:COEFFicient? <idx>.
+ * Query:  DIAG:DSP:COEFFicient? <0..4>  -> the live value, signed decimal.
+ *         Request-side truth (what the host composed, or the shipped
+ *         default for the posted rate), exactly like PRESet? reports the
+ *         posted request; the task-APPLIED truth is INFO? eq_kernel_src.
+ * Restore: DIAG:DSP:COEFFicient:DEFault  (no reply; errors via the queue)
+ *
+ * Adoption: the write lands on the request side and the EQ task adopts it
+ * through the SAME config/resync/engage path a PRESet change drives (see
+ * csd_dsp_bq.c) -- the table is never poked under the running engine and
+ * the bit-timed loop pays nothing. Overrides are volatile: RAM only,
+ * cleared by reboot, by any PRESet write (see set_dsp above) and by a real
+ * sample-rate change (csd_dsp_set_rate).
+ *
+ * Patterns carry no parameter placeholders -- libscpi matches the pattern
+ * against the command HEADER only (see set_dsp's block note), and
+ * matchCommand fails a row whose pattern is exhausted while the header
+ * still has text, so the three rows cannot shadow each other. */
+static SCPI_FPTR_CMD scpi_result_t coef_set(scpi_t *context)
+{
+    char txt[24];
+    uint32_t idx;
+    int32_t v;
+
+    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
+    if (!parse_num(txt, strlen(txt), &idx)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_INVALID_STRING_DATA);
+        return SCPI_RES_ERR;
+    }
+    if (idx >= 5u) {                        /* single section, 5 coeffs */
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
+    if (!parse_snum(txt, strlen(txt), &v)) { /* int32 domain: out of range
+                                               * is rejected, never clamped */
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    if (!csd_dsp_bq_coef_write(idx, v)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;   /* silent by contract; readback confirms */
+}
+
+static SCPI_FPTR_CMD scpi_result_t coef_q(scpi_t *context)
+{
+    char txt[16];
+    uint32_t idx;
+
+    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
+    if (!parse_num(txt, strlen(txt), &idx)) {
+        SCPI_ErrorPush(context, SCPI_ERROR_INVALID_STRING_DATA);
+        return SCPI_RES_ERR;
+    }
+    if (idx >= 5u) {
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    char buf[16];
+    unsigned n = fmt_s32(csd_dsp_bq_coef_read(idx), buf, sizeof buf);
+    if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                  return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t coef_default(scpi_t *context)
+{
+    (void)context;
+    csd_dsp_bq_coef_restore();   /* SHIPPED DEFAULT: unity, not the shelf */
     return SCPI_RES_OK;
 }
 
@@ -1906,7 +2027,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
      * by the task. REVERT with the ring. */
     extern unsigned g_csd_eq_underrun, g_csd_eq_overrun, g_csd_eq_occ_high;
     extern unsigned g_csd_eq_cfg_adopt;
-    if (n > 0 && n < (int)sizeof(buf) - 8 - 60 * 11) {
+    if (n > 0 && n < (int)sizeof(buf) - 8 - 75 * 11) {   /* tail is 73 fields
+                                                          * after eq_kernel_src
+                                                          * (2026-11-10) */
         const unsigned ratio = xua_csd_get_usb_ratio();
         unsigned ph = xua_csd_get_mic_phase();
         const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
@@ -1930,7 +2053,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
-                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
                        * decimator. Same field COUNT, new meaning, so every
@@ -2001,7 +2124,17 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * require eq_overrun == 0 and eq_underrun transient
                        * (pipeline fill only). REVERT: delete these 4 fields. */
                       g_csd_eq_underrun, g_csd_eq_overrun,
-                      g_csd_eq_occ_high, g_csd_eq_cfg_adopt);
+                      g_csd_eq_occ_high, g_csd_eq_cfg_adopt,
+                      /* 1 more (2026-11-10, host coefficient aperture):
+                       * index 90 eq_kernel_src -- the TASK-APPLIED truth of
+                       * the single biquad section: 0 = shipped default
+                       * kernel (unity/identity), 1 = host-composed override
+                       * (DIAG:DSP:COEFFicient). Written by the EQ task at
+                       * config, so it reports what the engine is actually
+                       * running, unlike the request-side readback. A
+                       * measurement is attributable only through this
+                       * field. REVERT: delete this field. */
+                      csd_dsp_bq_diag_kernel_src());
     }
     if (n > 0) {
         if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */
@@ -2138,6 +2271,16 @@ static const scpi_command_t csd_commands[] = {
      * saw -113). Parameters are read with SCPI_Param*() inside the callback. */
     { .pattern = "DIAG:DSP:PRESet?", .callback = q_dsp   },
     { .pattern = "DIAG:DSP:PRESet",  .callback = set_dsp },
+
+    /* Host-side kernel aperture for the single biquad section (see
+     * coef_set's block note). Query and set halves are separate entries;
+     * the DEFault form restores the SHIPPED DEFAULT -- unity, not the
+     * former shelf. matchCommand cannot let one of these shadow another
+     * (a row whose pattern is exhausted while the header still has text
+     * fails the match), so row order is not load-bearing. */
+    { .pattern = "DIAG:DSP:COEFFicient?",       .callback = coef_q       },
+    { .pattern = "DIAG:DSP:COEFFicient:DEFault",.callback = coef_default },
+    { .pattern = "DIAG:DSP:COEFFicient",        .callback = coef_set     },
 
     /* Unit identity. Queries only -- there is deliberately no setter and no
      * OTP write path. Patterns carry no parameter placeholders, same rule as

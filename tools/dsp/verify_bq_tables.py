@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """T7: the shipped biquad header must equal the design, byte-exact.
 
-Regenerates csd_dsp_bq_rates[] in memory with gen_biquad.shelf_coeffs() and
-compares against src/extensions/csd_dsp_bq_coeffs.h -- catching a stale header
-(hand-edited, or generated before a spec change) that would otherwise ship a
-filter nobody measured. Also re-checks the acoustic requirements on the
-QUANTISED integers, so the gate tests what the VPU actually computes:
+SHIPPED DEFAULT is the UNITY/identity kernel (owner design change
+2026-11-10): every header row must match gen_biquad.unity_coeffs() exactly,
+so PRESet 2 is transparent on the shipping image with no coefficient writes.
+Kernels are host-loaded over DIAG:DSP:COEFFicient; the shelf DESIGN is still
+gated here (response of the quantised integers, so a `--shelf <fs>` set a
+tester loads is one this file has measured):
   bass  >= -0.5 dB at 30/60 Hz, treble -6.00 +/- 0.25 dB at 1k/4k/10k,
   no int32 overflow with a full-scale Nyquist drive.
 """
@@ -44,17 +45,20 @@ def main():
               % (len(shipped), len(G.RATES)))
         return 1
     bad = 0
+    u_q, u_lsh = G.unity_coeffs()
     for (q, lsh, rate), fs in zip(shipped, G.RATES):
         if rate != fs:
             print("T7 FAIL: row %d: rate %d != %d" % (rate, rate, fs)); bad += 1
             continue
-        e_q, e_lsh = G.shelf_coeffs(fs)
-        if q != e_q or lsh != e_lsh:
-            print("T7 FAIL: fs=%d header coeffs differ from design\n  hdr %s lsh=%d\n  gen %s lsh=%d"
-                  % (fs, q, lsh, e_q, e_lsh)); bad += 1
+        if q != u_q or lsh != u_lsh:
+            print("T7 FAIL: fs=%d header is NOT the shipped unity default"
+                  "\n  hdr %s lsh=%d\n  want %s lsh=%d"
+                  % (fs, q, lsh, u_q, u_lsh)); bad += 1
             continue
-        # requirements on the QUANTISED integers
-        g = {f: 20 * __import__("math").log10(max(G.q_response(q, lsh, f, fs), 1e-12))
+        # Requirements on the shelf DESIGN (host-loadable kernel via
+        # DIAG:DSP:COEFFicient -- `--shelf <fs>` prints these integers).
+        e_q, e_lsh = G.shelf_coeffs(fs)
+        g = {f: 20 * __import__("math").log10(max(G.q_response(e_q, e_lsh, f, fs), 1e-12))
              for f in (30, 60, 90, 1000, 4000, 10000)}
         if g[30] < -0.15:
             print("T7 FAIL: fs=%d bass plateau 30Hz %.2f dB (want >= -0.15)"
@@ -68,14 +72,16 @@ def main():
             if not (-6.25 < g[f] < -5.75):
                 print("T7 FAIL: fs=%d treble %d Hz = %.2f dB (want -6.00 +/-0.25)"
                       % (fs, f, g[f])); bad += 1
-        # full-scale Nyquist drive must not overflow int32
+        # full-scale Nyquist drive must not overflow int32 (the shelf
+        # design, not the unity default -- unity cannot overflow by
+        # construction and is covered by gen_biquad's identity check)
         st = [0, 0, 0, 0]
-        sh = G.Q - lsh
+        sh = G.Q - e_lsh
         worst = 0
         for i in range(2048):
             x = 2147483647 if (i & 1) else -2147483647
-            y = (q[0] * x + q[1] * st[0] + q[2] * st[1]
-                 + q[3] * st[2] + q[4] * st[3]) >> sh
+            y = (e_q[0] * x + e_q[1] * st[0] + e_q[2] * st[1]
+                 + e_q[3] * st[2] + e_q[4] * st[3]) >> sh
             st[1] = st[0]; st[0] = x
             st[3] = st[2]; st[2] = y
             worst = max(worst, abs(y))
@@ -84,8 +90,9 @@ def main():
     if bad:
         print("T7 FAIL: %d problem(s)" % bad)
         return 1
-    print("T7 PASS: shipped biquad header == design, %d rates, "
-          "bass flat / treble -6 dB / no overflow" % len(shipped))
+    print("T7 PASS: shipped biquad header == unity default, %d rates; shelf "
+          "design (host-loadable) bass flat / treble -6 dB / no overflow"
+          % len(shipped))
     return 0
 
 

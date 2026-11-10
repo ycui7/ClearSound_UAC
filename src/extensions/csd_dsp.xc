@@ -153,8 +153,10 @@ unsigned g_csd_ubm_reg_max[5];
  *   frame likewise passes through unfiltered and g_csd_eq_underrun asserts.
  * Latency: pipeline depth ~1 frame once the task is hot (the task drains
  * immediately), bounded above by the ring (64 frames = 167 us at 384 kHz).
- * The unity-kernel gate (CSD_PRESET=2 under -DCSD_EQ_UNITY_KERNEL) is
- * unaffected by the fill frames because the delta kernel is the identity.
+ * The shipped default kernel IS the identity (csd_dsp_bq.c, 2026-11-10), so
+ * the preset-2 bit-perfect gate is unaffected by the fill frames because the
+ * default kernel is the identity; host-composed kernels are adopted through
+ * the same config/resync/engage path via DIAG:DSP:COEFFicient.
  *
  * Cross-thread visibility: same-tile DP-RAM globals driven through the
  * csd_vol_load/csd_vol_store volatile-pointer accessors already proven in this
@@ -390,6 +392,15 @@ void csd_dsp_set_rate(unsigned hz)
      * rate => keep running state, touch nothing. */
     if (idx >= 0 && idx == csd_dsp.rateIdx && csd_dsp.n == csd_dsp_rates[idx].num_taps)
         return;
+
+    /* A REAL rate change drops any tester-installed kernel: overrides were
+     * composed against the old rate and are meaningless at the new one, and
+     * the board must never sit in a shipping configuration wearing them
+     * (volatility contract, csd_dsp_bq.c). The first stream after boot is
+     * NOT a rate change (rateIdx < 0) -- that is the pinned-before-open
+     * pattern the bit-perfect gate arms with, and the config-time rate stamp
+     * in csd_dsp_bq_config is what protects a stale post there. */
+    if (csd_dsp.rateIdx >= 0) csd_dsp_bq_coef_restore();
 
 #ifdef CSD_GEN_EN
     /* Rate actually changed: the generator derives its phase steps from fs, so
@@ -871,13 +882,19 @@ void csd_dsp_eq_task(void)
 {
     thread_speed();
     unsigned applied_seq = 0xFFFFFFFFu, applied_eng = 0xFFFFFFFFu;
+    unsigned applied_cseq = 0xFFFFFFFFu;   /* host-coef aperture seq (bq.c) */
     timer t;
     unsigned deadline = 0u;
     while (1) {
         unsigned seq = csd_eq_cfg_seq_get();
         unsigned eng = csd_eq_cfg_on_get();
-        if (seq != applied_seq || eng != applied_eng) {
-            applied_seq = seq; applied_eng = eng;
+        /* One volatile load per iteration: a coefficient post from the
+         * diagnostic thread adopts HERE, through the same config/resync/
+         * engage block a PRESet change drives -- the bit-timed loop is not
+         * involved (see the aperture block in csd_dsp_bq.c). */
+        unsigned cseq = csd_dsp_bq_coef_seq();
+        if (seq != applied_seq || eng != applied_eng || cseq != applied_cseq) {
+            applied_seq = seq; applied_eng = eng; applied_cseq = cseq;
             if (eng) CSD_ENGINE_CONFIG((int)csd_eq_cfg_idx_get());
             else     CSD_ENGINE_CLEAR();
             csd_eq_take_resync();     /* new engine epoch, clean pipeline   */
