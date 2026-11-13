@@ -219,6 +219,11 @@ unsigned g_csd_ubm_reg_max[5];
 
 extern unsigned s_feedcalls_task;   /* dp108 feed-call attribution */
 extern unsigned s_feedcalls_audio;
+extern unsigned g_csd_probe_mask;   /* REVERT(dp199): attribution mask for
+                                     * hot-path diagnostic gates (defined in
+                                     * xua_audiohub.xc; same cross-TU read
+                                     * idiom as g_csd_ups_echo_mode's
+                                     * setters accept from the SCPI task). */
 
 static void csd_ubm_note(unsigned idx, unsigned a, unsigned b)
 {
@@ -299,10 +304,21 @@ void csd_dsp_frame(unsigned *s)
      * leave the FIR ring holding samples from before a mid-stream DoP window
      * and replay them into the PCM that follows. */
     {
+        /* REVERT(dp199): divided by 32 (same reason as the UBM preset
+         * adopt: the xt_ubm witnesses price the csd_gen_mix_dop cross-TU
+         * read + compare at the top of the 59 t dsp region; the verdict is
+         * a level from the mixer voter and this branch only adopts an
+         * EDGE. This product has no DSD path at all (dsdMode is forced
+         * OFF at receive_command), so the DoP bypass latch carries audio
+         * only through the voting in csd_gen_mix_begin — the adopt
+         * latency this divider adds is <=167 us. */
+        static unsigned csd_dop_div = 0u;
+        if ((++csd_dop_div & 31u) == 0u) {
         unsigned d = csd_gen_mix_dop();
         if (d != csd_dsp.dop) {
             csd_dsp.dop = d;
             csd_dsp_restart();
+        }
         }
     }
 #elif defined(CSD_GEN_EN)
@@ -341,7 +357,11 @@ void csd_dsp_frame(unsigned *s)
             unsigned r = h + n - D;
             if (r >= n) r -= n;
 #ifdef CSD_EQ_DIAG_WITNESS
-            g_csd_eq_delay_frames++;
+            /* REVERT(dp204): bit5-gated (was unconditional): the DELAY
+             * preset path runs per frame on the wire core at PROBE legs
+             * (passT uses a preset), so this RMW was 384k/s on the
+             * zero-margin ratio-1 loop. */
+            if (g_csd_probe_mask & 32u) g_csd_eq_delay_frames++;
 #endif
             for (unsigned ch = 0; ch < 2; ch++) {
                 int32_t y = csd_dsp.ring[ch][r];      /* 'out' is an XC keyword */
@@ -398,7 +418,13 @@ void csd_dsp_frame(unsigned *s)
             s[0] = csd_eq_handoff(s[0], s[1]);
             s[1] = csd_eq_stage_r;
             eq_pushed = csd_eq_pushed;
-            if (csd_feed_owner) {
+            /* REVERT(dp199): feed-mirror gated on echo!=2 — the ONLY
+             * readers of csd_feed_w0/w1 are the ECHO-1 mic-mirror branch
+             * below (and the FEED? SCPI view, meaningless under ECHO 2
+             * because the mirror that would carry them is skipped). The
+             * two cross-file global stores sat on every transfer frame of
+             * the wire thread for nothing. */
+            if (csd_feed_owner && g_csd_ups_echo_mode != 2u) {
                 csd_feed_w0 = (int)s[0];
                 csd_feed_w1 = (int)s[1];
             }
@@ -721,7 +747,11 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
                           unsigned sampsFromAudioToUsb[])
 {
 #ifdef CSD_EQ_DIAG_WITNESS
-    g_csd_ubm_calls++;
+    /* REVERT(dp204): bit5-gated (was unconditional under the build flag).
+     * UBM runs on the audiohub core once per frame: at ratio 1 this RMW
+     * ran 384k/s on the zero-margin wire loop. Reads boot value at
+     * PROBE 0; set DEBUG:CSD:PROBE 32 BEFORE the stream to arm. */
+    if (g_csd_probe_mask & 32u) g_csd_ubm_calls++;
 #endif
 #if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     /* REVERT(dp160 2026-11-13): the five region timers (6 reads + 5 notes
@@ -737,8 +767,18 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 #endif
     /* Adopt any preset the diagnostic thread posted, here at a frame boundary
      * where no sample is mid-computation. Only this thread writes csd_dsp.
-     * See csd_dsp_set_preset for why the diagnostic thread may not. */
-    csd_dsp_apply_pending_preset();
+     * See csd_dsp_set_preset for why the diagnostic thread may not.
+     * REVERT(dp199): divided by 32 (every 32nd host frame ~= 167 us at
+     * 192 kHz, 83 us at 384 kHz). WHY: the xt_ubm attribution witnesses
+     * (armed 192k leg) price this call at 14.4 t/transfer on the wire
+     * thread's transfer frame — it is a level-adopting control-plane read
+     * (bypass level + posted preset), not a per-frame data path, and the
+     * only latency commitments are control-plane (a PRESet command is
+     * echoed from the request word immediately; stream (re-)config adopts
+     * undivided in csd_dsp_set_rate; the idle-power bypass adopts
+     * with a 167 us worst case, orders under the power-state dwell). */
+    { static unsigned csd_ap_div = 0u;
+      if ((++csd_ap_div & 31u) == 0u) { csd_dsp_apply_pending_preset(); } }
 #if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u1; csd_ubm_note(0, u0, u1);
 #endif
@@ -761,8 +801,8 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 #if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u2;
 #endif
-    csd_pw_note_host_sample((unsigned)0, (int)sampsFromUsbToAudio[0]);
-    csd_pw_note_host_sample((unsigned)1, (int)sampsFromUsbToAudio[1]);
+    csd_pw_note_host_pair((int)sampsFromUsbToAudio[0],
+                          (int)sampsFromUsbToAudio[1]);  /* REVERT(dp199) */
 #if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u3; csd_ubm_note(1, u2, u3);
 #endif
@@ -956,8 +996,15 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     csd_ubm_note(4, u0, u5);
 #endif
 #ifdef CSD_GEN_EN
+    /* REVERT(dp199): POSTDSP peak notes gated behind probe bit5 — pure
+     * diagnostic peak-hold on the transfer-frame path (xt_ubm: the two
+     * notes + branch sit in the ~10 t residue between the four sub-region
+     * timers and the calls). Read the DACPeak? window only in PROBE-32
+     * legs. PREDSP notes are compiled out here anyway (GEN_INSTRUMENT). */
+    if (g_csd_probe_mask & 32u) {
     csd_mb_note_dac_sample(0u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[0]);
     csd_mb_note_dac_sample(1u, CSD_NODE_POSTDSP, (int)sampsFromUsbToAudio[1]);
+    }
 #endif
 #ifdef CSD_DSP_DIAG_RAW
     sampsFromAudioToUsb[1] = sampsFromUsbToAudio[0];
@@ -1011,6 +1058,13 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
              * stale one — the scorer treats zeros as dead frames, never as
              * data. Tear-safe: odd seq = pair mid-commit, hold previous. */
             unsigned sq = csd_pop_seq;
+            /* REVERT(dp180): hold-last, not zero-inject. A host-clock
+             * mailbox is a zero-order hold: a stale read must repeat the
+             * last pair (correct DAC semantics), never invent zeros.
+             * 11.11.40 injected zeros to make freeze visible to the
+             * scorer — that diagnostic corrupted every ratio-2 mic FFT
+             * (zerofrac 13/36) while the underlying stream was sound.
+             * Staleness remains COUNTED via g_csd_ups_mirror_seq/stale. */
             if ((sq & 1u) == 0u && sq != g_csd_ups_mirror_seq) {
                 g_csd_ups_mirror_seq = sq;
                 unsigned a = (unsigned)csd_pop_w0;
@@ -1018,13 +1072,7 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
                 if (csd_pop_seq == sq) {
                     sampsFromAudioToUsb[0] = a;
                     sampsFromAudioToUsb[1] = b;
-                } else {
-                    sampsFromAudioToUsb[0] = 0u;
-                    sampsFromAudioToUsb[1] = 0u;
                 }
-            } else {
-                sampsFromAudioToUsb[0] = 0u;
-                sampsFromAudioToUsb[1] = 0u;
             }
         }
         g_csd_feed_writes++;   /* INFO? field 98 (REVERT with the feed) */
@@ -1041,6 +1089,10 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
  * config/clear is executed HERE, adopting posted requests -- engine state has
  * exactly one writer core after adoption. */
 extern void thread_speed(void);
+/* REVERT(dp201): task-side freeze witnesses (defined in csd_ups_block.c;
+ * same volatile-in-C / plain-extern-in-XC pattern as csd_pop_seq). */
+extern unsigned g_csd_eq_stage, g_csd_eq_stage_t;
+extern unsigned csd_ups_now(void);
 
 #ifndef CSD_DSP_INLINE_EQ
 /* Not compiled in the inline A/B arm: there the frame hook writes the EQ
@@ -1096,6 +1148,10 @@ void csd_dsp_eq_task(void)
 #endif
         }
         g_csd_task_loops++;   /* REVERT(dp172) */
+        if (g_csd_probe_mask & 16u) {   /* REVERT(dp201): task-loop stage
+         * witness, bit4-gated per dp202 lean-gate (was an unconditional
+         * timer read per task loop at idle ~0.8 M/s). */
+            g_csd_eq_stage = 1u; g_csd_eq_stage_t = csd_ups_now(); }
         if (!csd_eq_take_ready()) {
             /* Idle backoff (XC select/timerafter): re-seed from the live
              * timer so a busy phase can never leave a stale deadline that

@@ -20,6 +20,17 @@ void csd_pw_note_host_sample(unsigned ch, int sample)
         pw_host_activity++;
     }
 }
+/* REVERT(dp199): pair form for the wire-rate hook. UserBufferManagement
+ * calls the note TWICE per host frame on the audiohub transfer frame; the
+ * xt_ubm witnesses priced the region at 20.6 t/transfer, i.e. dominated by
+ * two cross-TU call slots, not by the four-instruction bodies. Identical
+ * semantics (two frames counted, activity counted per non-silent channel). */
+void csd_pw_note_host_pair(int s0, int s1)
+{
+    pw_host_frames += 2u;
+    if (s0 != 0 && (unsigned)s0 != CSD_PW_UNDERFLOW_WORD) pw_host_activity++;
+    if (s1 != 0 && (unsigned)s1 != CSD_PW_UNDERFLOW_WORD) pw_host_activity++;
+}
 unsigned csd_pw_host_activity(void) { return pw_host_activity; }
 
 unsigned csd_pw_host_frames(void)   { return pw_host_frames; }

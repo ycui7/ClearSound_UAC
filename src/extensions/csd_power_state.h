@@ -42,6 +42,7 @@
 #define CSD_PW_UNDERFLOW_WORD 0x96969696
 
 void     csd_pw_note_host_sample(unsigned ch, int sample);
+void     csd_pw_note_host_pair(int s0, int s1);  /* REVERT(dp199) pair form */
 unsigned csd_pw_host_activity(void);   /* non-zero (i.e. real) samples seen  */
 unsigned csd_pw_host_frames(void);     /* frames received (diagnostics)      */
 
