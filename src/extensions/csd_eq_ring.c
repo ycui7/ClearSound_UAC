@@ -3,6 +3,7 @@
  * CSD_EQ_DIAG_WITNESS, same rule as g_csd_bq_* in csd_dsp_bq.c, which proves
  * src/extensions C files do receive CSD_EXTRA_FLAGS). */
 #include "csd_eq_ring.h"
+unsigned g_csd_handoff_calls;   /* REVERT(dp172) */
 
 /* EXPERIMENT 11.11.31: the armed-upsampler flow-control wait (REVERT with
  * the tap). csd_ups_armed lives in csd_ups_block.c (same tile[?]; scalar C
@@ -40,6 +41,7 @@ unsigned g_csd_eq_cfg_adopt;
 
 unsigned csd_eq_handoff(unsigned l, unsigned r)
 {
+    g_csd_handoff_calls++;   /* REVERT(dp172): producer-side liveness */
     if (!engaged) {                       /* engine off: byte-exact bypass  */
         csd_eq_stage_r = r;
         csd_eq_pushed = 0u;

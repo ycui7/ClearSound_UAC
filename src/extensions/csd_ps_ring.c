@@ -69,6 +69,9 @@ void     csd_ps_note_overwrite(void){ g_csd_ps_overwrite++; }
  * wire frame by the cadence owner. */
 void csd_ps_produce_pair(void)
 {
+    /* REVERT(dp179): producer parked — direct-pop architecture restored;
+     * an active producer would double-drain the engine queue. */
+    return;
     unsigned i = s_produced_local & (CSD_PS_RING - 1u);
     s_w0[i] = csd_ups_slot(0u, 0);
     s_w1[i] = csd_ups_slot(1u, 0);

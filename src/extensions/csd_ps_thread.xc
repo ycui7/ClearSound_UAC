@@ -27,30 +27,51 @@ void     csd_ps_note_overwrite(void);
 unsigned csd_ups_armed(void);
 unsigned csd_ups_diag_out_hz(void);
 
+/* REVERT(dp172): producer-side liveness witnesses — one counter per gate
+ * on the path to csd_ps_produce_pair(), so a stall is attributed by which
+ * counter is frozen. Printed via the csd_diag_scpi INFO tail. */
+unsigned g_csd_psw_alive = 0, g_csd_psw_armed = 0, g_csd_psw_latched = 0,
+         g_csd_psw_lead  = 0, g_csd_psw_tmr   = 0,          g_csd_psw_prod = 0;
+/* REVERT(dp174): cadence witnesses */
+unsigned g_csd_p_slip_max = 0, g_csd_p_pnext = 0, g_csd_p_now = 0,
+         g_csd_p_force = 0, g_csd_p_ptk = 0;
+
 void csd_ps_thread(void)
 {
     timer pt;
-    unsigned pnext = 0u, ptk = 0u, prm = 0u, racc = 0u, pf = 384000u;
-    unsigned relax = 0u, latched = 0u;
+    unsigned pnext = 0u, ptk = 260u, prm = 0u, racc = 0u, pf = 0u;  /* dp175: force first-pass latch */
+    unsigned relax = 0u;   /* REVERT(dp175): latched removed */
     while (1)
     {
+        g_csd_psw_alive++;
         if (!csd_ups_armed())
         {
             unsigned now; pt :> now;
             pt when timerafter(now + 100000u) :> void;   /* 1 ms idle */
-            latched = 0u;
+            pf      = 0u;   /* dp175: force re-latch next arm */
             relax   = 0u;
             continue;
         }
-        if (!latched)
+        g_csd_psw_armed++;
+        /* REVERT(dp175): the dp161 'latch once per arm' froze ptk at
+         * whatever out_hz read during the FIRST window (measured p_ptk =
+         * 1,198,935 = the 48k drain rate) -> producer free-ran at machine
+         * max with RELAX firing 642k/s (p_force). Track the rate every
+         * pass; re-anchor the schedule on any change. */
         {
-            pf = csd_ups_diag_out_hz();
-            if (pf == 0u) { pf = 384000u; }
-            ptk = XS1_TIMER_HZ / pf;
-            prm = XS1_TIMER_HZ % pf;
-            pt :> pnext;
-            latched = 1u;
+            unsigned pf_now = csd_ups_diag_out_hz();
+            if (pf_now >= 44100u && pf_now <= 768000u && pf_now != pf)
+            {
+                pf  = pf_now;
+                ptk = XS1_TIMER_HZ / pf;
+                prm = XS1_TIMER_HZ % pf;
+                g_csd_p_ptk = ptk;   /* REVERT(dp174) */
+                pt :> pnext;
+                racc = 0u;
+                g_csd_psw_latched++;
+            }
         }
+        g_csd_psw_lead++;
         while (csd_ps_lead() >= CSD_PS_LEAD)
         {
             /* Consumer behind: yield with a timer, never spin the core.
@@ -59,12 +80,31 @@ void csd_ps_thread(void)
              * cadence matters more than dropping a pair. */
             unsigned now; pt :> now;
             pt when timerafter(now + 20u) :> void;
-            if (++relax > CSD_PS_RELAX) { csd_ps_note_overwrite(); break; }
+            if (++relax > CSD_PS_RELAX) { csd_ps_note_overwrite();
+                                          g_csd_p_force++; break; }
         }
+        /* REVERT(dp173): RELAX is a one-shot per quiet spell, not a
+         * permanent unlock (dp161 bug: once relax>400 every lead-full
+         * pass force-published forever -> 4.59M overwrites). Any pass
+         * that arrives with the lead clear re-arms the bound. */
+        if (csd_ps_lead() < CSD_PS_LEAD) { relax = 0u; }
+        /* REVERT(dp174): cadence witnesses. slip = now-pnext at the wait
+         * (int32): sustained positive slip while prod=554k/s proves the
+         * accumulator sits in the past => stride/anchor bug. */
+        { unsigned nw0; pt :> nw0;
+          { int d = (int)(nw0 - pnext);
+            if ((unsigned)d > g_csd_p_slip_max) g_csd_p_slip_max = (unsigned)d; }
+          g_csd_p_pnext = pnext; g_csd_p_now = nw0; }
+        g_csd_psw_tmr++;
+        /* REVERT(dp178): wait-then-anchor — ring was forever full
+         * (ps_seq 554k/s vs cons 443k/s); cadence wait no-oped on a
+         * stale pnext. */
         pt when timerafter(pnext) :> void;
+        { unsigned pnw; pt :> pnw; pnext = pnw; }
         pnext += ptk;
         racc  += prm;
         if (racc >= pf) { pnext++; racc -= pf; }
         csd_ps_produce_pair();
+        g_csd_psw_prod++;
     }
 }

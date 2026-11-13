@@ -2338,7 +2338,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     /* 2026-11-10: 352 -> 640 to match REPLY_MAX; snprintf returns the
      * WOULD-BE length, so an undersized buffer here truncates INFO? at
      * ~43 fields. REVERT: 352. */
-    char buf[1216];
+    char buf[2400];   /* dp172: was 1216 — truncated the tail at 114 fields */
     extern unsigned g_csd_c_tail, g_csd_f_wt, g_csd_f_wait_n,
                     g_csd_f_skip_n, g_csd_f_armed_n; /* REVERT(dp168) */
     int n = snprintf(buf, sizeof(buf),
@@ -2388,6 +2388,16 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     /* dp160 2026-11-13 pacing witnesses (see xua_audiohub.xc decl block).
      * REVERT with the 7 tail fields. */
     extern unsigned g_csd_wire_ticks_val, g_csd_wire_rem_val;
+    extern unsigned g_csd_span_min, g_csd_span_max, g_csd_resync_n; /* REVERT(dp171) */
+    extern unsigned g_csd_psw_alive, g_csd_psw_armed, g_csd_psw_latched,
+                    g_csd_psw_lead, g_csd_psw_tmr, g_csd_psw_prod; /* REVERT(dp172) */
+    extern unsigned g_csd_floor_n, g_csd_f_dmax;                   /* REVERT(dp172) */
+    extern unsigned g_csd_handoff_calls, g_csd_task_loops,
+                    g_csd_task_past_take;                    /* REVERT(dp172) */
+    extern unsigned g_csd_p_slip_max, g_csd_p_pnext, g_csd_p_now,
+                    g_csd_p_force, g_csd_p_ptk;              /* REVERT(dp174) */
+    extern unsigned g_csd_f_add_n, g_csd_dn_min, g_csd_dn_max; /* REVERT(dp174) */
+    extern unsigned g_csd_claim_pace_n;                        /* REVERT(dp177) */
     extern unsigned g_csd_it_adc_ticks, g_csd_it_pre_ticks, g_csd_fl_ticks;
     extern unsigned g_csd_it_n, g_csd_fl_wait;
     extern unsigned g_csd_tt_ticks, g_csd_tt_n;
@@ -2461,7 +2471,12 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       /* dp160 2026-11-13: 7 specifiers for the 7 pacing
                        * witnesses appended below (specifier==arg contract).
                        * REVERT with those fields. */
-                      ",%u,%u,%u,%u,%u,%u,%u",
+                      ",%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u"
+                      ",%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u",   /* REVERT(dp177): claim pacer */
+
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
                        * decimator. Same field COUNT, new meaning, so every
@@ -2595,7 +2610,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * fl_ticks = floor-wait ticks, it_n = iterations,
                        * fl_wait = iterations whose floor wait >= 20 ticks.
                        * REVERT: delete these 7 fields. */
-g_csd_wire_ticks_val, g_csd_wire_rem_val,
+g_csd_span_min, g_csd_span_max,
                       /* REVERT(dp168): tail = floor diagnostics:
                        * it_adc=g_csd_f_wt (floor stride ticks latched),
                        * it_pre=g_csd_f_wait_n (blocking waits taken/s),
@@ -2603,7 +2618,18 @@ g_csd_wire_ticks_val, g_csd_wire_rem_val,
                        * it_n=g_csd_f_armed_n (floor latches, event),
                        * fl_wait=g_csd_c_tail (frame rate/s) */
                       g_csd_f_wt, g_csd_f_wait_n,
-                      g_csd_f_skip_n, g_csd_f_armed_n, g_csd_c_tail);
+                      g_csd_f_skip_n, g_csd_resync_n, g_csd_c_tail,
+                      /* REVERT(dp172): producer liveness ladder + floor
+                       * entry/debt. REVERT: delete these 8 fields. */
+                      g_csd_psw_alive, g_csd_psw_armed, g_csd_psw_latched,
+                      g_csd_psw_lead, g_csd_psw_tmr, g_csd_psw_prod,
+                      g_csd_floor_n, g_csd_f_dmax,
+                      g_csd_handoff_calls, g_csd_task_loops,
+                      g_csd_task_past_take,
+                      g_csd_p_slip_max, g_csd_p_pnext, g_csd_p_now,
+                      g_csd_p_force, g_csd_p_ptk, g_csd_f_add_n,
+                      g_csd_dn_min, g_csd_dn_max,
+                      g_csd_claim_pace_n);
     }
     if (n > 0) {
         if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */
@@ -2792,7 +2818,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_probe_q(scpi_t *context,
 
 static SCPI_FPTR_CMD scpi_result_t ups_base_q(scpi_t *context)
 {
-    char buf[1536];   /* dp144/dp150: witness tail (106 fields) */
+    char buf[2400];   /* dp144/dp150/dp172: witness tail (122 fields) */
     /* dp112: EXACT count — 33 originals + body_crc + body_nz = 35.
      * dp110 shipped 34 %u for 33 args: a past-the-end read that fed the
      * host a garbage tail field (384000 / 2409399996). Field-map from
@@ -2963,6 +2989,26 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* REVERT(dp177): dedicated pacer probe — unambiguous named readout of the
+ * live claim/floor pacing state (positional INFO tail proved error-prone). */
+static SCPI_FPTR_CMD scpi_result_t ups_pace_q(scpi_t *context)
+{
+    extern unsigned g_csd_f_wnext, g_csd_f_now2, g_csd_f_wt, g_csd_f_add_n;
+    extern unsigned g_csd_claim_wnext, g_csd_claim_now, g_csd_claim_stp;
+    extern unsigned g_csd_claim_pace_n, g_csd_p_ptk, g_csd_p_pnext;
+    extern unsigned g_csd_ps_seq, g_csd_ps_consumed;
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                     g_csd_f_wt, g_csd_f_wnext, g_csd_f_now2, g_csd_f_add_n,
+                     g_csd_claim_stp, g_csd_claim_wnext, g_csd_claim_now,
+                     g_csd_claim_pace_n, g_csd_p_ptk, g_csd_p_pnext,
+                     g_csd_ps_seq, g_csd_ps_consumed);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
 static const scpi_command_t csd_commands[] = {
     /* IEEE 488.2 mandated subset */
     { .pattern = "*IDN?",  .callback = q_idn     },   /* ours, not CoreIdnQ: see q_idn */
@@ -3052,6 +3098,9 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "DIAG:UPSAMPLing:STATe",   .callback = ups_set           },
     { .pattern = "DIAG:UPSAMPLing:ECHO",    .callback = ups_echo_set      },
     { .pattern = "DIAG:UPSAMPLing:PROBE",   .callback = ups_probe_set     },
+
+
+    { .pattern = "DIAG:UPSAMPLing:PACE?",   .callback = ups_pace_q        },
     { .pattern = "DIAG:UPSAMPLing:BASE?",   .callback = ups_base_q        },
     { .pattern = "DIAG:UPSAMPLing:POP?",    .callback = ups_pop_q         },
     { .pattern = "DIAG:UPSAMPLing:QPOP?",   .callback = ups_qpop_q        },

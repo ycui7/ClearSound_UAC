@@ -143,6 +143,7 @@ unsigned g_csd_ups_mirror_seq = 0xFFFFFFFFu;  /* last pop seq the mirror saw */
 unsigned g_csd_feed_writes = 0u;   /* INFO? field 98 witness: feed stores done
                                     * by UBM (REVERT with the feed) */
 unsigned g_csd_eq_frames;
+unsigned g_csd_task_loops, g_csd_task_past_take;   /* REVERT(dp172) */
 unsigned g_csd_eq_delay_frames;
 unsigned g_csd_eq_ticks_max;
 /* Sub-region UBM cost witnesses (2026-11-10): the audiohub loop at 384 kHz
@@ -1094,6 +1095,7 @@ void csd_dsp_eq_task(void)
             { unsigned d = p1 - p0; if (d > g_csd_eq_pause_ticks_max) g_csd_eq_pause_ticks_max = d; }
 #endif
         }
+        g_csd_task_loops++;   /* REVERT(dp172) */
         if (!csd_eq_take_ready()) {
             /* Idle backoff (XC select/timerafter): re-seed from the live
              * timer so a busy phase can never leave a stale deadline that
@@ -1107,6 +1109,7 @@ void csd_dsp_eq_task(void)
         timer eqt; unsigned e0, e1;
         eqt :> e0;
 #endif
+        g_csd_task_past_take++;   /* REVERT(dp172) */
         unsigned s[2];
         s[0] = (unsigned)csd_eq_take_l();
         s[1] = (unsigned)csd_eq_take_r();
