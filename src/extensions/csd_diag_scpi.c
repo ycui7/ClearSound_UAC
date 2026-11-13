@@ -920,6 +920,20 @@ static SCPI_FPTR_CMD scpi_result_t dsp_clear(scpi_t *context)
  * REPLY_MAX. Both zero across a short reply means the bytes left the device
  * whole and the loss is downstream -- which is what the bench measured.
  * REVERT: delete this handler and its row. */
+/* REVERT(dp182): INFOLEN? -- snprintf bookkeeping for the INFO? reply.
+ * WHY: device emits 134 of 147 compiled fields; need the raw snprintf return
+ * values (wanted-bytes, not written-bytes) and the final n handed to
+ * SCPI_ResultCharacters to tell format truncation from transport truncation. */
+static unsigned g_csd_infolen_n1, g_csd_infolen_n2, g_csd_infolen_final;
+static SCPI_FPTR_CMD infolen_q(scpi_t *context)
+{
+    char b[48];
+    unsigned k = (unsigned)snprintf(b, sizeof b, "%u,%u,%u",
+                    g_csd_infolen_n1, g_csd_infolen_n2, g_csd_infolen_final);
+    SCPI_ResultCharacters(context, b, (int)k);
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t reply_stats_q(scpi_t *context)
 {
     char buf[64];
@@ -2392,6 +2406,14 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     extern unsigned g_csd_psw_alive, g_csd_psw_armed, g_csd_psw_latched,
                     g_csd_psw_lead, g_csd_psw_tmr, g_csd_psw_prod; /* REVERT(dp172) */
     extern unsigned g_csd_floor_n, g_csd_f_dmax;                   /* REVERT(dp172) */
+    /* REVERT(dp181): mic zero-birth witnesses (xua_audiohub.xc). */
+    extern unsigned g_csd_w_portn[2], g_csd_w_portz[2];
+    extern unsigned g_csd_w_pubn[2],  g_csd_w_pubz[2];
+    extern unsigned g_csd_w_shipn[2], g_csd_w_shipz[2];
+    extern unsigned g_csd_w_exch;
+    extern unsigned g_csd_w_iter;  /* REVERT(dp203) */
+    extern unsigned g_csd_w_dsdn;  /* REVERT(dp203) */
+    extern unsigned g_csd_w_portu[2]; /* REVERT(dp203) */
     extern unsigned g_csd_handoff_calls, g_csd_task_loops,
                     g_csd_task_past_take;                    /* REVERT(dp172) */
     extern unsigned g_csd_p_slip_max, g_csd_p_pnext, g_csd_p_now,
@@ -2423,7 +2445,7 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
      * by the task. REVERT with the ring. */
     extern unsigned g_csd_eq_underrun, g_csd_eq_overrun, g_csd_eq_occ_high;
     extern unsigned g_csd_eq_cfg_adopt;
-    if (n > 0 && n < (int)sizeof(buf) - 8 - 82 * 11) {   /* tail is 80 fields
+    if (n > 0) {   /* REVERT(dp182): gate removed — was n < sizeof-8-82*11 */ /* tail is 80 fields
                                                           * after eq_kernel_src
                                                           * (2026-11-11 tap) */
         const unsigned ratio = xua_csd_get_usb_ratio();
@@ -2475,7 +2497,19 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       ",%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u"
-                      ",%u",   /* REVERT(dp177): claim pacer */
+                      /* dp182 FIX: the comma that used to follow the dp177
+                       * literal terminated the FORMAT string there — snprintf
+                       * took 116 specifiers, silently dropped every later
+                       * argument INCLUDING the whole dp181 format literal
+                       * (which became argument #117). Specifier-after-comma
+                       * is the contract killer. Format now runs unbroken to
+                       * the dp181 chunk. REVERT: restore '",%u",'. */
+                      ",%u"   /* REVERT(dp177): claim pacer */
+                      /* 13 more (REVERT(dp181)): mic zero-birth witnesses
+                       * (xua_audiohub.xc g_csd_w_*): portn0/1, portz0/1,
+                       * pubn0/1, pubz0/1, shipn0/1, shipz0/1, exch.
+                       * REVERT(dp203): +1 = iter, dsdn, portu0/1 (skip hunt). */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
 
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
@@ -2629,7 +2663,19 @@ g_csd_span_min, g_csd_span_max,
                       g_csd_p_slip_max, g_csd_p_pnext, g_csd_p_now,
                       g_csd_p_force, g_csd_p_ptk, g_csd_f_add_n,
                       g_csd_dn_min, g_csd_dn_max,
-                      g_csd_claim_pace_n);
+                      g_csd_claim_pace_n,
+                      /* REVERT(dp181): mic zero-birth witnesses. */
+                      g_csd_w_portn[0], g_csd_w_portn[1],
+                      g_csd_w_portz[0], g_csd_w_portz[1],
+                      g_csd_w_pubn[0],  g_csd_w_pubn[1],
+                      g_csd_w_pubz[0],  g_csd_w_pubz[1],
+                      g_csd_w_shipn[0], g_csd_w_shipn[1],
+                      g_csd_w_shipz[0], g_csd_w_shipz[1],
+                      g_csd_w_exch, g_csd_w_iter, g_csd_w_dsdn,
+                      g_csd_w_portu[0], g_csd_w_portu[1]);  /* REVERT(dp203): +iter,dsdn,portu.
+                       * REVERT(dp202): dp197 dec_* chunk
+                       * removed with its witnesses (decouple.xc reverted);
+                       * tail field count 157 -> 147, verified on-device. */
     }
     if (n > 0) {
         if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */
@@ -2989,20 +3035,129 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* REVERT(dp183): runtime attribution probe — mask setter/query. bit0 skips
+ * the two csd_ups_slot pop calls in the audiohub wire loop; bit1 skips the
+ * top-of-loop wire floor. Also echoes the (persistent, global) upsampler
+ * ECHO mode because DIAG:UPSAMPLing:ECHO has no query handler. */
+unsigned g_csd_probe_mask = 0u;
+extern unsigned g_csd_ups_echo_mode;
+static SCPI_FPTR_CMD scpi_result_t dbg_probe_set(scpi_t *context)
+{
+    int32_t v;
+    if (!SCPI_ParamInt32(context, &v, true)) return SCPI_RES_ERR;
+    g_csd_probe_mask = (unsigned)v;
+    return SCPI_RES_OK;
+}
+static SCPI_FPTR_CMD scpi_result_t dbg_probe_q(scpi_t *context)
+{
+    char b[32];
+    int n = snprintf(b, sizeof b, "%u,%u", g_csd_probe_mask,
+                     g_csd_ups_echo_mode);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(b)) n = (int)sizeof(b) - 1;
+    SCPI_ResultCharacters(context, b, n);
+    return SCPI_RES_OK;
+}
+
+/* REVERT(dp185): segment timing readout. seg[0]=L ADC read+clk emit,
+ * 1=R ADC read+clk emit, 2=DAC-L claim, 3=DAC-R claim, 4=floor block,
+ * 5=exchange block; 6=producer pass, 7=produce_pair. All in 10 ns ticks,
+ * accumulated; seg_n = wire frames counted while mask bit4 was set. */
+static SCPI_FPTR_CMD scpi_result_t dbg_seg_q(scpi_t *context)
+{
+    /* REVERT(dp199-attr): appended seg_b[0..3] + loop_ticks (append-only;
+     * the old 9 fields keep their positions). */
+    extern unsigned g_csd_seg[8], g_csd_seg_n;
+    extern unsigned g_csd_seg_b[6], g_csd_loop_ticks;
+    extern unsigned csd_gf_n_get(void);
+    extern void csd_lr_wit_get(unsigned*,unsigned*,unsigned*,unsigned*);
+    unsigned lmn[2], lmx[2], lsm[2], ln[2];
+    csd_lr_wit_get(lmn, lmx, lsm, ln);
+    char b[512];
+    int n = snprintf(b, sizeof b,
+                     "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                     g_csd_seg[0], g_csd_seg[1], g_csd_seg[2], g_csd_seg[3],
+                     g_csd_seg[4], g_csd_seg[5], g_csd_seg[6], g_csd_seg[7],
+                     g_csd_seg_n,
+                     g_csd_seg_b[0], g_csd_seg_b[1], g_csd_seg_b[2],
+                     g_csd_seg_b[3], g_csd_loop_ticks,
+                     g_csd_seg_b[4], g_csd_seg_b[5], csd_gf_n_get(),
+                     lmn[0], lmx[0], lsm[0], ln[0], lmn[1], lmx[1],
+                     lsm[1], ln[1]);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(b)) n = (int)sizeof(b) - 1;
+    SCPI_ResultCharacters(context, b, n);
+    return SCPI_RES_OK;
+}
+static SCPI_FPTR_CMD scpi_result_t dbg_seg_clear(scpi_t *context)
+{
+    extern unsigned g_csd_seg[8], g_csd_seg_n;
+    for (int i = 0; i < 8; i++) g_csd_seg[i] = 0;
+    g_csd_seg_n = 0;
+    /* REVERT(dp199-attr): clear the appended bank too. */
+    extern unsigned g_csd_seg_b[6], g_csd_loop_ticks;
+    extern void csd_gf_n_clear(void);
+    extern void csd_lr_wit_clear(void);
+    for (int i = 0; i < 6; i++) g_csd_seg_b[i] = 0;
+    g_csd_loop_ticks = 0;
+    csd_gf_n_clear();
+    csd_lr_wit_clear();
+    return SCPI_RES_OK;
+}
+
 /* REVERT(dp177): dedicated pacer probe — unambiguous named readout of the
  * live claim/floor pacing state (positional INFO tail proved error-prone). */
 static SCPI_FPTR_CMD scpi_result_t ups_pace_q(scpi_t *context)
+
 {
     extern unsigned g_csd_f_wnext, g_csd_f_now2, g_csd_f_wt, g_csd_f_add_n;
     extern unsigned g_csd_claim_wnext, g_csd_claim_now, g_csd_claim_stp;
     extern unsigned g_csd_claim_pace_n, g_csd_p_ptk, g_csd_p_pnext;
     extern unsigned g_csd_ps_seq, g_csd_ps_consumed;
-    char buf[128];
-    int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+    extern unsigned g_csd_ps_mbox_seq;
+    extern unsigned g_csd_ps_fresh; /* REVERT(dp196) */
+    extern unsigned g_csd_ps_starve, g_csd_ps_active;   /* REVERT(dp196) */
+    extern unsigned g_csd_wire_l0, g_csd_wire_seen, g_csd_wire_s1,
+                    g_csd_wire_s2, g_csd_wire_n;         /* REVERT(dp196) */
+    extern unsigned g_csd_prod_w0, g_csd_prod_n, g_csd_prod_tile,
+                    g_csd_wire_tile;   /* REVERT(dp196) */
+    extern unsigned g_csd_p_err, g_csd_p_dwl, g_csd_p_ptkxi; /* REVERT(dp198) */
+    extern unsigned g_csd_p_tdl, g_csd_p_pndl;               /* REVERT(dp198) */
+    /* REVERT(dp201): producer-pass attribution (csd_ups_block.c,
+     * csd_ps_ring.c; PROBE bit4 gated accumulators, fixed-window deltas). */
+    extern unsigned g_csd_p_halt, g_csd_p_halt_n, g_csd_p_ifed, g_csd_p_ifed_n;
+    extern unsigned g_csd_p_snap, g_csd_p_snap_n, g_csd_p_claim, g_csd_p_claim_n;
+    extern unsigned g_csd_p_pop2, g_csd_p_passn, g_csd_p_ubm, g_csd_p_ubmn;
+    /* REVERT(dp201): tile[1] EQ task freeze attribution (csd_ups_block.c). */
+    extern unsigned g_csd_eq_stage, g_csd_eq_stage_t;
+    extern unsigned g_csd_eq_claim_rounds, g_csd_eq_claim_exit;
+    extern unsigned g_csd_live_pop_in_commit, g_csd_live_snap_freeze;
+    extern unsigned g_csd_live_in_feed, g_csd_live_probe_popn;
+    char buf[640];   /* REVERT(dp201): 50 fields — widened from 384 */
+    int n = snprintf(buf, sizeof(buf),
+                     "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                     "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                     "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+                     "%u,%u,%u,%u,%u,%u,%u,%u",
                      g_csd_f_wt, g_csd_f_wnext, g_csd_f_now2, g_csd_f_add_n,
                      g_csd_claim_stp, g_csd_claim_wnext, g_csd_claim_now,
                      g_csd_claim_pace_n, g_csd_p_ptk, g_csd_p_pnext,
-                     g_csd_ps_seq, g_csd_ps_consumed);
+                     g_csd_ps_seq, g_csd_ps_consumed,
+                     g_csd_ps_mbox_seq, g_csd_ps_fresh,
+                     g_csd_ps_starve, g_csd_ps_active,
+                     g_csd_wire_l0, g_csd_wire_seen, g_csd_wire_s1,
+                     g_csd_wire_s2, g_csd_wire_n,
+                     g_csd_prod_w0, g_csd_prod_n, g_csd_prod_tile,
+                     g_csd_wire_tile,
+                     g_csd_p_err, g_csd_p_dwl, g_csd_p_ptkxi,
+                     g_csd_p_tdl, g_csd_p_pndl,
+                     g_csd_p_halt, g_csd_p_halt_n, g_csd_p_ifed, g_csd_p_ifed_n,
+                     g_csd_p_snap, g_csd_p_snap_n, g_csd_p_claim, g_csd_p_claim_n,
+                     g_csd_p_pop2, g_csd_p_passn, g_csd_p_ubm, g_csd_p_ubmn,
+                     g_csd_eq_stage, g_csd_eq_stage_t,
+                     g_csd_eq_claim_rounds, g_csd_eq_claim_exit,
+                     g_csd_live_pop_in_commit, g_csd_live_snap_freeze,
+                     g_csd_live_in_feed, g_csd_live_probe_popn);
     if (n < 0) n = 0;
     if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
     SCPI_ResultCharacters(context, buf, n);
@@ -3101,6 +3256,12 @@ static const scpi_command_t csd_commands[] = {
 
 
     { .pattern = "DIAG:UPSAMPLing:PACE?",   .callback = ups_pace_q        },
+    /* REVERT(dp183): attribution probe (see handlers above). */
+    { .pattern = "DEBUG:CSD:PROBE?",        .callback = dbg_probe_q       },
+    { .pattern = "DEBUG:CSD:PROBE",         .callback = dbg_probe_set     },
+    /* REVERT(dp185): segment timing readout (audiohub g_csd_seg). */
+    { .pattern = "DEBUG:CSD:SEG?",          .callback = dbg_seg_q         },
+    { .pattern = "DEBUG:CSD:SEG:CLEAR",     .callback = dbg_seg_clear     },
     { .pattern = "DIAG:UPSAMPLing:BASE?",   .callback = ups_base_q        },
     { .pattern = "DIAG:UPSAMPLing:POP?",    .callback = ups_pop_q         },
     { .pattern = "DIAG:UPSAMPLing:QPOP?",   .callback = ups_qpop_q        },
