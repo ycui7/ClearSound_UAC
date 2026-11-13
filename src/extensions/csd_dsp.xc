@@ -108,6 +108,40 @@ static unsigned next_head(unsigned h, unsigned n) { h++; return h >= n ? 0u : h;
  * reference (10 ns) ticks, around the two adsp_biquad VPU calls. REVERT:
  * delete these, the guarded blocks, and the INFO? tail fields they feed. */
 unsigned g_csd_ubm_calls;
+
+/* Armed-mic feed mailbox (2026-11-11, F-B). DEFINED HERE on purpose: these
+ * sit with the audiohub hot loop's own data -- the UBM feed reads them every
+ * wire frame and 11.11.7 measured that even one cross-file call per frame
+ * (csd_ups_mic_owner) blows the 384 kHz budget. Producers (csd_ups_block.c,
+ * SAME core as this loop): the cold push helper writes the gate, the tap
+ * commit in csd_ups_slot publishes the pair. Same-core sequential access;
+ * plain (not volatile) XC globals like g_csd_ubm_calls -- each side touches
+ * them once per function call, so every access is a fresh load/store at a
+ * call boundary.
+ * REVERT: delete these and the UBM feed block + the .c/.h producers. */
+unsigned csd_feed_owner = 0u;
+int      csd_feed_w0    = 0;
+int      csd_feed_w1    = 0;
+/* EXPERIMENT 11.11.34 dual echo (REVERT with the tap): the pop-word pair
+ * committed by the tap (csd_ups_block.c) — the second stream the mic
+ * carries. The mirror time-multiplexes: even mic frames = feed-IN pair
+ * (engine input), odd mic frames = latest committed pop pair (engine
+ * output). One stream, both seams, same host cadence — the comparator
+ * de-interleaves. csd_mirror_parity: audio core only (this loop). */
+int      csd_pop_w0     = 0;
+int      csd_pop_w1     = 0;
+unsigned csd_pop_seq    = 0u;   /* 11.11.40 freshness: bumped per commit */
+/* 11.11.36: parity multiplexing assumed audio()-call == mic-frame rate —
+ * true at ratio 1, unknowable at ratio > 1. The mirror now publishes ONE
+ * pair per mic frame, selected at runtime by DIAG:UPSAMPLing:ECHO:
+ * 0 = pop pair (engine output), 1 = feed pair (engine input, published
+ * from audio() entry this build). Two passes of the same deterministic
+ * schedule: pass 1 proves the engine input IS the schedule, pass 2
+ * scores the pop stream against the oracle fed by the schedule. */
+unsigned g_csd_ups_echo_mode = 0u;
+unsigned g_csd_ups_mirror_seq = 0xFFFFFFFFu;  /* last pop seq the mirror saw */
+unsigned g_csd_feed_writes = 0u;   /* INFO? field 98 witness: feed stores done
+                                    * by UBM (REVERT with the feed) */
 unsigned g_csd_eq_frames;
 unsigned g_csd_eq_delay_frames;
 unsigned g_csd_eq_ticks_max;
@@ -181,6 +215,9 @@ unsigned g_csd_ubm_reg_max[5];
  * is therefore two C calls (csd_eq_is_engaged + csd_eq_tx) plus two staged
  * word reads: bounded stores/loads, no compute, no blocking. */
 #include "csd_eq_ring.h"
+
+extern unsigned s_feedcalls_task;   /* dp108 feed-call attribution */
+extern unsigned s_feedcalls_audio;
 
 static void csd_ubm_note(unsigned idx, unsigned a, unsigned b)
 {
@@ -336,9 +373,34 @@ void csd_dsp_frame(unsigned *s)
              * words ARE this frame's wire pair on every path, so the
              * assignment below is unconditional and bypass stays byte-exact
              * by construction (identity values come back). */
+            /* EXPERIMENT 11.11.36 feed-IN echo MOVED HERE from
+             * csd_ups_feed (11.11.29): the task publishes at its own
+             * bursty pace, so the mic view of the engine input lost or
+             * duplicated values arbitrarily. The UBM pair at THIS point
+             * IS what the engine will receive on this mic frame, on the
+             * mic's own clock: one value per mic frame, duplicates only
+             * when audohost genuinely repeated one. Preset 2's biquad is
+             * identity (campaign-verified), so pre == post at this seam.
+             * REVERT with the tap. */
+            /* 2026-11-12 ROOT CAUSE of the chronic pop-vs-oracle 0%:
+             * the engine is fed the POST-handoff (kernel-filtered) pair —
+             * the EQ task feeds what csd_eq_handoff stages. The old tap
+             * published PRE-handoff values, so the oracle was fed the
+             * unfiltered pair while the device engine saw the filtered
+             * one: no alignment could ever exist. The honest engine
+             * input is the STAGED pair — publish it here, same mic-frame
+             * cadence (audio core, one publish per frame, duplicates only
+             * when audohost repeated). Preset-1/bypass paths feed raw via
+             * the tail call below and never reach this branch, so the tap
+             * now follows the feed in every path.
+             * REVERT: restore publish above the handoff. */
             s[0] = csd_eq_handoff(s[0], s[1]);
             s[1] = csd_eq_stage_r;
             eq_pushed = csd_eq_pushed;
+            if (csd_feed_owner) {
+                csd_feed_w0 = (int)s[0];
+                csd_feed_w1 = (int)s[1];
+            }
         }
     }                                            /* else: byte-exact bypass */
 #ifdef CSD_UPSAMPLE_EN
@@ -346,7 +408,24 @@ void csd_dsp_frame(unsigned *s)
      * are fed there, AFTER filtering (same DSP->resampler order as before);
      * every other frame (bypass, delay preset, fill/overrun pass-throughs)
      * is fed here, exactly as before. */
-    if (!eq_pushed) csd_ups_feed((int)s[0], (int)s[1]);
+    /* 2026-11-12 SINGLE-WRITER ENFORCEMENT (measured: owner-armed cert run
+     * with eq_overrun=162k showed feed_enter=162k — every failed task push
+     * fed the RAW pre-bq pair from the audio core while the task was also
+     * feeding post-bq pairs: dual-writer, wrong content, 0.5% extra feeds
+     * shifting the fd block phase (eq_underrun 1271 ≈ the same events).
+     * That corrupts EVERY ratio>1 measurement ever taken through this
+     * path. When the task owns the feed, a failed push DROPS the frame;
+     * the engine honestly starves instead of being poisoned. The armed
+     * test closes the adoption race: during PAUSE/CONFIG the owner mirror
+     * reads 0 while the task is mid-config on the SAME fd state — a
+     * pass-through there is a dual-writer and wedged fd_block_fir_compute
+     * (11.12.6 witness: feed_pc=3, task frozen, eq_frames static). Armed
+     * means task-owned, full stop (csd_eq_ring.c enqueues even when
+     * disengaged while armed, for exactly this reason). */
+    if (!eq_pushed && !csd_feed_owner && !csd_ups_armed()) {
+        s_feedcalls_audio++;
+        csd_ups_feed((int)s[0], (int)s[1]);
+    }
 #endif
 }
 
@@ -491,6 +570,9 @@ unsigned csd_dsp_diag_dop_latched(void)  { return csd_dsp.dop ? 1u : 0u; }
 #endif
 unsigned csd_dsp_preset_req = CSD_DSP_PRESET_BOOT;    /* host-requested preset */
 unsigned csd_dsp_bump = 0;                            /* command counter      */
+/* XC requires a declaration before first use; the definition is below with
+ * the task (2026-11-10: the suspend-generation guard consumes it). */
+static unsigned csd_dsp_bump_read(void);
 
 /* volatile-through-unsafe-pointer is the documented XCore way to defeat
  * register caching: XC accepts `volatile` only on unsafe pointer targets, and
@@ -540,20 +622,34 @@ static void csd_dsp_apply_pending_preset(void)
      * on -- audible, silent, and invisible to every query. */
     {
         static unsigned pw_applied = 0;             /* 0 = running normally */
+        /* Suspend-generation guard (2026-11-10, mid-stream config audit):
+         * csd_pw_take_saved_preset() used to overwrite the host's request
+         * whenever the request word read 0 at wake -- and a host "PRESet 0"
+         * posts 0 too, so a preset written while the box was powered down
+         * was silently replaced by the pre-suspend preset at wake (measured:
+         * PRESet 0 written cold, PRESet? answered 2 for the whole run).
+         * The saved preset is only the host's intent if the host has said
+         * nothing SINCE the suspend: csd_dsp_bump counts every set_preset
+         * command, so restore only while the bump is frozen at the value
+         * observed at save. A host command during suspend wins outright. */
+        static unsigned pw_saved_bump = 0;
         unsigned pw_req = csd_pw_dsp_bypass_requested();
         if (pw_req != pw_applied) {
             if (pw_req) {
                 csd_pw_save_preset(csd_dsp.preset); /* save live preset once */
+                pw_saved_bump = csd_dsp_bump_read();
                 csd_vol_store(&csd_dsp_preset_req, 0u);
             } else {
                 unsigned sv = csd_pw_take_saved_preset();
                 /* Do NOT clobber a preset the host posted while we were
-                 * bypassed: if the request word moved off 0 after we wrote
-                 * it, that is a real host command and it wins. (The
-                 * diagnostic thread only ever posts through
-                 * csd_dsp_set_preset, so anything non-zero here is the
-                 * host's intent, never our own bypass residue.) */
+                 * bypassed: any host command moves the bump, and if the
+                 * request word moved off 0 after we wrote it, that is a
+                 * real host command and it wins. (The diagnostic thread
+                 * only ever posts through csd_dsp_set_preset, so anything
+                 * non-zero here is the host's intent, never our own bypass
+                 * residue.) */
                 if (sv != CSD_PW_PRESET_NONE &&
+                    csd_dsp_bump_read() == pw_saved_bump &&
                     csd_vol_load(&csd_dsp_preset_req) == 0u) {
                     csd_vol_store(&csd_dsp_preset_req, sv);
                 }
@@ -625,6 +721,16 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
 {
 #ifdef CSD_EQ_DIAG_WITNESS
     g_csd_ubm_calls++;
+#endif
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
+    /* REVERT(dp160 2026-11-13): the five region timers (6 reads + 5 notes
+     * per UBM call = ~50 ticks) are pure instrumentation on the armed
+     * wire-critical path — the exact hazard this file's CSD_MB_I2S_MONITOR
+     * note documents ('instrumentation that changes the timing of the path
+     * it measures is worthless'). Measured armed loop 306k/s with them;
+     * the g_csd_ubm_calls counter stays under CSD_EQ_DIAG_WITNESS. The
+     * region witnesses compile only with -DCSD_UBM_TIMING (reads zero
+     * otherwise, same contract as the xfer fields). */
     timer ubt; unsigned u0, u1, u2, u3, u4, u5;
     ubt :> u0;
 #endif
@@ -632,7 +738,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * where no sample is mid-computation. Only this thread writes csd_dsp.
      * See csd_dsp_set_preset for why the diagnostic thread may not. */
     csd_dsp_apply_pending_preset();
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u1; csd_ubm_note(0, u0, u1);
 #endif
 
@@ -651,12 +757,12 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * A NON-ZERO DAC-bound frame is the only honest evidence of a stream:
      * LRCLK toggles with a silent bus. Cost: two compares on the pair, once
      * per frame, at the point where the host stream is actually pulled. */
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u2;
 #endif
     csd_pw_note_host_sample((unsigned)0, (int)sampsFromUsbToAudio[0]);
     csd_pw_note_host_sample((unsigned)1, (int)sampsFromUsbToAudio[1]);
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u3; csd_ubm_note(1, u2, u3);
 #endif
 #endif
@@ -793,7 +899,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
      * NOW, not resurrected as a live wave eight frames after the host
      * returns to PCM. Gating only the emission keeps the cmd/adopted
      * handshake honest while the stream is not the generator's. */
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u2;
 #endif
     csd_gen_apply_pending();
@@ -810,7 +916,7 @@ void UserBufferManagement(unsigned sampsFromUsbToAudio[],
     } else if (armed) {
         csd_gen_note(csd_dsp.dsd ? 1u : 2u);  /* suppressed: DSD vs DoP */
     }
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u3; csd_ubm_note(2, u2, u3);
 #endif
 #endif
@@ -840,11 +946,11 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
     /* Single frame path: the DSP runs the pair per its own preset, then
      * hands it to the resampler client (see csd_dsp_frame -- one block
      * engine, two independent clients, neither gates the other). */
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u4;
 #endif
     csd_dsp_frame(sampsFromUsbToAudio);
-#ifdef CSD_EQ_DIAG_WITNESS
+#if defined(CSD_EQ_DIAG_WITNESS) && defined(CSD_UBM_TIMING)
     ubt :> u5; csd_ubm_note(3, u4, u5);
     csd_ubm_note(4, u0, u5);
 #endif
@@ -860,9 +966,68 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
      * sample that goes to I2S/DAC. Mirror it onto the mic path: this measures
      * kernel output through the proven-good capture path, with no second pass
      * (a second call would double-advance the block cadence and corrupt the
-     * very thing being measured). */
+     * very thing being measured). Pure stock mirror -- the armed resampler
+     * feed lives OUTSIDE this ifdef (campaign builds do not define
+     * CSD_DSP_DIAG_LOOP; the 11.11.3 run proved the armed mic read
+     * uninitialized RAM because the old feed branch sat in here). */
     sampsFromAudioToUsb[0] = sampsFromUsbToAudio[0];
     sampsFromAudioToUsb[1] = sampsFromUsbToAudio[1];
+#endif
+#ifdef CSD_UPSAMPLE_EN
+    /* Armed mic feed (2026-11-11, F-B; seam per glm53f reviews
+     * deleg_d22b56ad). HOT-PATH RULE (measured, 11.11.7 bisect vs 11.11.8):
+     * the disarmed hot path here is ONE load + branch on FILE-LOCAL data --
+     * a cross-file call per UBM frame (csd_ups_mic_owner(), 11.11.7) blew
+     * the 384 kHz audio() budget and broke the certified ratio-1 legs
+     * (periodic ~192-word mic dropouts). The gate and the pair below are
+     * written by the SAME core that runs this loop: csd_ups_slot's tap
+     * commit (csd_ups_block.c, runs in this audio() iteration) publishes
+     * the pair; cold config paths (set_want/set_enabled/note_wire_rate/
+     * ups_reconfigure) publish the gate. When armed the words are the last
+     * wire pair the pop-side tap committed; nothing else writes these mic
+     * slots armed (ADC is not fed at wire rate) -- which is why the armed
+     * mic read uninitialized RAM before these lines, while the same RAM
+     * reaching the host proves the pipe. The 11.11.6 lib_xua mixer hook is
+     * REVERTED and must stay reverted (cross-thread read of audiohub-owned
+     * tap state + hot-path cost on the mixer task).
+     * REVERT: delete this #ifdef block and the csd_feed_* symbols. */
+    /* 2026-11-13 ECHO 2 (user goal: armed mic loopback must carry REAL ADC):
+     * mode 2 skips the mirror overwrite so the words the audiohub port
+     * decimator published from ADC1 reach the host untouched. REVERT with
+     * the echo block. */
+    if (csd_feed_owner && g_csd_ups_echo_mode != 2u)   /* EXPERIMENT 11.11.34 DUAL ECHO: even frames
+                           * carry the feed-IN pair (what csd_ups_feed
+                           * received), odd frames the last committed pop
+                           * pair (what csd_ups_slot emitted). REVERT. */
+    {
+        if (g_csd_ups_echo_mode == 1u) {
+            sampsFromAudioToUsb[0] = (unsigned)csd_feed_w0;
+            sampsFromAudioToUsb[1] = (unsigned)csd_feed_w1;
+        } else {
+            /* 11.11.40 freshness gate: publish a pop pair only when a NEW
+             * commit (tap seqlock bump) happened since the last publish.
+             * A frozen mailbox is then visible as a ZERO pair instead of a
+             * stale one — the scorer treats zeros as dead frames, never as
+             * data. Tear-safe: odd seq = pair mid-commit, hold previous. */
+            unsigned sq = csd_pop_seq;
+            if ((sq & 1u) == 0u && sq != g_csd_ups_mirror_seq) {
+                g_csd_ups_mirror_seq = sq;
+                unsigned a = (unsigned)csd_pop_w0;
+                unsigned b = (unsigned)csd_pop_w1;
+                if (csd_pop_seq == sq) {
+                    sampsFromAudioToUsb[0] = a;
+                    sampsFromAudioToUsb[1] = b;
+                } else {
+                    sampsFromAudioToUsb[0] = 0u;
+                    sampsFromAudioToUsb[1] = 0u;
+                }
+            } else {
+                sampsFromAudioToUsb[0] = 0u;
+                sampsFromAudioToUsb[1] = 0u;
+            }
+        }
+        g_csd_feed_writes++;   /* INFO? field 98 (REVERT with the feed) */
+    }
 #endif
 }
 
@@ -875,30 +1040,59 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
  * config/clear is executed HERE, adopting posted requests -- engine state has
  * exactly one writer core after adoption. */
 extern void thread_speed(void);
+
 #ifndef CSD_DSP_INLINE_EQ
 /* Not compiled in the inline A/B arm: there the frame hook writes the EQ
  * witnesses and a second writer would violate the parallel-usage rules. */
+/* Kernel-update pause witnesses (2026-11-10, atomic block write): every
+ * adoption runs PAUSE (engage 0: the bit-timed side falls to byte-exact
+ * pass-through, no enqueue, no compute, LRCLK untouched) -> load/re-init ->
+ * RESUME. Events counts adoptions; ticks_max is the worst engage(0)..engage()
+ * window in reference (10 ns) ticks, task-core side. REVERT with the ring. */
+unsigned g_csd_eq_pause_events, g_csd_eq_pause_ticks_max;
+
 void csd_dsp_eq_task(void)
 {
     thread_speed();
     unsigned applied_seq = 0xFFFFFFFFu, applied_eng = 0xFFFFFFFFu;
-    unsigned applied_cseq = 0xFFFFFFFFu;   /* host-coef aperture seq (bq.c) */
+    unsigned applied_cseq = 0xFFFFFFFFu;   /* host-kernel aperture seq (bq.c) */
     timer t;
+    timer pt;
     unsigned deadline = 0u;
     while (1) {
         unsigned seq = csd_eq_cfg_seq_get();
         unsigned eng = csd_eq_cfg_on_get();
-        /* One volatile load per iteration: a coefficient post from the
-         * diagnostic thread adopts HERE, through the same config/resync/
-         * engage block a PRESet change drives -- the bit-timed loop is not
-         * involved (see the aperture block in csd_dsp_bq.c). */
+        /* One volatile load per iteration: a kernel-container publication
+         * from the diagnostic thread adopts HERE, through the same
+         * pause/config/resync/engage block a PRESet change drives -- the
+         * bit-timed loop is not involved (see the aperture block in
+         * csd_dsp_bq.c). */
         unsigned cseq = csd_dsp_bq_coef_seq();
         if (seq != applied_seq || eng != applied_eng || cseq != applied_cseq) {
             applied_seq = seq; applied_eng = eng; applied_cseq = cseq;
+            /* PAUSE / LOAD / RESUME (owner directive 2026-11-10): engaging
+             * off FIRST makes the producer pass frames through unfiltered
+             * (byte-exact, not counted as an overrun) so the ring drains and
+             * no frame is EVER processed against a mixed or half-published
+             * image; config re-inits engine state from a fully validated
+             * copy; resync drops the stale backlog and bumps the epoch; the
+             * resume engages the one complete new image. All of it runs on
+             * THIS core -- the software-LRCLK loop pays nothing beyond the
+             * engaged load it already does every frame. */
+            csd_eq_engage(0u);
+#ifdef CSD_EQ_DIAG_WITNESS
+            unsigned p0, p1;
+            pt :> p0;
+#endif
             if (eng) CSD_ENGINE_CONFIG((int)csd_eq_cfg_idx_get());
             else     CSD_ENGINE_CLEAR();
             csd_eq_take_resync();     /* new engine epoch, clean pipeline   */
             csd_eq_engage(eng && (unsigned)CSD_ENGINE_READY());
+#ifdef CSD_EQ_DIAG_WITNESS
+            pt :> p1;
+            g_csd_eq_pause_events++;
+            { unsigned d = p1 - p0; if (d > g_csd_eq_pause_ticks_max) g_csd_eq_pause_ticks_max = d; }
+#endif
         }
         if (!csd_eq_take_ready()) {
             /* Idle backoff (XC select/timerafter): re-seed from the live
@@ -926,6 +1120,7 @@ void csd_dsp_eq_task(void)
 #ifdef CSD_UPSAMPLE_EN
         /* Frames that reached the task were filtered here, so the resampler
          * client is fed AFTER the filter, in order, from here. */
+        s_feedcalls_task++;
         csd_ups_feed((int)s[0], (int)s[1]);
 #endif
     }

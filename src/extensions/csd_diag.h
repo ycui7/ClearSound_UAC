@@ -86,6 +86,12 @@ unsigned csd_diag_reg_writes(void);      /* host codec writes through us */
  * into an SCPI hardware error rather than reporting a stale value. */
 int csd_diag_reg_read(unsigned reg, unsigned *val);
 
+/* Kernel-update soft-ramp halves (see AUDIOHW_CMD_KRNL_SEQ_* and
+ * csd_diag_scpi.c krnl_update_seq). post=0: ramp down and wait it out;
+ * post=1: unmute (chip ramps back to the volume registers' level) and
+ * restore the boot ramp rate. Both reply the owner-side event counter. */
+unsigned csd_diag_krnl_seq(unsigned post);
+
 /* L/R trim persistence proxy (csd_diag_regs.xc): forwards to the tile[0]
  * codec server, which is the only task allowed to drive PORT_SQI_*. See
  * csd_trim_store.h for why they cannot be called directly from this core. */

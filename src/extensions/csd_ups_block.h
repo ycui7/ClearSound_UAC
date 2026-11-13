@@ -82,9 +82,42 @@ unsigned csd_ups_diag_pops(unsigned ch);         /* words actually delivered */
 unsigned csd_ups_diag_repeats(unsigned ch);      /* empty-ring holds (starvation) */
 unsigned csd_ups_diag_occ_high(unsigned ch);     /* high-water mark of the ring */
 unsigned csd_ups_diag_blocks(void);              /* polyphase computes run */
+unsigned csd_ups_diag_feed_enter(void);          /* block-engine entries (11.11.30) */
+unsigned csd_ups_diag_feed_pc(void);             /* last (phase<<1|chan) entered    */
+unsigned csd_ups_diag_feed_in_pc(void);          /* 1 while a compute runs          */
 unsigned csd_ups_diag_block_ticks_max(void);     /* worst burst, 10 ns ticks */
 unsigned csd_ups_diag_rate_calls(void);          /* rate hand-overs accepted+seen */
 unsigned csd_ups_diag_last_req_hz(void);         /* last rate requested */
+
+/* ---- wire-word capture tap (bench instrumentation, 2026-11-10) ----------
+ * Observes the LRCLK-cadence pops: latches the L/R pair closing each wire
+ * frame at ring phase == slot (AUTO = ratio-1, mic-decimator rule) so the
+ * UBM mirror in csd_dsp.xc can publish the post-resampler wire pair on the
+ * mic path while the resampler is enabled. The tap advances nothing.
+ * REVERT: delete these six declarations and the tap block in csd_ups_block.c
+ * plus the CSD_UPS_TAP branch in csd_dsp.xc. */
+void     csd_ups_tap_arm(unsigned enable);       /* follows enable lifecycle */
+unsigned csd_ups_tap_armed(void);
+void     csd_ups_tap_set_slot(unsigned p);       /* 0xFFFFFFFF = AUTO       */
+int      csd_ups_tap_word(unsigned ch);          /* last committed pair     */
+unsigned csd_ups_diag_tap_fires(void);           /* committed pairs         */
+unsigned csd_ups_diag_tap_phase(void);           /* phase of last commit    */
+unsigned csd_ups_diag_tap_slot_eff(void);        /* resolved slot (R-1 AUTO)*/
+unsigned csd_ups_mic_owner(void);                /* 1 iff the tap owns the
+                                                  * mic slots THIS frame
+                                                  * (armed AND csd_ups_active
+                                                  * -- never on bypassed
+                                                  * ratio-1 legs) */
+/* Armed-mic feed mailbox DEFINED in csd_dsp.xc (file-local to the audiohub
+ * hot loop -- 11.11.7 measured that a cross-file call in UBM per wire frame
+ * blows the 384 kHz budget). Producer: csd_ups_block.c (push helper + tap
+ * commit, same core as the consumer). REVERT with the feed. */
+extern unsigned csd_feed_owner;
+extern int      csd_feed_w0;
+extern int      csd_feed_w1;
+extern int      csd_pop_w0;      /* 11.11.34 dual echo: pop-word mailbox */
+extern int      csd_pop_w1;
+extern unsigned csd_pop_seq;     /* 11.11.40 seqlock: odd = mid-commit */
 
 #ifdef __cplusplus
 }

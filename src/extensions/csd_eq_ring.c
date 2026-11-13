@@ -4,6 +4,13 @@
  * src/extensions C files do receive CSD_EXTRA_FLAGS). */
 #include "csd_eq_ring.h"
 
+/* EXPERIMENT 11.11.31: the armed-upsampler flow-control wait (REVERT with
+ * the tap). csd_ups_armed lives in csd_ups_block.c (same tile[?]; scalar C
+ * linkage proven for this pattern). g_csd_eq_stalls counts wait timeouts:
+ * a passing armed run reads 0. */
+extern unsigned csd_ups_armed(void);
+unsigned g_csd_eq_stalls;
+
 #define CSD_EQ_RING_LOG2 6
 #define CSD_EQ_RING_LEN  (1u << CSD_EQ_RING_LOG2)
 #define CSD_EQ_RING_MASK (CSD_EQ_RING_LEN - 1u)
@@ -36,6 +43,17 @@ unsigned csd_eq_handoff(unsigned l, unsigned r)
     if (!engaged) {                       /* engine off: byte-exact bypass  */
         csd_eq_stage_r = r;
         csd_eq_pushed = 0u;
+        /* EXPERIMENT 11.11.33 (REVERT with the tap): armed + !engaged is
+         * NOT permission to feed on this core. csd_ups_feed has one legal
+         * writer — the EQ task. During adoption/engage windows while the
+         * upsampler client is armed, enqueue anyway (the task consumes
+         * unconditionally once running: take_ready is a cursor compare, not
+         * an engage test), so the audio core NEVER calls feed armed. An
+         * unstarted task just lets the ring fill; the armed path below
+         * flow-controls. Measured 11.12.8: leaving this path inline gave
+         * feed_enter-blocks==1 and a frozen feed_in_pc — dual-writer
+         * corruption of the fd FIR state within one adoption window. */
+        if (csd_ups_armed()) goto enqueue;
         return l;
     }
     /* New engine epoch (the task bumped gen at adoption): rebase the
@@ -54,10 +72,33 @@ unsigned csd_eq_handoff(unsigned l, unsigned r)
 #ifdef CSD_EQ_DIAG_WITNESS
         g_csd_eq_overrun++;               /* qualification failure: must be 0 */
 #endif
+        /* EXPERIMENT 11.11.31 (REVERT with the tap): while the upsampler
+         * client is ARMED, pass-through is not an option — csd_ups_feed has
+         * exactly ONE legal writer core (the EQ task, csd_dsp.xc:1020); an
+         * audio-core feed on the pass-through path makes two writers of the
+         * fd FIR state and the task wedges inside fd_block_fir_compute
+         * (measured 11.12.6: task frozen at feed_pc=3 feed_in_pc=1,
+         * eq_frames static, overrun climbing). Flow-control instead: wait
+         * for a slot, bounded; on timeout fall through (duty emergency,
+         * visible via g_csd_eq_stalls). With the race gone the task keeps
+         * up (38% duty) and this wait never spins. */
+        if (csd_ups_armed()) {
+            unsigned spins = 0u;
+            while ((pend = wr_loc - rd) >= CSD_EQ_RING_LEN) {
+                if (++spins > 20000u) {             /* ~ms-scale bound */
+#ifdef CSD_EQ_DIAG_WITNESS
+                    g_csd_eq_stalls++;
+#endif
+                    break;
+                }
+            }
+            if (pend < CSD_EQ_RING_LEN) goto enqueue;
+        }
         csd_eq_stage_r = r;
         csd_eq_pushed = 0u;
         return l;
     }
+enqueue:;
     unsigned w = wr_loc;
     rin[w & CSD_EQ_RING_MASK][0] = (int)l;
     rin[w & CSD_EQ_RING_MASK][1] = (int)r;
@@ -84,6 +125,11 @@ unsigned csd_eq_handoff(unsigned l, unsigned r)
 
 void csd_eq_cfg_post(unsigned eng_on, unsigned idx)
 {
+    /* Dedup (2026-11-12): rate flaps re-post the SAME image on every
+     * restart; each bump forced a pause/config/resume adoption on the task
+     * core and the task wedged inside fd compute on one of 21 such
+     * adoptions during boot. Only a changed image may bump the epoch. */
+    if (cfg_on == eng_on && cfg_idx == idx) return;
     cfg_idx = idx;
     cfg_on = eng_on;
     cfg_seq++;                                    /* payload first, seq last  */
@@ -92,21 +138,24 @@ void csd_eq_cfg_post(unsigned eng_on, unsigned idx)
 void csd_eq_engage(unsigned v)
 {
     engaged = v;
-#ifdef CSD_EQ_DIAG_WITNESS
-    g_csd_eq_cfg_adopt++;   /* one adoption per config the task executed */
-#endif
 }
 
 /* Engine epoch rollover, executed by the TASK at adoption (all it touches
  * are task-owned cursors): drop any stale backlog and rebase done. The
  * producer sees the generation bump in csd_eq_handoff and rebases its own
- * cursors there -- every cursor keeps exactly one writer core. */
+ * cursors there -- every cursor keeps exactly one writer core. The adoption
+ * witness moved HERE (2026-11-10, pause/load/resume): one adoption = one
+ * epoch, and csd_eq_engage is now called twice per adoption (pause then
+ * resume), so counting in engage would double every adoption. */
 void csd_eq_take_resync(void)
 {
     unsigned d = wr_pub;
     rd = d;
     done = d;
     gen++;
+#ifdef CSD_EQ_DIAG_WITNESS
+    g_csd_eq_cfg_adopt++;   /* one adoption per config the task executed */
+#endif
 }
 
 unsigned csd_eq_cfg_seq_get(void) { return cfg_seq; }

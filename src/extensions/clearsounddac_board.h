@@ -63,7 +63,21 @@ typedef enum
     AUDIOHW_CMD_UPS_GET,            //reply {applied, frame clock, refusals}
     AUDIOHW_CMD_HWCFG_RATE,         //tile[1] reports the frame clock just configured
     AUDIOHW_CMD_TRIM_UPS_GET,       //tile[1] fetches the persisted upsampling intent
-    AUDIOHW_CMD_IDENTITY
+    AUDIOHW_CMD_IDENTITY,
+    /* Kernel-update soft-ramp (owner directive 2026-11-10). The chip's own
+     * glitch-free ramp does the muting: ES9219Q datasheet v1.3 "Soft Mute"
+     * -- asserting Reg 7 MUTE ramps the output to -inf and clearing it ramps
+     * back UP TO THE LEVEL THE VOLUME REGISTERS HOLD (Reg 3/15/16 untouched
+     * by mute, so the pre-update level returns by silicon, no saved state,
+     * nothing to leave mis-restored on a failed path). Rate comes from Reg 6
+     * VOLUME_RATE[2:0]: dB/s = 2^rate * FS / 512 (v1.3 Register 6); rate 0
+     * at the 384 kHz wire is 750 dB/s, i.e. 127.5 dB full travel in ~170 ms.
+     * PRE {reply counter}: set rate 0, compose MUTE (host mute still wins),
+     * wait the ramp out inside the owner task. POST {reply counter}: clear
+     * MUTE (host mute still wins), restore Reg 6 to its boot rate. No-op
+     * while powered down: the wake path re-applies every codec register. */
+    AUDIOHW_CMD_KRNL_SEQ_PRE,
+    AUDIOHW_CMD_KRNL_SEQ_POST
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 

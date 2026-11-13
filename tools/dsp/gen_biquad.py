@@ -94,6 +94,89 @@ def unity_coeffs():
     return [1 << Q, 0, 0, 0, 0], 0
 
 
+# ---- base64 kernel container (DIAG:DSP:COEFFicient, 2026-11-10) ----------
+# Container = 12-byte little-endian header (id:u32, taps:u32, width:u16,
+# q_shift:u16) + taps int32 LE coefficients, base64'd. Kernel ids mirror
+# CSD_KERNEL_ID_* in src/extensions/csd_dsp.h (1 = biquad 5 coeffs,
+# 2 = FIR). THE FIR TAP COUNT IS NOT FREE-FORM: the device accepts a FIR only
+# up to a MEASURED PER-RATE ceiling (the scalar FIR costs ~5 ticks/MAC per
+# frame while the frame budget is 1/rate), so a 256-tap kernel loads at
+# 48 kHz and is refused with -222 at 384 kHz. The ceilings live in
+# src/extensions/csd_dsp.h and are published live by
+# DIAG:DSP:COEFFicient:FORMat? (fir_taps_allowed / fir_taps_by_rate); this
+# generator PARSES that header so the two cannot disagree, and the device's
+# own reply always outranks it. KERN2 with an unknown magic/version => bail,
+# guess nothing.
+import base64
+import re
+import struct
+
+KERN_ID_BIQUAD = 1
+KERN_ID_FIR = 2
+
+_DSP_H = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "..", "..", "src", "extensions", "csd_dsp.h")
+
+
+def device_limits(path=_DSP_H):
+    """(physical_max, {hz: limit}) read straight out of csd_dsp.h.
+
+    Parsing the header instead of restating the numbers is the whole point:
+    when the measured table changes, the generator changes with it or fails
+    loudly here -- a hand-copied '1024' is how this file lied for a day.
+    """
+    txt = open(path, errors="ignore").read()
+
+    def num(name):
+        m = re.search(r"^#define\s+%s\s+(\d+)u?" % name, txt, re.M)
+        if not m:
+            raise RuntimeError("%s not found in %s -- generator and firmware "
+                               "have drifted" % (name, path))
+        return int(m.group(1))
+
+    return (num("CSD_KERNEL_FIR_TAPS"),
+            {48000: num("CSD_KERNEL_FIR_TAPS_AT_48"),
+             96000: num("CSD_KERNEL_FIR_TAPS_AT_96"),
+             192000: num("CSD_KERNEL_FIR_TAPS_AT_192"),
+             384000: num("CSD_KERNEL_FIR_TAPS_AT_384")})
+
+
+
+def container_b64(kernel_id, coeffs):
+    """Encode one whole kernel exactly as the device's b64_decode expects."""
+    for c in coeffs:
+        if not (-2**31 <= c <= 2**31 - 1):
+            raise RuntimeError("coefficient %d outside int32" % c)
+    hdr = struct.pack("<IIHH", kernel_id, len(coeffs), 32, 30)
+    body = b"".join(struct.pack("<i", c) for c in coeffs)
+    return base64.b64encode(hdr + body).decode("ascii")
+
+
+def container_decode(b64):
+    """Mirror of the firmware validator; used by the selftest round-trip."""
+    raw = base64.b64decode(b64, validate=True)
+    if len(raw) < 12:
+        raise ValueError("short header")
+    kid, taps, width, q = struct.unpack_from("<IIHH", raw, 0)
+    if len(raw) != 12 + 4 * taps:
+        raise ValueError("length %d != header %d taps" % (len(raw), taps))
+    coeffs = [struct.unpack_from("<i", raw, 12 + 4 * i)[0] for i in range(taps)]
+    return kid, taps, width, q, coeffs
+
+
+def emit_set(kernel_id, coeffs, note):
+    """Human-readable list AND the one SET command that loads it."""
+    b64 = container_b64(kernel_id, coeffs)
+    # round-trip gate: what we emit must decode back byte-identical
+    kid, taps, width, q, back = container_decode(b64)
+    assert (kid, taps, width, q, back) == (kernel_id, len(coeffs), 32, 30, list(coeffs))
+    print("# %s" % note)
+    for i, c in enumerate(coeffs):
+        print("  coeff[%d] = %d" % (i, c))
+    print("# payload=%d bytes, base64=%d chars" % (12 + 4 * len(coeffs), len(b64)))
+    print('DIAG:DSP:COEFFicient "%s"' % b64)
+
+
 def q_response(q, lsh, f, fs):
     """|H(e^jw)| of the QUANTISED integers -- the firmware's real response."""
     s = 2.0 ** (Q - lsh)
@@ -165,19 +248,55 @@ def selftest():
 
 def main(argv):
     if argv[:1] == ["--shelf"]:
-        # Print one coefficient set for the host to load over
-        # DIAG:DSP:COEFFicient (five writes, indices 0..4).
+        # Print the shelf kernel AND the one DIAG:DSP:COEFFicient base64
+        # block-write command that loads it atomically.
         fs = int(argv[1])
         q, lsh = shelf_coeffs(fs)
-        print("# shelf kernel fs=%d lsh=%d  (DIAG:DSP:COEFFicient <i> <v>)" % (fs, lsh))
-        for i, v in enumerate(q):
-            print("%d %d" % (i, v))
+        emit_set(KERN_ID_BIQUAD, q,
+                 "shelf kernel fs=%d lsh=%d [b0,b1,b2,-a1,-a2] Q(1+%d).30"
+                 % (fs, lsh, lsh))
         return 0
     if argv[:1] == ["--unity"]:
         q, lsh = unity_coeffs()
-        print("# unity kernel fs=%s lsh=%d" % (argv[1] if len(argv) > 1 else "*"))
-        for i, v in enumerate(q):
-            print("%d %d" % (i, v))
+        emit_set(KERN_ID_BIQUAD, q,
+                 "unity kernel fs=%s lsh=%d (SHIPPED DEFAULT)"
+                 % (argv[1] if len(argv) > 1 else "*"))
+        return 0
+    if argv[:1] == ["--fir"]:
+        vals = [int(v) for v in argv[1].split(",") if v != ""]
+        rate = int(argv[2]) if len(argv) > 2 else 384000
+        cap, limits = device_limits()
+        lim = limits.get(rate)
+        if lim is None:
+            sys.stderr.write("rate %d Hz is not a supported rate; one of %s\n"
+                             % (rate, sorted(limits)))
+            return 1
+        # Same rule the device applies (csd_dsp_bq.c:kernel_taps_legal): the
+        # container must fit the physical store AND the measured ceiling of
+        # the rate it will be loaded at. Emit a kernel for 48 kHz, load it at
+        # 384 kHz, and the device answers -222 -- refuse it here instead.
+        if not 1 <= len(vals) <= cap:
+            sys.stderr.write("FIR target accepts 1..%d taps (physical capacity "
+                             "CSD_KERNEL_FIR_TAPS, csd_dsp.h)\n" % cap)
+            return 1
+        if len(vals) > lim:
+            sys.stderr.write("%d taps exceeds the %d Hz ceiling of %d taps "
+                             "(measured; see DIAG:DSP:COEFFicient:FORMat? "
+                             "fir_taps_by_rate -- the scalar FIR pays ~5 "
+                             "ticks/MAC per frame and the frame budget is "
+                             "1/rate)\n" % (len(vals), rate, lim))
+            return 1
+        emit_set(KERN_ID_FIR, vals,
+                 "FIR kernel taps=%d Q1.30 rate=%dHz ceiling=%d"
+                 % (len(vals), rate, lim))
+        return 0
+    if argv[:1] == ["--limits"]:
+        cap, limits = device_limits()
+        print("# FIR tap ceilings (measured, csd_dsp.h; published live by")
+        print("# DIAG:DSP:COEFFicient:FORMat? -- the device outranks this list)")
+        print("physical_capacity=%d" % cap)
+        for hz in sorted(limits):
+            print("  %6d Hz -> %d taps" % (hz, limits[hz]))
         return 0
     os.makedirs(OUT_DIR, exist_ok=True)
     L = ["// Auto-generated by tools/dsp/gen_biquad.py -- DO NOT EDIT.",

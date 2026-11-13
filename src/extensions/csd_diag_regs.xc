@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include "csd_diag.h"
 #include "clearsounddac_board.h"
+#include "csd_ups_block.h"   /* csd_ups_diag_in_hz/out_hz for the ovr8 gate (REVERT with it) */
 
 /* Bound in src/core/user_main.h (unsafe cast of c_audiohw[4]). */
 extern unsafe chanend uc_audiohw_diag;
@@ -178,6 +179,24 @@ int csd_diag_reg_read(unsigned reg, unsigned *val)
     return 1;
 }
 
+/* Soft-ramp window around an atomic kernel update (owner directive
+ * 2026-11-10). One round trip per half: PRE asks the codec-server owner to
+ * run the chip soft-mute ramp DOWN and wait it out, POST to unmute (the
+ * chip ramps back to the level the volume registers hold). Both replies
+ * carry the owner-side event counter, which the caller keeps as the tile[1]
+ * witness for INFO? (a tile-0 static would read as a never-written copy
+ * here -- the per-tile static rule, see csd_diag_identity_snapshot). */
+unsigned csd_diag_krnl_seq(unsigned post)
+{
+    unsigned ev = 0u;
+    unsafe {
+        uc_audiohw_diag <: (unsigned)(post ? AUDIOHW_CMD_KRNL_SEQ_POST
+                                           : AUDIOHW_CMD_KRNL_SEQ_PRE);
+        uc_audiohw_diag :> ev;
+    }
+    return ev;
+}
+
 /* Unit identity, fetched from the tile[0] owner.
  *
  * WHY THIS EXISTS AT ALL. The identity statics live in .dp.bss, i.e. DP/CP
@@ -261,10 +280,18 @@ int csd_diag_ups_set(unsigned want, unsigned persist, unsigned *applied,
                      unsigned *samfreq, unsigned *refusals)
 {
     unsigned a = 0u, sf = 0u, rf = 0u;
+    /* ovr8 (2026-11-11): the operator path is usually taken pre-stream, when
+     * the engine rates are stale; the board's rate-change re-grant then
+     * carries the correct flag. Judge from the engine's current pair.
+     * REVERT with the ovr8 word. */
+    const unsigned in_hz = csd_ups_diag_in_hz();
+    const unsigned ovr8 =
+        (in_hz != 0u && csd_ups_diag_out_hz() == 8u * in_hz) ? 1u : 0u;
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_UPS_SET;
         uc_audiohw_diag <: (want ? 1u : 0u);
         uc_audiohw_diag <: (persist ? 1u : 0u);
+        uc_audiohw_diag <: ovr8;
         uc_audiohw_diag :> a;
         uc_audiohw_diag :> sf;
         uc_audiohw_diag :> rf;

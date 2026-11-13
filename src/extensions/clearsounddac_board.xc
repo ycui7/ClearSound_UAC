@@ -59,6 +59,14 @@ void xua_csd_set_usb_ratio(unsigned r);
 #include <print.h>
 #include <stdlib.h>
 
+/* REVERT(dp168 2026-11-13): CSD_UPS_ASYNC was only ever passed through the
+ * phantom EXTRA_BUILD_FLAGS — every #ifdef CSD_UPS_ASYNC region in the app
+ * and lib compiled OUT (verified: symbol table + link of both worlds).
+ * Forcing it here, where the arm path lives. */
+#ifndef CSD_UPS_ASYNC
+#define CSD_UPS_ASYNC 1
+#endif
+
 //#define SC_COLOR_DEBUG_OUTPUT
 
 #ifdef SC_COLOR_DEBUG_OUTPUT
@@ -887,9 +895,10 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 }
                 else if (cmd == AUDIOHW_CMD_UPS_SET)
                 {
-                    unsigned want, persist, reply;
+                    unsigned want, persist, reply, ovr8;
                     c[i] :> want;
                     c[i] :> persist;
+                    c[i] :> ovr8;
                     if (want) {
                         /* Grant the codec OSF bypass only where the resampler
                          * client is legitimately running: the frame clock is
@@ -898,7 +907,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         const unsigned famclk =
                             (s_hwcfg_samfreq == 384000u ||
                              s_hwcfg_samfreq == 352800u) ? 1u : 0u;
-                        if (famclk && s_osf_force_landed) {
+                        if (famclk && s_osf_force_landed && ovr8) {
                             s_osf_want    = 1u;
                             s_osf_applied = 1u;
                         } else {
@@ -1000,6 +1009,55 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     c[i] :> regAddr;
                     ES9219Q_REGREAD(regAddr, regVal, i2c);
                     c[i] <: regVal;
+                }
+                else if (cmd == AUDIOHW_CMD_KRNL_SEQ_PRE ||
+                         cmd == AUDIOHW_CMD_KRNL_SEQ_POST)
+                {
+                    /* Soft-ramp window around an atomic kernel update (see
+                     * the enum comment for the datasheet basis). Runs HERE,
+                     * in the sole owner of codec I2C and the mute register;
+                     * the diag thread only asks and waits for the reply. The
+                     * 300 ms wait blocks this tile-0 select (host volume
+                     * mailbox drain delayed by that much during a kernel
+                     * update -- nothing bit-timed lives on this task; the
+                     * software-LRCLK loop is tile[1] and pays nothing). */
+                    static unsigned krnl_ramp_events = 0;
+                    unsigned powered_down = 0u;
+#ifdef CSD_IDLE_POWER
+                    powered_down = pw_down;
+#endif
+                    if (!powered_down) {
+                        if (cmd == AUDIOHW_CMD_KRNL_SEQ_PRE) {
+                            /* rate 0: slowest hardware ramp (750 dB/s at the
+                             * 384 kHz wire); preserve the upper fields the
+                             * boot writer set (modulator linearity, DoP). */
+                            unsigned r6;
+                            ES9219Q_REGREAD(ES9219Q_DOP_N_VOL_RAMP_RATE, r6, i2c);
+                            ES9219Q_REGWRITE(ES9219Q_DOP_N_VOL_RAMP_RATE,
+                                             (r6 & ~7u), i2c);
+                            ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                                (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
+                                 ES9219Q_MUTE), i2c);
+                            timer krt; unsigned k0, k1;
+                            krt :> k0;
+                            do { krt :> k1; }
+                            while ((int)(k1 - k0) < 30000000);   /* 300 ms */
+                        } else {
+                            /* Unmute: the chip ramps back to the level the
+                             * (untouched) volume registers hold, then put the
+                             * boot ramp rate back for ordinary volume UI. */
+                            ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
+                                (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
+                                 (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)),
+                                i2c);
+                            ES9219Q_REGWRITE(ES9219Q_DOP_N_VOL_RAMP_RATE,
+                                             (ES9219Q_DOP_N_VOL_RAMP_RATE_VALUE |
+                                              ES9219Q_DOP_ENABLE |
+                                              ES9219Q_VOLUME_RATE), i2c);
+                        }
+                        krnl_ramp_events++;
+                    }
+                    c[i] <: krnl_ramp_events;
                 }
                 else if (cmd == AUDIOHW_CMD_VOL_REAPPLY)
                 {
@@ -1436,13 +1494,22 @@ static inline unsigned DAC_TRIM_UPS_GET(void)
     return v;
 }
 
-static inline unsigned DAC_UPS_SET(unsigned want, unsigned persist)
+static inline unsigned DAC_UPS_SET(unsigned want, unsigned persist,
+                                   unsigned ovr8)
 {
+    /* ovr8 (2026-11-11): the OSF bypass is legal ONLY when the wire stream
+     * truly is 8x-oversampled data (ES9219 datasheet, Reg 7 BYPASS_OSF:
+     * PCM OSF-bypass mode means fs = frame-clock/8). At ratio 2 (192k host
+     * -> 384k wire) the bypass starves the modulators by 4x: the analog
+     * output is garbage, which is what poisoned the armed mic loopback
+     * (F-C). The tile[0] grant interlock takes this with famclk +
+     * force-landed. REVERT: drop the parameter and the interlock term. */
     unsigned applied, samfreq, refusals;
     unsafe {
         uc_audiohw1 <: AUDIOHW_CMD_UPS_SET;
         uc_audiohw1 <: want;
         uc_audiohw1 <: persist;
+        uc_audiohw1 <: ovr8;
         uc_audiohw1 :> applied;
         uc_audiohw1 :> samfreq;
         uc_audiohw1 :> refusals;
@@ -2064,10 +2131,29 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
          * sends persist=0 and touches neither the journal nor the
          * operator-disable latch. */
         if (csd_ups_get_want() && samFreq != host_hz)
-            csd_ups_set_enabled(DAC_UPS_SET(1u, 0u));
+        {
+            /* OSF bypass is legal only at a true 8x wire stream (see
+             * DAC_UPS_SET). At other ratios the codec keeps its own FIR and
+             * the wire stream is ordinary PCM at the family rate: the
+             * engine's enable must NOT wait for a grant it will never get
+             * (the historical enabled:=applied mirror exists to stop the
+             * engine interpolating while a BYPASS-mode codec also
+             * interpolates -- double interpolation only exists in the
+             * bypass regime). REVERT with the ovr8 parameter. */
+            const unsigned ovr8 =
+                (host_hz != 0u && ups_wire == 8u * host_hz) ? 1u : 0u;
+            const unsigned applied = DAC_UPS_SET(1u, 0u, ovr8);
+            csd_ups_set_enabled(ovr8 ? applied : 1u);
+            /* 2026-11-11 late: the tap-disarm that used to sit here is
+             * REMOVED -- it starved the tap-echo instrumentation on exactly
+             * the ratio-2 legs under diagnosis (feedW/tap deltas frozen,
+             * probe_fc3 blind), and the B-leg mismatch clusters (~1500-frame
+             * periodic, constant count across 16x amplitude) persist with it
+             * in place, so it never was the hot-path culprit. */
+        }
         else {
             if (csd_ups_armed() || csd_ups_is_enabled())
-                (void)DAC_UPS_SET(0u, 0u);
+                (void)DAC_UPS_SET(0u, 0u, 0u);
             csd_ups_set_enabled(0u);
         }
     }
@@ -2079,8 +2165,12 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
         /* 2026-11-09: same guard -- a non-family re-config leaves the pacer
          * alone while a family stream is armed. */
         if (ups_fam != 0u || !csd_ups_armed())
-        xua_csd_set_usb_ratio(csd_ups_is_enabled() && ups_wire != 0u
-                              ? ups_wire / host_hz : 1u);
+#ifdef CSD_UPS_ASYNC
+            xua_csd_set_usb_ratio(csd_ups_is_enabled() && ups_wire != 0u
+                                  ? ups_wire / host_hz : 1u);
+#else
+            (void)ups_fam;
+#endif
     }
 #endif
 

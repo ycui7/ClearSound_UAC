@@ -18,6 +18,8 @@
 #include "scpi/scpi.h"
 #include "csd_diag.h"
 #include "csd_dsp.h"
+#include "csd_power_state.h"  /* csd_pw_host_frames: live-stream probe for
+                               * the kernel-update adoption wait */
 #include "csd_version.h"
 #include "csd_identity.h"
 #include "csd_gen.h"
@@ -42,20 +44,37 @@
 #define CSD_IDN_FIRMWARE CSD_FW_VERSION
 
 /* ---- output plumbing -------------------------------------------------- */
-/* 2026-11-10: 320 -> 640. WHY: DIAG:UPSAMPLing:INFO? grew to 46 fields
- * (raw ADC1 witness + DoSampleTransfer stall statistics) and the reply was
- * silently cut at 43 fields by this cap -- the tail we added was
- * invisible, which reads like 'the firmware did not change'.
- * REVERT: 320, and drop the tail fields. */
-#define REPLY_MAX 1024
+/* 2026-11-10: 320 -> 640 -> 1024 -> 32768. WHY the last step: the kernel
+ * container query (DIAG:DSP:COEFFicient?) must echo up to
+ * (12 + CSD_KERNEL_MAX_TAPS*4) bytes as base64 -- ~21.5 KB. A truncated
+ * kernel reply is CATASTROPHIC (it decodes as a plausible shorter kernel),
+ * so this cap is sized from the container, not from taste: it now equals
+ * the ring capacity minus framing. A reply that still cannot fit must fail
+ * LOUDLY at the handler (see coef_q's pre-flight), never truncate.
+ * REVERT history: 320 pre-2026-11-10, 640 for the INFO? tail, 1024 after. */
+#define REPLY_MAX 32768
+
+/* Receive side (csd_scpi_put's command buffer, see the parser section at
+ * the file bottom): the binding receive limit for a SET is THIS buffer --
+ * the MIDI path is event-at-a-time (csd_diag_midi.xc rx_event feeds
+ * csd_scpi_put byte by byte, no message cap) and libscpi lexes in place
+ * (parser.c assigns lex_state.buffer = the caller's buffer; its only
+ * internal fifo is the error queue). Sized so the largest container
+ * command fits in one message: header text + max_b64_chars (21872) plus
+ * full headroom. Overflow stays LOUD (csd_scpi_put rejects with -151), it
+ * never silently truncates. */
+#define INPUT_BUF_LEN 33792
 
 static unsigned reply_len;      /* bytes emitted by the current command */
 static unsigned reply_truncs;
 
 /* Reply ring, owned here (next to the parser) and pulled byte-by-byte by the
  * XC transport. Overflow drops and counts -- it never blocks, because the
- * consumer is a core that must keep answering the USB endpoint. */
-#define REPLY_BYTES 2048
+ * consumer is a core that must keep answering the USB endpoint. Sized with
+ * REPLY_MAX above so a maximum-size kernel reply fits in one command
+ * (kernel staging on tile[1]: ring + input buffer + container staging; the
+ * audio path shares neither stack nor budget with them). */
+#define REPLY_BYTES 34816
 static unsigned char rbuf[REPLY_BYTES];
 static unsigned      rwr, rrd;
 static unsigned      reply_drops;
@@ -491,98 +510,256 @@ static SCPI_FPTR_CMD scpi_result_t q_dsp(scpi_t *context)
  * workspace/csd-diag/native_scpi_harness.c (real libscpi + this file, host
  * build) -- not with the Python --sim backend, which is a second
  * implementation and agrees only with itself. */
-static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context)
-{
-    char txt[16];
-    uint32_t v;
+static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context);   /* below */
 
-    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
-    if (!parse_num(txt, strlen(txt), &v)) {
-        SCPI_ErrorPush(context, SCPI_ERROR_INVALID_STRING_DATA);
-        return SCPI_RES_ERR;
-    }
-    /* 0 OFF (byte-exact), 1 delay-only, 2 bass shelf -- see csd_dsp.h. The
-     * upper bound matters: csd_dsp_set_preset() treats any value >= 2 as
-     * "FIR preset", so a typo'd 7 would silently select the shelf. */
-    if (v > 2u) {
-        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
-        return SCPI_RES_ERR;
-    }
-    csd_dsp_set_preset((unsigned)v);
-    /* Volatility contract (2026-11-10): any PRESet write returns the engine
-     * to the SHIPPED DEFAULT kernel -- unity/identity, not the old shelf --
-     * so a tester-composed kernel can never survive into a preset change.
-     * See the aperture block in csd_dsp_bq.c. */
-    csd_dsp_bq_coef_restore();
-    return SCPI_RES_OK;
-}
-
-/* ---- DIAG:DSP:COEFFicient -- host-side kernel aperture (2026-11-10) -----
- * The single shipping biquad section exposes its five Q1.30 coefficients
- * [b0, b1, b2, -a1, -a2] for per-index read and write. THE SHIPPED DEFAULT
- * IS THE UNITY/IDENTITY KERNEL (b0 = 1073741824 = 2^30, rest 0): the
- * DEFault form below restores UNITY, NOT the former bass shelf -- the shelf
- * is no longer shipped behaviour, it is one kernel among many that a host
- * loads through this aperture (tools/dsp/gen_biquad.py `--shelf <fs>`
- * prints a quantised, gated set).
+/* ---- DIAG:DSP:COEFFicient -- base64 kernel-container aperture ----------
+ * (2026-11-10 owner directives). THE BLOCK WRITE IS THE ONLY WRITE PATH.
+ * One command carries one whole kernel and applies it in ONE atomic
+ * adoption; there is no per-index decimal set and no five-comma form -- a
+ * caller cannot compose a kernel non-atomically (a half-loaded filter is
+ * worse than a refused one: reject, never truncate, never zero-pad).
  *
- * Set:    DIAG:DSP:COEFFicient <0..4>,<value>
- *         Parameters are COMMA-separated, like every multi-parameter command
- *         on this device (GENerator:*): libscpi's lexer drops a
- *         space-separated second parameter before the callback runs (proved
- *         on hardware 2026-11-10: "COEFFicient 0 12345" leaves the table
- *         untouched and queues no error, "COEFFicient 0,12345" takes).
- *         <value> is a signed Q1.30 integer. Bare DECIMAL works
- *         ("1073741824", "-1068721454"); QUOTE anything else -- the libscpi
- *         lexer rejects/quietly drops bare 0x tokens, exactly the trap
- *         documented above b64_decode for register payloads, so hex and
- *         mixed spellings must be quoted: 0,"0x40000000", 0,"-0x80000000"
- *         (both verified on hardware). Out-of-int32 values are REJECTED
- *         with -224 ILLEGAL_PARAMETER_VALUE, never clamped (parse_snum's
- *         reject-never-wrap rule); a bad index gets -224 too; a non-numeric
- *         first parameter gets -151. Set half answers nothing (the client's
- *         no-'?'-means-silent contract, see csd_diag.py _run_commands);
- *         confirmation is DIAG:DSP:COEFFicient? <idx>.
- * Query:  DIAG:DSP:COEFFicient? <0..4>  -> the live value, signed decimal.
- *         Request-side truth (what the host composed, or the shipped
- *         default for the posted rate), exactly like PRESet? reports the
- *         posted request; the task-APPLIED truth is INFO? eq_kernel_src.
+ * Container (inside base64, little-endian): header id:u32, taps:u32,
+ * width:u16, q_shift:u16 (12 bytes) + taps * width/8 coefficient bytes.
+ * Layout constants and every limit come from the target table in
+ * csd_dsp_bq.c through the getters -- FORMat?, the validator and the store
+ * cannot drift. A host that sees an unknown magic or version in the
+ * FORMat? reply must BAIL, not guess: never send what you cannot parse.
+ *
+ * Set:     DIAG:DSP:COEFFicient "<base64>"
+ *          REJECTED with -224 ILLEGAL_PARAMETER_VALUE, table untouched,
+ *          for: invalid base64, unpadded/garbage tail, trailing extra
+ *          parameters, header shorter than 12 bytes, unknown id, taps that
+ *          does not EQUAL the addressed target's capacity (biquad exactly
+ *          5; FIR exactly CSD_KERNEL_FIR_TAPS -- one tap short is refused
+ *          whole), width != 32, q != 30, or total decoded length !=
+ *          12 + taps*4.
+ * Query:   DIAG:DSP:COEFFicient?              -> the whole live container
+ *          as base64 (request-side truth, exactly like PRESet? reports the
+ *          posted request; task-applied truth is INFO? eq_kernel_src).
+ *          Pre-flight: if the encoded reply cannot fit the reply ring the
+ *          command FAILS LOUDLY (-200) and answers nothing -- a truncated
+ *          kernel would look like a valid shorter one.
+ *          DIAG:DSP:COEFFicient? <idx>        -> DEBUG/QUERY-ONLY per-word
+ *          decimal readback (kept for humans; there is no set form).
+ * Limits:  DIAG:DSP:COEFFicient:FORMat?       -> derived descriptor, magic
+ *          and version FIRST. A host can write a correct encoder from this
+ *          reply alone.
  * Restore: DIAG:DSP:COEFFicient:DEFault  (no reply; errors via the queue)
  *
- * Adoption: the write lands on the request side and the EQ task adopts it
- * through the SAME config/resync/engage path a PRESet change drives (see
- * csd_dsp_bq.c) -- the table is never poked under the running engine and
- * the bit-timed loop pays nothing. Overrides are volatile: RAM only,
- * cleared by reboot, by any PRESet write (see set_dsp above) and by a real
- * sample-rate change (csd_dsp_set_rate).
+ * Every accepted write, the PRESet write, and :DEFault run the same
+ * sequence: codec soft-ramp DOWN (ES9219Q chip ramp, Reg 6 rate 0, Reg 7
+ * mute -- Reg 3/15/16 volume registers untouched, so the PREVIOUS level is
+ * what comes back), post the request, wait for the EQ task's one adoption
+ * (witness eq_cfg_adopt), soft-ramp UP. The EQ task itself runs
+ * pause/load/resume around every adoption (csd_dsp.xc); the software-LRCLK
+ * loop pays nothing.
  *
  * Patterns carry no parameter placeholders -- libscpi matches the pattern
  * against the command HEADER only (see set_dsp's block note), and
  * matchCommand fails a row whose pattern is exhausted while the header
- * still has text, so the three rows cannot shadow each other. */
+ * still has text, so the rows cannot shadow each other. */
+
+/* Kernel staging on tile[1], off any stack: receive payload and query
+ * payload (never simultaneously live -- the diagnostic thread is
+ * single-threaded). Sized to the contract maximum the validator accepts
+ * (FIR_TAPS == MAX_TAPS): kstage holds the largest legal decoded payload,
+ * kb64 its base64 echo (5,480 chars). aligned(4): coef words read as int32. */
+#define KSTAGE_BYTES (CSD_KERNEL_HDR_BYTES + CSD_KERNEL_MAX_TAPS * 4)
+/* Tail-most DP bucket with the kernel stores: at 1024 capacity these are
+ * ~9.5 KB of the diagnostic tile's data, and cold (one command at a time).
+ * Same layout-protection rule as csd_dsp_store.c -- see the comment there.
+ * kstage is sized to the WORST-CASE decoded size of a legal base64 length
+ * ((bytes+2)/3*3 = 4110 for the 4108-byte contract maximum): the pre-decode
+ * guard compares len/4*3 against sizeof kstage, and with the buffer at
+ * exactly KSTAGE_BYTES that guard rejected the contract's OWN largest legal
+ * container (4110 > 4108) -- measured on the bench, -224 with the table
+ * untouched. The validator still demands decoded length == 12 + taps*4
+ * exactly, so the slack bytes are unreachable. */
+static unsigned char kstage[(KSTAGE_BYTES + 2u) / 3u * 3u]
+    __attribute__((section(".dp.bss.large"), aligned(4)));
+static char kb64[(KSTAGE_BYTES + 2) / 3 * 4 + 8]
+    __attribute__((section(".dp.bss.large")));
+
+/* Witnesses (INFO? 91..94; unconditional definitions, the SCPI file does
+ * not receive CSD_EXTRA_FLAGS): task pause (csd_dsp.xc), adoption
+ * (csd_eq_ring.c), owner-side ramp counter mirrored from the tile[0] reply,
+ * adoption waits that timed out. */
+extern unsigned g_csd_eq_cfg_adopt;
+extern unsigned g_csd_eq_pause_events, g_csd_eq_pause_ticks_max;
+unsigned g_csd_krnl_ramp_events;
+unsigned g_csd_krnl_adopt_timeouts;
+
+/* Live-stream probe: is a host stream actually being delivered right now?
+ * Two independent per-frame counters, OR'd:
+ *   g_csd_ubm_calls  (csd_dsp.xc) -- one per UserBufferManagement call, i.e.
+ *                    once per frame at the stream rate, content-blind.
+ *   csd_pw_host_frames() (csd_power_state.c) -- one per host sample at the
+ *                    same hook entry, also content-blind (the NON-ZERO gate
+ *                    belongs to its sibling csd_pw_host_activity, NOT to this
+ *                    counter -- checked in the source, because the first
+ *                    version of this comment claimed the opposite).
+ * WHY two: each is compiled in under a different build flag (CSD_EQ_DIAG_WITNESS
+ * and CSD_IDLE_POWER). A liveness probe that vanishes with a diagnostic flag is
+ * a probe that silently reports "no stream" and skips the adoption wait -- the
+ * exact success-without-adoption failure this whole sequence exists to prevent.
+ * Neither costs anything here: both already run per frame on the audio core.
+ * A bounded spin is fine on this core -- it is the diagnostic thread, not the
+ * audio path -- and the loop only gates the adoption wait. */
+extern unsigned g_csd_ubm_calls;        /* unconditional global, csd_dsp.xc */
+extern unsigned g_csd_eq_stalls;        /* INFO? 105 (11.11.31 ring waits)  */
+extern unsigned g_csd_feed_writes;      /* INFO? field 98 (csd_dsp.xc feed) */
+extern unsigned csd_feed_owner;         /* INFO? field 99 (gate snapshot)   */
+static unsigned krnl_stream_live(void)
+{
+    const unsigned f0 = g_csd_ubm_calls;
+    const unsigned p0 = csd_pw_host_frames();
+    for (unsigned i = 0; i < 50000u; i++) {}
+    return g_csd_ubm_calls != f0 || csd_pw_host_frames() != p0;
+}
+
+/* The atomic update sequence (owner directive 2026-11-10): ramp down with
+ * the CHIP's own soft ramp (codec-server owner waits the ramp out), post
+ * the request, wait for the EQ task's single adoption when a stream is
+ * live, ramp back up. post() moves exactly one complete request.
+ *
+ * Returns 0 iff a LIVE stream did not observe the adoption (timeout): the
+ * codec is still ramped back up (audio must never be left muted by a failed
+ * write) but the caller must answer with an error -- a set-command that
+ * returns success while g_csd_eq_cfg_adopt never moved is the
+ * success-with-delta-adopt-0 lie the owner banned (2026-11-10). With no
+ * stream the EQ task has nothing to adopt (the engine is not engaged; the
+ * pending config is adopted at stream start and witnessed there), so the
+ * wait -- and the requirement -- apply only when live.
+ *
+ * CSD_KRNL_FORCE_ADOPT_TIMEOUT is a BENCH-ONLY define (never in a shipping
+ * build; build_tree.sh does not pass it): it collapses the wait bound to one
+ * iteration so the adoption can never be observed. That is the only way to
+ * prove the -300 path is live code rather than a comment, and to prove the
+ * codec is NOT left muted when it fires. */
+#ifdef CSD_KRNL_FORCE_ADOPT_TIMEOUT
+#define KRNL_ADOPT_SPIN 1u
+#else
+#define KRNL_ADOPT_SPIN 4000000u
+#endif
+static int krnl_update_seq(void (*post)(void *), void *arg)
+{
+    g_csd_krnl_ramp_events = csd_diag_krnl_seq(0u);
+    const unsigned a0 = g_csd_eq_cfg_adopt;
+    post(arg);
+    int ok = 1;
+    if (krnl_stream_live()) {
+        for (unsigned i = 0; i < KRNL_ADOPT_SPIN && g_csd_eq_cfg_adopt == a0; i++) {}
+        if (g_csd_eq_cfg_adopt == a0) { g_csd_krnl_adopt_timeouts++; ok = 0; }
+    }
+    g_csd_krnl_ramp_events = csd_diag_krnl_seq(1u);   /* never leave muted */
+    return ok;
+}
+
+/* Two SCPI codes this file owns (2026-11-10). They are numeric because
+ * libscpi's FULL error table is compiled out here: scpi_user_config.h pins
+ * USE_FULL_ERROR_LIST to 0 (the XE rows cost flash), and the XE enumerators
+ * -- SCPI_ERROR_DATA_OUT_OF_RANGE, SCPI_ERROR_DEVICE_ERROR -- are generated
+ * only from that table, so naming them is a compile error (measured:
+ * "use of undeclared identifier 'SCPI_ERROR_DEVICE_ERROR'"). The codes are
+ * from the SCPI/IEEE 488.2 set, so they are stable regardless of the table,
+ * and libscpi still maps them to the right *ESR bits (-200..-299 -> EER,
+ * -300..-399 -> DER). Their Translate() text is "Unknown error" with the
+ * table trimmed, which is exactly why both are documented in
+ * DIAG:DSP:COEFFicient:FORMat? and in docs, and why the codes -- not the
+ * text -- are the contract.
+ *   -222 Data out of range: a well-formed kernel that is longer than the
+ *      measured per-rate ceiling -- valid container, wrong rate. Shorten it
+ *      or lower the sample rate (see csd_dsp_kernel_rate_limit).
+ *   -300 Device-specific error: the request ran but the device could not
+ *      complete it -- here, a live stream never observed the kernel adoption
+ *      (kernel_gate_runner / t2_write_matrix read eq_krnl_adopt_timeouts to
+ *      confirm it). NOT libscpi's -200 EXECUTION_ERROR, which this file
+ *      already uses for reply-size refusals: two failures must not share one
+ *      code. */
+#define CSD_ERR_DATA_OUT_OF_RANGE   (-222)
+#define CSD_ERR_ADOPT_TIMEOUT       (-300)
+
+static unsigned le32_at(const unsigned char *b)
+{
+    return (unsigned)b[0] | ((unsigned)b[1] << 8) |
+           ((unsigned)b[2] << 16) | ((unsigned)b[3] << 24);
+}
+static unsigned le16_at(const unsigned char *b)
+{
+    return (unsigned)b[0] | ((unsigned)b[1] << 8);
+}
+
+struct kernel_post { unsigned id; unsigned taps; };
+static void kernel_post_cb(void *a)
+{
+    struct kernel_post *k = (struct kernel_post *)a;
+    csd_dsp_kernel_publish(k->id, k->taps,
+                           (const int32_t *)(const void *)(kstage + CSD_KERNEL_HDR_BYTES));
+}
+
 static SCPI_FPTR_CMD scpi_result_t coef_set(scpi_t *context)
 {
-    char txt[24];
-    uint32_t idx;
-    int32_t v;
+    const char *p;
+    size_t len;
 
-    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
-    if (!parse_num(txt, strlen(txt), &idx)) {
-        SCPI_ErrorPush(context, SCPI_ERROR_INVALID_STRING_DATA);
-        return SCPI_RES_ERR;
+    if (!SCPI_ParamCharacters(context, &p, &len, TRUE)) return SCPI_RES_ERR;
+    /* Exactly one parameter: a trailing second parameter is -224, not a
+     * hint. (The libscpi lexer DROPS a space-separated second parameter
+     * before the callback runs -- documented on this device -- so comma
+     * junk is what actually reaches here; both ways end in rejection.) */
+    {
+        char junk[8];
+        if (param_text(context, junk, sizeof junk, FALSE)) {
+            SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+            return SCPI_RES_ERR;
+        }
     }
-    if (idx >= 5u) {                        /* single section, 5 coeffs */
+    if (len == 0 || (len % 4u) != 0u || len / 4u * 3u > sizeof kstage) {
         SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
         return SCPI_RES_ERR;
     }
-    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
-    if (!parse_snum(txt, strlen(txt), &v)) { /* int32 domain: out of range
-                                               * is rejected, never clamped */
+    const int n = b64_decode(p, len, kstage, sizeof kstage);
+    if (n < (int)CSD_KERNEL_HDR_BYTES) {       /* bad base64 or short header */
         SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
         return SCPI_RES_ERR;
     }
-    if (!csd_dsp_bq_coef_write(idx, v)) {
+    const unsigned id    = le32_at(kstage);
+    const unsigned taps  = le32_at(kstage + 4);
+    const unsigned width = le16_at(kstage + 8);
+    const unsigned q     = le16_at(kstage + 10);
+    const unsigned cap   = csd_dsp_kernel_max_taps_for(id);
+    if (cap == 0u || taps == 0u || taps > cap ||
+        (id == CSD_KERNEL_ID_BIQUAD && taps != 5u) ||   /* structural: 5 words */
+        width != CSD_KERNEL_WIDTH_BITS || q != CSD_KERNEL_Q_SHIFT ||
+        (unsigned)n != CSD_KERNEL_HDR_BYTES + taps * 4u) {
+        /* unknown target, no coefficients, a container larger than the
+         * physical store, wrong width or q, or a length that disagrees with
+         * the header. taps == 0 and taps > cap are load-bearing (2026-11-10):
+         * the store used to accept 1..cap here and then
+         * csd_dsp_bq_config silently refused adoption (it required
+         * tp == max_taps_for(id)) -- a SHORT container was a
+         * success-with-delta-adopt-0 lie. Both gates now run the SAME
+         * predicate, csd_dsp_kernel_taps_legal(), so no container can be
+         * accepted here and refused there; the rejection below stays loud with
+         * -224 and the table stays byte-identical. */
         SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    if (!csd_dsp_kernel_taps_legal(id, taps)) {
+        /* Well-formed, but longer than the CURRENT stream rate can compute:
+         * the measured per-rate ceiling (csd_dsp.h) is below the physical
+         * capacity. Distinct from -224 on purpose -- a host that gets -222 has
+         * a valid container and must either shorten it or lower the sample
+         * rate; FORMat? names the limit and the rate it belongs to. */
+        SCPI_ErrorPush(context, CSD_ERR_DATA_OUT_OF_RANGE);
+        return SCPI_RES_ERR;
+    }
+    struct kernel_post kp = { id, taps };
+    if (!krnl_update_seq(kernel_post_cb, &kp)) {
+        /* A live stream never saw the adoption: report it, do not let the
+         * silent-success contract hide an unapplied kernel. */
+        SCPI_ErrorPush(context, CSD_ERR_ADOPT_TIMEOUT);
         return SCPI_RES_ERR;
     }
     return SCPI_RES_OK;   /* silent by contract; readback confirms */
@@ -590,30 +767,226 @@ static SCPI_FPTR_CMD scpi_result_t coef_set(scpi_t *context)
 
 static SCPI_FPTR_CMD scpi_result_t coef_q(scpi_t *context)
 {
+    /* Indexed debug/query-only form first: COEFFicient? <idx>. */
     char txt[16];
-    uint32_t idx;
+    if (param_text(context, txt, sizeof txt, FALSE)) {
+        uint32_t idx;
+        if (!parse_num(txt, strlen(txt), &idx)) {
+            /* same contract as PRESet: a non-numeric index is a refused
+             * value (-224), not a transport fault. */
+            SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+            return SCPI_RES_ERR;
+        }
+        if (idx >= csd_dsp_kernel_request_taps()) {
+            SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+            return SCPI_RES_ERR;
+        }
+        char buf[16];
+        unsigned n = fmt_s32(csd_dsp_bq_coef_read(idx), buf, sizeof buf);
+        if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                      return SCPI_RES_ERR; }
+        SCPI_ResultCharacters(context, buf, n);
+        return SCPI_RES_OK;
+    }
 
-    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
-    if (!parse_num(txt, strlen(txt), &idx)) {
-        SCPI_ErrorPush(context, SCPI_ERROR_INVALID_STRING_DATA);
+    /* Whole-kernel container query: header + request-side coefficients. */
+    const unsigned en   = csd_dsp_kernel_request_en();
+    const unsigned id   = csd_dsp_kernel_request_id();
+    const unsigned taps = csd_dsp_kernel_request_taps();
+    if (taps > CSD_KERNEL_MAX_TAPS) {          /* cannot happen; belt */
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
         return SCPI_RES_ERR;
     }
-    if (idx >= 5u) {
-        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+    /* Build the payload in the staging buffer, then encode. */
+    unsigned char *h = kstage;
+    h[0] = (unsigned char)id;        h[1] = (unsigned char)(id >> 8);
+    h[2] = (unsigned char)(id >> 16); h[3] = (unsigned char)(id >> 24);
+    h[4] = (unsigned char)taps;      h[5] = (unsigned char)(taps >> 8);
+    h[6] = (unsigned char)(taps >> 16); h[7] = (unsigned char)(taps >> 24);
+    h[8] = (unsigned char)CSD_KERNEL_WIDTH_BITS; h[9] = 0;
+    h[10] = (unsigned char)CSD_KERNEL_Q_SHIFT;   h[11] = 0;
+    int32_t *w = (int32_t *)(void *)(kstage + CSD_KERNEL_HDR_BYTES);
+    for (unsigned i = 0; i < taps; i++) w[i] = csd_dsp_bq_coef_read(i);
+    (void)en;                                   /* readback already defaults-aware */
+    const unsigned total = CSD_KERNEL_HDR_BYTES + taps * 4u;
+    const size_t need = ((total + 2u) / 3u) * 4u;
+    /* LOUD failure, never a truncated kernel reply: an echo that decodes
+     * as a shorter kernel is worse than no answer. */
+    if (need > sizeof kb64 || need > (size_t)REPLY_MAX - 8u ||
+        need > (size_t)REPLY_BYTES - 16u) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
         return SCPI_RES_ERR;
     }
-    char buf[16];
-    unsigned n = fmt_s32(csd_dsp_bq_coef_read(idx), buf, sizeof buf);
-    if (n == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
-                  return SCPI_RES_ERR; }
-    SCPI_ResultCharacters(context, buf, n);
+    const size_t len = b64_encode(kstage, total, kb64, sizeof kb64);
+    if (len == 0) { SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+                    return SCPI_RES_ERR; }
+    SCPI_ResultCharacters(context, kb64, (int)len);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t coef_format_q(scpi_t *context)
+{
+    /* Derived ONLY from the target table and the buffer constants the
+     * parser itself checks -- a host can size its encoder from this reply
+     * alone. Magic + version FIRST. KERN2: container with in-payload
+     * header (KERN1's fixed 5-int32 shape was retired same day; a host
+     * that sees anything else must bail, not guess). */
+    static const char pre1[] = "KERN2,1,base64,le,int32,signed,unit=taps,"
+                               "header=id:u32,taps:u32,width:u16,q:u16,"
+                               "max_taps=";
+    static const char mid1[] = ",container_taps=";
+    static const char mid2[] = ",max_payload_bytes=";
+    static const char mid3[] = ",max_b64_chars=";
+    static const char mid4[] = ",targets=1:biquad:5|2:fir:";
+    static const char mid5[] = ",recv_cmd_limit=";
+    static const char mid6[] = ",reply_limit=";
+    /* Per-rate ceiling (2026-11-10): what the aperture will ACCEPT for the
+     * rate the stream is running at now, which rate that is, and the whole
+     * measured tier table. ';' inside the table so a comma-splitting host
+     * parser still sees one descriptor field per key. */
+    static const char mid7[] = ",fir_taps_allowed=";
+    static const char mid8[] = ",rate_hz=";
+    static const char mid9[] = ",fir_taps_by_rate=48000:";
+    static const char midA[] = "|96000:";
+    static const char midB[] = "|192000:";
+    static const char midC[] = "|384000:";
+    static char out[400];
+    unsigned o = 0;
+    const unsigned fir   = csd_dsp_kernel_max_taps_for(CSD_KERNEL_ID_FIR);
+    const unsigned cont  = csd_dsp_kernel_container_max_taps();
+    const unsigned payld = CSD_KERNEL_HDR_BYTES + fir * 4u;
+    const unsigned b64c  = ((payld + 2u) / 3u) * 4u;
+    unsigned n;
+#define KAPP(s) do { for (const char *q_ = (s); *q_; q_++) out[o++] = *q_; } while (0)
+#define KNUM(v) do { n = fmt_u32((v), out + o, sizeof out - o - 1u); o += n; } while (0)
+    KAPP(pre1); KNUM(fir);
+    KAPP(mid1); KNUM(cont);
+    KAPP(mid2); KNUM(payld);
+    KAPP(mid3); KNUM(b64c);
+    KAPP(mid4); KNUM(fir);
+    KAPP(mid5); KNUM(INPUT_BUF_LEN - 1u);
+    KAPP(mid6); KNUM(REPLY_MAX);
+    KAPP(mid7); KNUM(csd_dsp_kernel_rate_limit(CSD_KERNEL_ID_FIR));
+    KAPP(mid8); KNUM(csd_dsp_kernel_rate_limit_rate_hz());
+    KAPP(mid9); KNUM(CSD_KERNEL_FIR_TAPS_AT_48);
+    KAPP(midA); KNUM(CSD_KERNEL_FIR_TAPS_AT_96);
+    KAPP(midB); KNUM(CSD_KERNEL_FIR_TAPS_AT_192);
+    KAPP(midC); KNUM(CSD_KERNEL_FIR_TAPS_AT_384);
+#undef KAPP
+#undef KNUM
+    out[o] = 0;
+    SCPI_ResultCharacters(context, out, (int)o);
+    return SCPI_RES_OK;
+}
+
+static void def_post(void *a) { (void)a; csd_dsp_bq_coef_restore(); }
+
+/* ---- DEBUG:DSP:CLEAR -- witness window control (2026-11-10) --------------
+ * The per-frame tick witnesses are MAXES since boot, so a per-configuration
+ * measurement of eq_ticks_max is impossible without a reset: measured the
+ * scalar FIR at 16..256 taps across four host rates, every reading after the
+ * first would have been the maximum of everything run before it. This clears
+ * the level-type witnesses (maxes, high waters) and answers with the value it
+ * replaced, so the clear is VERIFIED by the reply rather than assumed. The
+ * cumulative counters (frames, adopts, calls) are left alone -- callers take
+ * deltas of those, which is what an absolute counter is for.
+ * REVERT: delete this handler and its row; the tap table then has no
+ * per-configuration evidence behind it. */
+static SCPI_FPTR_CMD scpi_result_t dsp_clear(scpi_t *context)
+{
+    extern unsigned g_csd_eq_ticks_max, g_csd_eq_pause_ticks_max;
+    extern unsigned g_csd_eq_occ_high, g_csd_eq_underrun, g_csd_eq_overrun;
+    extern unsigned g_csd_lrclk_ts_min, g_csd_lrclk_ts_max;
+    char buf[32];
+    const unsigned pt = g_csd_eq_ticks_max, pp = g_csd_eq_pause_ticks_max;
+    g_csd_eq_ticks_max = 0u;
+    g_csd_eq_pause_ticks_max = 0u;
+    g_csd_eq_occ_high = 0u;
+    g_csd_eq_underrun = 0u;
+    g_csd_eq_overrun = 0u;
+    g_csd_lrclk_ts_min = 0xFFFFFFFFu;
+    g_csd_lrclk_ts_max = 0u;
+    const int n = snprintf(buf, sizeof buf, "%u,%u", pt, pp);
+    if (n > 0) SCPI_ResultCharacters(context, buf, (int)(n < (int)sizeof buf ? n : sizeof buf - 1));
+    return SCPI_RES_OK;
+}
+
+/* ---- DEBUG:REPLY? -- the transport's own loss counters (2026-11-10) ------
+ * WHY: a DIAG:UPSAMPLing:INFO? came back with 83 of 95 fields while every
+ * witness delta computed from it was garbage. The client, the format string
+ * and the ring had to be told apart, and only the device's own counters can
+ * do it: reply_drops counts bytes the producer threw away because the ring
+ * was full (device-side loss), reply_truncs counts replies capped by
+ * REPLY_MAX. Both zero across a short reply means the bytes left the device
+ * whole and the loss is downstream -- which is what the bench measured.
+ * REVERT: delete this handler and its row. */
+static SCPI_FPTR_CMD scpi_result_t reply_stats_q(scpi_t *context)
+{
+    char buf[64];
+    const unsigned n = snprintf(buf, sizeof buf, "%u,%u,%u,%u",
+                                reply_len, reply_drops, reply_truncs,
+                                (unsigned)(rwr != rrd));
+    if (n > 0) {
+        SCPI_ResultCharacters(context, buf, (int)(n < sizeof buf ? n : sizeof buf - 1));
+    }
     return SCPI_RES_OK;
 }
 
 static SCPI_FPTR_CMD scpi_result_t coef_default(scpi_t *context)
 {
-    (void)context;
-    csd_dsp_bq_coef_restore();   /* SHIPPED DEFAULT: unity, not the shelf */
+    if (!krnl_update_seq(def_post, 0)) {   /* SHIPPED DEFAULT: unity, not
+                                              the shelf */
+        SCPI_ErrorPush(context, CSD_ERR_ADOPT_TIMEOUT);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+/* DIAG:DSP:PRESet <n> -- the set half, routed through the SAME
+ * soft-ramp/pause/load/adopt/restore sequence as the kernel block write
+ * (owner directive 2026-11-10: mid-stream configuration changes must be
+ * safe, and the PRESet adoption is the path that demonstrably corrupted).
+ * The query half stays q_dsp(), registered as its own entry: libscpi
+ * matches a pattern against the command HEADER only, and a bare pattern
+ * does not match the '?' form (see the block note above). */
+struct preset_post { unsigned v; };
+static void preset_post_cb(void *a)
+{
+    struct preset_post *p = (struct preset_post *)a;
+    csd_dsp_set_preset(p->v);
+    /* Volatility contract (2026-11-10): any PRESet write returns the engine
+     * to the SHIPPED DEFAULT kernel -- unity/identity, not any loaded
+     * kernel -- so a tester-composed kernel can never survive into a preset
+     * change. See the aperture block in csd_dsp_bq.c. */
+    csd_dsp_bq_coef_restore();
+}
+
+static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context)
+{
+    char txt[16];
+    uint32_t v;
+
+    if (!param_text(context, txt, sizeof txt, TRUE)) return SCPI_RES_ERR;
+    if (!parse_num(txt, strlen(txt), &v)) {
+        /* Contract (2026-11-10): a non-numeric parameter is -224
+         * ILLEGAL_PARAMETER_VALUE, the same code the container validator
+         * uses for malformed input -- not libscpi's default -151/-104
+         * "invalid string data". A typo'd PRESet is a refused value. */
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    /* 0 OFF (byte-exact), 1 delay-only, 2 EQ -- see csd_dsp.h. The
+     * upper bound matters: csd_dsp_set_preset() treats any value >= 2 as
+     * "FIR preset", so a typo'd 7 would silently select a kernel. */
+    if (v > 2u) {
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    struct preset_post pp = { v };
+    if (!krnl_update_seq(preset_post_cb, &pp)) {
+        SCPI_ErrorPush(context, CSD_ERR_ADOPT_TIMEOUT);
+        return SCPI_RES_ERR;
+    }
     return SCPI_RES_OK;
 }
 
@@ -1546,7 +1919,7 @@ static SCPI_FPTR_CMD scpi_result_t vol_trim_reset(scpi_t *context)
  * reason: they are C statics in a C translation unit, not XC objects. */
 static SCPI_FPTR_CMD scpi_result_t vol_trim_status_q(scpi_t *context)
 {
-    char buf[96];
+    char buf[512];
     unsigned len = 0;
     /* 11 words: the original seven plus the four record-version counters added
      * with the versioned store (7 checksum rejects, 8 unusable version,
@@ -1864,7 +2237,7 @@ static void ups_reply(scpi_t *context)
 {
     unsigned ap = 0u, sf = 0u, rf = 0u;
     csd_diag_ups_get(&ap, &sf, &rf);
-    char buf[96];
+    char buf[512];
     int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u",
                      csd_ups_is_enabled(), ap, sf, rf, csd_ups_diag_refusals());
     if (n > 0) SCPI_ResultCharacters(context, buf, n);
@@ -1917,7 +2290,7 @@ extern unsigned xua_csd_clk_hist_ok(unsigned i);
  * of a wrapping ring. REVERT: delete this callback and its table row. */
 static SCPI_FPTR_CMD scpi_result_t ups_clk_q(scpi_t *context)
 {
-    char buf[256];
+    char buf[512];
     int n = snprintf(buf, sizeof(buf), "%u,%u,%u",
                      xua_csd_clk_reqs(), xua_csd_clk_accepted(), xua_csd_clk_rejected());
     for (unsigned i = 0u; i < 8u && n > 0 && n < (int)sizeof(buf) - 12; i++) {
@@ -1966,6 +2339,8 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
      * WOULD-BE length, so an undersized buffer here truncates INFO? at
      * ~43 fields. REVERT: 352. */
     char buf[1216];
+    extern unsigned g_csd_c_tail, g_csd_f_wt, g_csd_f_wait_n,
+                    g_csd_f_skip_n, g_csd_f_armed_n; /* REVERT(dp168) */
     int n = snprintf(buf, sizeof(buf),
                      "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
                      csd_ups_armed(), csd_ups_is_enabled(), csd_ups_get_want(),
@@ -2007,6 +2382,17 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     extern unsigned g_csd_adc_cnt[2];
     extern unsigned g_csd_adc_or[2];
     extern unsigned g_csd_adc_sum[2];
+    extern unsigned g_csd_adc_ctr_seen;
+    extern unsigned g_csd_adc_fc_seen;
+    extern unsigned g_csd_gate_true, g_csd_gate_false, g_csd_ratio_live;
+    /* dp160 2026-11-13 pacing witnesses (see xua_audiohub.xc decl block).
+     * REVERT with the 7 tail fields. */
+    extern unsigned g_csd_wire_ticks_val, g_csd_wire_rem_val;
+    extern unsigned g_csd_it_adc_ticks, g_csd_it_pre_ticks, g_csd_fl_ticks;
+    extern unsigned g_csd_it_n, g_csd_fl_wait;
+    extern unsigned g_csd_tt_ticks, g_csd_tt_n;
+    extern unsigned g_csd_xfer_tok;
+    extern unsigned g_csd_xfer_else;
     extern unsigned g_csd_xfer_n, g_csd_xfer_ticks, g_csd_xfer_max;
     extern unsigned g_csd_xt_ct, g_csd_xt_in, g_csd_xt_out;
     extern unsigned g_csd_xt_ct_n, g_csd_xt_in_n, g_csd_xt_out_n;
@@ -2027,9 +2413,9 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
      * by the task. REVERT with the ring. */
     extern unsigned g_csd_eq_underrun, g_csd_eq_overrun, g_csd_eq_occ_high;
     extern unsigned g_csd_eq_cfg_adopt;
-    if (n > 0 && n < (int)sizeof(buf) - 8 - 75 * 11) {   /* tail is 73 fields
+    if (n > 0 && n < (int)sizeof(buf) - 8 - 82 * 11) {   /* tail is 80 fields
                                                           * after eq_kernel_src
-                                                          * (2026-11-10) */
+                                                          * (2026-11-11 tap) */
         const unsigned ratio = xua_csd_get_usb_ratio();
         unsigned ph = xua_csd_get_mic_phase();
         const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
@@ -2053,7 +2439,29 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u"
                       ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
-                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                      /* 77 tail fields vs 73 specifiers as shipped (found
+                       * 2026-11-10 on image .96): snprintf drops surplus
+                       * ARGS in silence, so the four witnesses appended at
+                       * the end (fields 91..94) never reached the wire --
+                       * exactly the silent-field-drop this file's 11-09
+                       * note warns to check for. Specifier count ==
+                       * argument count is the contract. REVERT with 91..94. */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      /* 3 more (2026-11-11, wire-word capture tap): indices
+                       * 95..97 tap_fires (committed L/R pairs at the selected
+                       * phase), tap_last_phase (ring phase of last commit),
+                       * tap_slot_eff (resolved presentation slot). Passing
+                       * armed runs require delta(tap_fires) > 0 and
+                       * tap_last_phase == tap_slot_eff. REVERT with the tap. */
+                      /* 2026-11-12: 11 -> 12 specifiers. regen_info_map.py
+                       * proved 107 args vs 106 %u: snprintf dropped the LAST
+                       * arg (g_csd_eq_stalls) in silence — the exact failure
+                       * the 11-10 note above warns about. REVERT: 11. */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      /* dp160 2026-11-13: 7 specifiers for the 7 pacing
+                       * witnesses appended below (specifier==arg contract).
+                       * REVERT with those fields. */
+                      ",%u,%u,%u,%u,%u,%u,%u",
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
                        * decimator. Same field COUNT, new meaning, so every
@@ -2063,7 +2471,25 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * to the mic stream (expect ~= host_rate x seconds); F3..F16
                        * reserved at 0 for the phase sweep. */
                       xua_csd_get_decim_slot(), xua_csd_get_decim_pub(),
-                      0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                      /* 2026-11-12 gate attribution in the first 3 reserved
+                       * zeros: transfer-gate true/false branch counts and the
+                       * live g_csd_usb_ratio at last gate-true. REVERT with
+                       * CSD_ADC_DIAG. */
+                      g_csd_gate_true, g_csd_gate_false, g_csd_ratio_live,
+                      /* transfer-frame cost witnesses (2026-11-12): total
+                       * 10 ns ticks and count over gate-entry..pre-floor.
+                       * REVERT with CSD_ADC_DIAG. */
+                      g_csd_tt_ticks, g_csd_tt_n,
+                      0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u,
+                      /* 2026-11-11 armed-frame state-machine witnesses (last 4
+                       * reserved zeros of this 16-field block; count sacred):
+                       * ctr_seen = bitmask of audioToUsbRatioCounter values the
+                       * decimator gates ever saw; fc_seen = bitmask of
+                       * frameCount at the ADC reads; xfer_tok = collect
+                       * (prefetch) transfers; xfer_else = plain transfers.
+                       * REVERT with CSD_ADC_DIAG. */
+                      g_csd_adc_ctr_seen, g_csd_adc_fc_seen,
+                      g_csd_xfer_tok, g_csd_xfer_else,
                       /* raw ADC1 witness (see xua_audiohub.xc): all zero with a
                        * nonzero stimulus means the IN instructions never saw the
                        * wire; nonzero means the loss is downstream of the read. */
@@ -2134,7 +2560,50 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * running, unlike the request-side readback. A
                        * measurement is attributable only through this
                        * field. REVERT: delete this field. */
-                      csd_dsp_bq_diag_kernel_src());
+                      csd_dsp_bq_diag_kernel_src(),
+                      /* 4 more (2026-11-10, atomic kernel block write +
+                       * soft-ramp): indices 91..94 eq_pause_events,
+                       * eq_pause_ticks_max (reference ticks of the worst
+                       * engage(0)..engage() window on the EQ task),
+                       * krnl_ramp_events (codec-server ramp halves run,
+                       * mirrored from the tile[0] owner's reply),
+                       * krnl_adopt_timeouts (adoption waits that hit the
+                       * bound -- passing runs read 0). REVERT: delete. */
+                      g_csd_eq_pause_events, g_csd_eq_pause_ticks_max,
+                      g_csd_krnl_ramp_events, g_csd_krnl_adopt_timeouts,
+                      csd_ups_diag_tap_fires(), csd_ups_diag_tap_phase(),
+                      csd_ups_diag_tap_slot_eff(),
+                      /* 2026-11-11 armed-mic feed witnesses (fields 98, 99):
+                       * 98 = feed stores done by the UBM feed block (must
+                       * grow ~ubm_calls while armed; 0 while disarmed),
+                       * 99 = csd_feed_owner as the audio core sees it.
+                       * REVERT with the feed. */
+                      g_csd_feed_writes, csd_feed_owner,
+                      /* 3 more (2026-11-11, EXPERIMENT 11.11.30 stuck-compute
+                       * witnesses, REVERT with the tap): feed_enter counts
+                       * block-engine entries, feed_pc the (phase<<1|chan) of
+                       * the last compute entered, feed_in_pc 1 while one is
+                       * running. A frozen EQ task with feed_in_pc=1 names the
+                       * stuck fd_block_fir_compute. */
+                      csd_ups_diag_feed_enter(), csd_ups_diag_feed_pc(),
+                      csd_ups_diag_feed_in_pc(),
+                      g_csd_eq_stalls,   /* 11.11.31 armed flow-control timeouts */
+                      /* 7 more (dp160 2026-11-13, armed self-pacing probe):
+                       * wire_ticks_val/wire_rem_val = floor stride latched at
+                       * loop entry (0 => floor never armed), it_adc = top..
+                       * end-of-I/O ticks/iter, it_pre = I/O..pre-floor ticks,
+                       * fl_ticks = floor-wait ticks, it_n = iterations,
+                       * fl_wait = iterations whose floor wait >= 20 ticks.
+                       * REVERT: delete these 7 fields. */
+g_csd_wire_ticks_val, g_csd_wire_rem_val,
+                      /* REVERT(dp168): tail = floor diagnostics:
+                       * it_adc=g_csd_f_wt (floor stride ticks latched),
+                       * it_pre=g_csd_f_wait_n (blocking waits taken/s),
+                       * fl_ticks=g_csd_f_skip_n (expired-deadline skips/s),
+                       * it_n=g_csd_f_armed_n (floor latches, event),
+                       * fl_wait=g_csd_c_tail (frame rate/s) */
+                      g_csd_f_wt, g_csd_f_wait_n,
+                      g_csd_f_skip_n, g_csd_f_armed_n, g_csd_c_tail);
     }
     if (n > 0) {
         if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;   /* see above */
@@ -2220,6 +2689,252 @@ static SCPI_FPTR_CMD scpi_result_t ups_phase_q(scpi_t *context)
     return SCPI_RES_OK;
 }
 
+/* 2026-11-12 probe rings (see csd_ups_block.c): the only bit-exact bench
+ * capture at ratio>1 — the mic echo path is resampled by ALSA (1-in-3
+ * real pairs + interpolation garbage). PROBE <0|1> arms+resets; POP? and
+ * FEED? dump CSV chunks (offset,count<=512). REVERT with the rings. */
+extern void     csd_probe_enable(unsigned on);
+extern unsigned csd_probe_base(void);
+extern unsigned csd_probe_reconf(void);
+extern unsigned csd_probe_reconf(void);
+extern unsigned csd_probe_fidx(void);
+extern unsigned csd_probe_ev_count(void);
+extern unsigned csd_probe_en_get(void);
+extern unsigned csd_probe_prepop(void);
+extern unsigned csd_probe_feedabs(void);
+extern unsigned csd_probe_armfidx_get(void);
+extern unsigned csd_probe_snap_n(void);
+extern unsigned csd_probe_snap_dataw(void);
+extern unsigned csd_probe_snap_ringsz(void);
+extern volatile unsigned s_snap_qaddr, s_snap_tile, s_feed_qaddr, s_feed_tile;
+unsigned csd_probe_mis0(void);
+unsigned csd_probe_mis1(void);
+unsigned csd_probe_blkdiff(void);
+unsigned csd_probe_qpop1(unsigned i);
+extern unsigned s_probe_blkpop[8];
+extern unsigned s_probe_blk_n;
+extern unsigned s_probe_c0pop;
+extern unsigned s_probe_reconfpop;
+extern unsigned s_probe_headc;
+/* dp144 REVERT: post-accept boundary witnesses (csd_ups_block.c) */
+extern unsigned s_probe_bnd_feed[2], s_probe_bnd_pop[2];
+extern unsigned s_probe_bnd_wc0[2], s_probe_bnd_wc1[2];
+extern unsigned s_probe_bnd_head[2], s_probe_bnd_fa[2];
+extern unsigned s_probe_bnd_s0[2], s_probe_bnd_s1[2], s_probe_bnd_s2[2];
+extern unsigned s_probe_bnd_s3[2], s_probe_bnd_s15[2];
+extern unsigned s_probe_bnd_done;
+extern unsigned s_probe_bnd_scrc[2][4], s_probe_bnd_bcrc[2];
+extern unsigned s_probe_bnd_pblob, s_probe_bnd_pdata, s_probe_bnd_pscratch;
+extern volatile unsigned s_diag_qb[2], s_diag_pops_claim[2];        /* dp150 */
+extern volatile unsigned s_diag_popn_claim, s_diag_kabs_claim;      /* dp150 */
+extern volatile unsigned s_diag_pops_accept[2], s_diag_popn_accept; /* dp150 */
+extern unsigned s_probe_datac;
+extern unsigned s_probe_feedoff;
+extern volatile unsigned s_probe_snap_body_crc, s_probe_snap_body_nz;   /* dp111 REVERT */
+extern volatile unsigned s_probe_ring_direct_crc, s_probe_ring_direct_nz; /* dp113 REVERT */
+extern volatile unsigned s_snap_noowner;   /* dp114b REVERT */
+extern volatile unsigned s_probe_ring_pre_freeze_crc, s_probe_ring_pre_freeze_nz; /* dp117 */
+extern volatile unsigned s_witness_sp_slot, s_witness_sp_feed, s_witness_sp_snap; /* dp120 */
+extern volatile unsigned s_witness_stptr, s_witness_heapok, s_witness_fidx_cap, s_witness_winw0; /* dp122 */
+extern volatile unsigned ups_heap_fail, ups_heap_total, probe_heap_total; /* dp126 */
+extern volatile unsigned s_snap_progress, s_snap_entry; /* dp129 */
+extern volatile unsigned s_snap_crc_capture, s_snap_crc_diag; /* dp130 */
+extern volatile unsigned s_wit_g[4], s_snap_accepts; /* dp135 */
+unsigned csd_ups_bypass_witness(void);
+unsigned csd_ups_enabled_witness(void);
+extern unsigned s_probe_wchk;
+extern unsigned s_probe_wchk_snap;
+extern unsigned s_probe_wchk_run;
+extern unsigned s_feedcalls_task;
+extern unsigned s_feedcalls_audio;
+extern unsigned csd_probe_snap_word0(void);
+extern unsigned csd_probe_snap_calls_get(void);
+extern unsigned csd_probe_snap_dump(unsigned off, unsigned cnt);
+extern unsigned csd_probe_ev_dump(unsigned off, unsigned cnt);
+extern unsigned csd_probe_pre(void);
+extern unsigned csd_probe_dump(unsigned off, unsigned cnt, int is_pop);
+extern const char *csd_probe_dump_buf(void);
+extern unsigned csd_probe_popbase(void);
+extern unsigned csd_probe_pop_count(void);
+extern unsigned csd_probe_feed_count(void);
+extern int      csd_probe_pop_at(unsigned i, int out[2]);
+extern int      csd_probe_feed_at(unsigned i, int out[2]);
+
+static SCPI_FPTR_CMD scpi_result_t ups_probe_set(scpi_t *context)
+{
+    uint32_t on = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "on", &on, 0u, 1u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    csd_probe_enable(on);
+    return SCPI_RES_OK;
+}
+
+/* Shared chunked CSV dump: DIAG:UPSAMPLing:<POP|FEED>? <off>,<count> */
+static SCPI_FPTR_CMD scpi_result_t ups_probe_q(scpi_t *context,
+                                               int is_pop)
+{
+    uint32_t off = 0u, cnt = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "off", &off, 0u, 8191u, &why) ||
+        !gen_u32(context, "count", &cnt, 1u, 512u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    const unsigned o = csd_probe_dump(off, cnt, is_pop);
+    if (o > 0) SCPI_ResultCharacters(context, csd_probe_dump_buf(), (int)o);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_base_q(scpi_t *context)
+{
+    char buf[1536];   /* dp144/dp150: witness tail (106 fields) */
+    /* dp112: EXACT count — 33 originals + body_crc + body_nz = 35.
+     * dp110 shipped 34 %u for 33 args: a past-the-end read that fed the
+     * host a garbage tail field (384000 / 2409399996). Field-map from
+     * source, always. */
+    snprintf(buf, sizeof buf, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",   /* dp135: 61 */
+             csd_probe_base(), csd_probe_popbase(),
+             csd_probe_reconf(), csd_probe_pre(), csd_probe_fidx(),
+             csd_probe_en_get(), csd_probe_prepop(),
+             csd_probe_feedabs(),                               csd_probe_armfidx_get(),
+                               csd_probe_snap_word0(), csd_probe_snap_n(),
+                               csd_probe_snap_dataw(),
+                               s_snap_qaddr, s_snap_tile, s_feed_qaddr, s_feed_tile,
+                               csd_probe_mis0(), csd_probe_mis1(),
+                               csd_probe_blkdiff(),
+                               s_probe_blk_n ? s_probe_blkpop[0] : 99999u,
+                               s_probe_blk_n > 1u ? s_probe_blkpop[1] : 99999u,
+                               s_probe_blk_n > 2u ? s_probe_blkpop[2] : 99999u,
+                               s_probe_blk_n > 3u ? s_probe_blkpop[3] : 99999u,
+                               s_probe_c0pop,
+                               s_probe_reconfpop, s_probe_headc,
+                               s_probe_datac, s_probe_feedoff,
+                               s_probe_wchk, s_probe_wchk_snap,
+                               s_probe_wchk_run, s_feedcalls_task,
+                               s_feedcalls_audio,
+                               s_probe_snap_body_crc, s_probe_snap_body_nz,
+                               s_probe_ring_direct_crc, s_probe_ring_direct_nz,
+                               s_snap_noowner,
+                               s_probe_ring_pre_freeze_crc, s_probe_ring_pre_freeze_nz,
+                               s_witness_sp_slot, s_witness_sp_feed, s_witness_sp_snap,
+                               s_witness_stptr, s_witness_heapok, s_witness_fidx_cap, s_witness_winw0,
+                               ups_heap_fail, ups_heap_total, probe_heap_total,
+                               csd_ups_bypass_witness(), csd_ups_enabled_witness(),
+                               s_snap_progress, s_snap_entry,
+                               s_snap_crc_capture, s_snap_crc_diag,
+                               s_wit_g[0], s_wit_g[1], s_wit_g[2], s_wit_g[3],
+                               s_snap_accepts);
+    /* dp144 REVERT: boundary witnesses appended as fields 61..83 (tails
+     * never shift existing indices — the host field map stays valid). */
+    {
+        int n = (int)strlen(buf);
+        snprintf(buf + n, sizeof buf - (size_t)n,
+                 ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                 ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                 s_probe_bnd_done,
+                 s_probe_bnd_feed[0], s_probe_bnd_pop[0],
+                 s_probe_bnd_wc0[0], s_probe_bnd_wc1[0], s_probe_bnd_head[0],
+                 s_probe_bnd_fa[0], s_probe_bnd_s0[0], s_probe_bnd_s1[0],
+                 s_probe_bnd_s2[0], s_probe_bnd_s3[0], s_probe_bnd_s15[0],
+                 s_probe_bnd_feed[1], s_probe_bnd_pop[1],
+                 s_probe_bnd_wc0[1], s_probe_bnd_wc1[1], s_probe_bnd_head[1],
+                 s_probe_bnd_fa[1], s_probe_bnd_s0[1], s_probe_bnd_s1[1],
+                 s_probe_bnd_s2[1], s_probe_bnd_s3[1], s_probe_bnd_s15[1],
+                 /* dp146 REVERT: bisection + alignment fields 84..96 */
+                 s_probe_bnd_scrc[0][0], s_probe_bnd_scrc[0][1],
+                 s_probe_bnd_scrc[0][2], s_probe_bnd_scrc[0][3],
+                 s_probe_bnd_scrc[1][0], s_probe_bnd_scrc[1][1],
+                 s_probe_bnd_scrc[1][2], s_probe_bnd_scrc[1][3],
+                 s_probe_bnd_bcrc[0], s_probe_bnd_bcrc[1],
+                 s_probe_bnd_pblob, s_probe_bnd_pdata, s_probe_bnd_pscratch);
+        /* dp150 REVERT: qpop1 row-map diagnostics, fields 97..105:
+         * qb0 qb1 pops0 pops1 popn kabs at claim; pops0 pops1 popn at
+         * the accept reset. */
+        n = (int)strlen(buf);
+        snprintf(buf + n, sizeof buf - (size_t)n,
+                 ",%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                 s_diag_qb[0], s_diag_qb[1],
+                 s_diag_pops_claim[0], s_diag_pops_claim[1],
+                 s_diag_popn_claim, s_diag_kabs_claim,
+                 s_diag_pops_accept[0], s_diag_pops_accept[1],
+                 s_diag_popn_accept);
+    }
+    SCPI_ResultCharacters(context, buf, (unsigned)strlen(buf));
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_pop_q(scpi_t *context)
+{ return ups_probe_q(context, 1); }
+
+static SCPI_FPTR_CMD scpi_result_t ups_qpop_q(scpi_t *context)
+{ return ups_probe_q(context, 2); }
+
+static SCPI_FPTR_CMD scpi_result_t ups_state_q(scpi_t *context)
+{
+    uint32_t off = 0u, cnt = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "off", &off, 0u, 65535u, &why) ||
+        !gen_u32(context, "count", &cnt, 1u, 384u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    const unsigned w0 = csd_probe_snap_word0();
+    const unsigned dw = csd_probe_snap_dataw();
+    const unsigned n = (w0 >= 1u && w0 <= 8u && (w0 & (w0 - 1u)) == 0u)
+        ? 264u + csd_probe_snap_ringsz() + 2u * w0 * dw : 0u;
+    char hdr[48];
+    int hl = snprintf(hdr, sizeof hdr, "N=%u,C=%u;", n,
+                           csd_probe_snap_calls_get());
+    (void)hl;
+    SCPI_ResultCharacters(context, hdr, (unsigned)strlen(hdr));
+    const unsigned o = csd_probe_snap_dump(off, cnt);
+    if (o > 0) SCPI_ResultCharacters(context, csd_probe_dump_buf(), (int)o);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_ev_q(scpi_t *context)
+{
+    uint32_t off = 0u, cnt = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "off", &off, 0u, 8191u, &why) ||
+        !gen_u32(context, "count", &cnt, 1u, 400u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    const unsigned n = csd_probe_ev_count();
+    char hdr[32];
+    int hl = snprintf(hdr, sizeof hdr, "N=%u;", n);
+    (void)hl;
+    SCPI_ResultCharacters(context, hdr, (unsigned)strlen(hdr));
+    const unsigned o = csd_probe_ev_dump(off, cnt);
+    if (o > 0) SCPI_ResultCharacters(context, csd_probe_dump_buf(), (int)o);
+    return SCPI_RES_OK;
+}
+static SCPI_FPTR_CMD scpi_result_t ups_feed_q(scpi_t *context)
+{ return ups_probe_q(context, 0); }
+
+/* 11.11.36 mirror-select (REVERT with the tap): cold path only. */
+extern unsigned g_csd_ups_echo_mode;
+static SCPI_FPTR_CMD scpi_result_t ups_echo_set(scpi_t *context)
+{
+    uint32_t mode = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "mode", &mode, 0u, 2u, &why)) {  /* 2 (dp158): ADC passthrough */
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    g_csd_ups_echo_mode = mode;
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
 {
     uint32_t enable = 0u;
@@ -2278,9 +2993,13 @@ static const scpi_command_t csd_commands[] = {
      * former shelf. matchCommand cannot let one of these shadow another
      * (a row whose pattern is exhausted while the header still has text
      * fails the match), so row order is not load-bearing. */
-    { .pattern = "DIAG:DSP:COEFFicient?",       .callback = coef_q       },
-    { .pattern = "DIAG:DSP:COEFFicient:DEFault",.callback = coef_default },
-    { .pattern = "DIAG:DSP:COEFFicient",        .callback = coef_set     },
+    { .pattern = "DIAG:DSP:COEFFicient?",        .callback = coef_q       },
+    { .pattern = "DIAG:DSP:COEFFicient:FORMat?", .callback = coef_format_q},
+    { .pattern = "DIAG:DSP:COEFFicient:DEFault", .callback = coef_default },
+    { .pattern = "DIAG:DSP:COEFFicient",         .callback = coef_set     },
+    /* Witness-window control and transport loss counters (see the handlers). */
+    { .pattern = "DEBUG:DSP:CLEAR",              .callback = dsp_clear      },
+    { .pattern = "DEBUG:REPLY?",                 .callback = reply_stats_q  },
 
     /* Unit identity. Queries only -- there is deliberately no setter and no
      * OTP write path. Patterns carry no parameter placeholders, same rule as
@@ -2331,6 +3050,14 @@ static const scpi_command_t csd_commands[] = {
     /* One control for XMOS upsampling and the DAC's FIR bypass together.
      * Reply is "xmos_en,applied,frame_hz,codec_refusals,ups_refusals". */
     { .pattern = "DIAG:UPSAMPLing:STATe",   .callback = ups_set           },
+    { .pattern = "DIAG:UPSAMPLing:ECHO",    .callback = ups_echo_set      },
+    { .pattern = "DIAG:UPSAMPLing:PROBE",   .callback = ups_probe_set     },
+    { .pattern = "DIAG:UPSAMPLing:BASE?",   .callback = ups_base_q        },
+    { .pattern = "DIAG:UPSAMPLing:POP?",    .callback = ups_pop_q         },
+    { .pattern = "DIAG:UPSAMPLing:QPOP?",   .callback = ups_qpop_q        },
+    { .pattern = "DIAG:UPSAMPLing:FEED?",   .callback = ups_feed_q        },
+    { .pattern = "DIAG:UPSAMPLing:EV?",     .callback = ups_ev_q          },
+    { .pattern = "DIAG:UPSAMPLing:STATE?",  .callback = ups_state_q       },
     { .pattern = "DIAG:UPSAMPLing:STATe?",  .callback = ups_q             },
     /* Read-only truth table (see ups_info_q): armed/enabled/want/rates/ratio
      * plus the pop side of the ring. New 2026-11-09; REVERT: delete this row. */
@@ -2380,7 +3107,9 @@ static scpi_interface_t csd_interface = {
 };
 
 /* ---- context ---------------------------------------------------------- */
-#define INPUT_BUF_LEN   160
+/* INPUT_BUF_LEN is defined once, up with REPLY_MAX (2026-11-10 kernel
+ * container sizing) — a second 160-byte define here shadowed it for years
+ * and capped every SET command at one short line. */
 #define ERROR_QUEUE_N    16
 
 static char         input_buf[INPUT_BUF_LEN];
