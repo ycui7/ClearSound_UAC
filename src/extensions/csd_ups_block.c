@@ -228,6 +228,29 @@ volatile unsigned s_snap_noowner;
  * writes the window) and sees its own writes by construction; the pop
  * core merely claims the trigger and is halted while the task copies. */
 volatile unsigned s_snap_claimed, s_pop_halt, s_pop_in_commit;
+/* REVERT(dp201 2026-11-13): producer-path attribution witnesses, PROBE
+ * bit4 gated (10 ns ticks, accumulate-since-boot; host takes fixed-window
+ * deltas). Hunt: p_tdl ~22M t per 256-pass window (~870 us/pass) with the
+ * producer at ~80 pass/s while the wire is port-locked. dp200 moved the
+ * UBM feed onto the producer thread; the s_in_feed spin in pop_active is
+ * now cross-core (tile[1] EQ task owns feed()). PACE? fields 31-42 print
+ * these; the _n columns count events whose region exceeded 64 t. */
+unsigned g_csd_p_halt = 0, g_csd_p_halt_n = 0;   /* s_pop_halt spin        */
+unsigned g_csd_p_ifed = 0, g_csd_p_ifed_n = 0;   /* s_in_feed spin at pop  */
+unsigned g_csd_p_snap = 0, g_csd_p_snap_n = 0;   /* in-pop snapshot capture */
+unsigned g_csd_p_claim = 0, g_csd_p_claim_n = 0; /* feed() claim loop      */
+extern unsigned g_csd_probe_mask;                /* xua_audiohub.xc        */
+/* REVERT(dp201): task-side freeze attribution (tile[1] EQ task). stage:
+ * 1=top, 2=claim loop, 3=engine frame, 4=feed body, 5=block compute.
+ * stage_t: ticks since stage entry (host reads it frozen at the stuck
+ * stage). claim_rounds: total outer claim rounds entered; claim_exit:
+ * claim completions (rounds==exits => never stuck). live_* snapshot the
+ * handshake flags at each stage transition. */
+unsigned g_csd_eq_stage = 0, g_csd_eq_stage_t = 0;
+unsigned g_csd_eq_claim_rounds = 0, g_csd_eq_claim_exit = 0;
+unsigned g_csd_live_pop_in_commit = 0, g_csd_live_snap_freeze = 0;
+unsigned g_csd_live_in_feed = 0, g_csd_live_probe_popn = 0;
+extern unsigned csd_ups_now(void);
 volatile unsigned s_witness_sp_slot, s_witness_sp_feed, s_witness_sp_snap; /* dp120 */
 volatile unsigned s_witness_stptr, s_witness_heapok, s_witness_fidx_cap, s_witness_winw0; /* dp122 */
 volatile unsigned s_snap_kabs, s_pop_clock_reset;
@@ -585,6 +608,8 @@ static volatile unsigned s_feedin_pub;   /* feed-IN echo publishes (11.11.29) */
 
 void csd_ups_feed(int l, int r)
 {
+    if (g_csd_probe_mask & 16u) {  /* REVERT(dp201): feed body stage witness, bit4-gated per dp202 lean-gate */
+        g_csd_eq_stage = 4u; g_csd_eq_stage_t = csd_ups_now(); }
     { unsigned spm = (unsigned)(uintptr_t)&l; s_witness_sp_feed = spm; } /* dp120 */
     if (s_probe_on && !s_rec_on) { s_abs_calls++; }
     const unsigned R = ups_phases;
@@ -647,7 +672,21 @@ void csd_ups_feed(int l, int r)
      * (s_in_feed=1), re-check the freeze, back off on collision; the
      * capture waits for s_in_feed==0, so from here a counted row is a
      * row that WILL be (and then has been) applied into the window. */
-    {   unsigned bospins = 0u;
+    {   /* REVERT(dp201): timed PROBE-bit4 attribution of the claim loop
+         * (runs on the tile[1] EQ task when armed; the freeze/backoff
+         * spins are the suspects for the feed-claim cost). */
+        unsigned t_c = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
+        /* REVERT(dp201): task-side freeze witness — stage 2 = claim loop.
+         * Unconditional (RMW on task core only); stage_t re-based on every
+         * stage entry so a frozen (stage, growing stage_t) pins the wedge. */
+        if (g_csd_probe_mask & 16u) {   /* bit4-gated per dp202 lean-gate */
+            g_csd_eq_stage = 2u; g_csd_eq_stage_t = csd_ups_now();
+            g_csd_eq_claim_rounds++;
+            g_csd_live_pop_in_commit = s_pop_in_commit;
+            g_csd_live_snap_freeze = s_snap_freeze;
+            g_csd_live_in_feed = s_in_feed;
+            g_csd_live_probe_popn = s_probe_pop_n; }
+        unsigned bospins = 0u;
         for (;;) {
             unsigned spins = 0u;
             /* dp134 TRUTH #14: a stuck freeze must never kill the audio
@@ -669,6 +708,10 @@ void csd_ups_feed(int l, int r)
                                                       * wait out one pair,
                                                       * ~1 LRCLK frame) */
         }
+        /* REVERT(dp201): close the claim-attribution window. */
+        if (g_csd_probe_mask & 16u) { g_csd_eq_claim_exit++; }  /* REVERT(dp201) */
+        if (g_csd_probe_mask & 16u) { unsigned d = csd_ups_now() - t_c;
+            g_csd_p_claim += d; if (d > 64u) g_csd_p_claim_n++; }
     }
     if (s_rec_on && s_feed_abs < CSD_PROBE_FRING) {
         /* Freeze-on-full from PROBE arm (mirrors the feed-EVENT ring, which
@@ -702,6 +745,9 @@ void csd_ups_feed(int l, int r)
      * ratio 8), NOT per slot. The witness counters below exist so the bench
      * can judge it against the LRCLK budget over DIAG:UPSAMPLing:INFO?. */
     const unsigned t0 = csd_ups_now();
+    /* REVERT(dp201): stage 5 = block FIR compute (the 11.12.6 wedge site),
+     * bit4-gated per dp202 lean-gate. */
+    if (g_csd_probe_mask & 16u) { g_csd_eq_stage = 5u; g_csd_eq_stage_t = t0; }
     /* Same index rule as ups_reconfigure (see the long comment there):
      * R>>2 maps {2,4,8} -> {0,1,2}. It MUST match -- if feed indexed a
      * different bank than the one that was validated and loaded, the
@@ -800,12 +846,23 @@ void csd_ups_feed(int l, int r)
         }
         if (c == 0u) s_probe_c0pop = s_pop_clock;  /* stagger witness */
         ups_rd[c] = 0u;
-        ups_occ[c] = CSD_UPS_RING_WORDS;
-        ups_last[c] = q[CSD_UPS_RING_WORDS - 1u];
-        if (s_occ_high[c] < CSD_UPS_RING_WORDS)
-            s_occ_high[c] = CSD_UPS_RING_WORDS;
+        /* dp195: occ must be the WRITTEN extent, not the allocation. The
+         * push writes indices [0, FA*R) (de-interleave (j<<shift)+p);
+         * claiming RING_WORDS (=FA*MAX_RATIO=1024) let the pop run ~3-10
+         * words past the block boundary per block and silently deliver
+         * never-written ring memory (boot zeros / stale ratio-8 words)
+         * while reps stayed 0 (grid_probe: pops 383.53k/s vs push
+         * 379.14k/s, reps 0). With the honest count those pops take the
+         * existing empty-ring branch: counted, hold-last repeat. */
+        const unsigned occ_push = CSD_UPS_FRAME_ADVANCE * ups_phases;
+        ups_occ[c] = occ_push;
+        ups_last[c] = q[occ_push - 1u];
+        if (s_occ_high[c] < occ_push)
+            s_occ_high[c] = occ_push;
     }
     const unsigned dt = csd_ups_now() - t0;
+    if (g_csd_probe_mask & 16u) { g_csd_eq_stage = 4u; } /* REVERT(dp201):
+     * compute done, back in feed body; bit4-gated per dp202 lean-gate */
     if (dt > s_block_ticks_max) s_block_ticks_max = dt;
     if (s_probe_blk_n < 8u) {          /* first-boundary pop clocks (dp99) */
         s_probe_blkpop[s_probe_blk_n] = s_pop_clock;
@@ -902,10 +959,23 @@ int csd_ups_slot(unsigned ch, int w)
 {
     if (!csd_ups_active()) return w;   /* not active: word untouched */
     if (ch >= 2u)          return w;   /* not our channel */
-
+    return csd_ups_pop_active(ch, w);
+}
+/* REVERT(dp198): checked body split so the producer (which holds its own
+ * armed gate every pass and refreshes g_csd_ps_active /16) can skip the
+ * cross-TU csd_ups_active() call on both pops (~15 t/pass). If active is
+ * transiently off, this body pops an unprepared ring: occ==0 gives the
+ * honest last-repeat pair, which the wire ignores (it reads the mailbox
+ * only while g_csd_ps_active). */
+int csd_ups_pop_active(unsigned ch, int w)
+{
     /* dp118: the task core owns the capture; wait out its halt window.
      * LRCLK is software-generated in this loop, so the delay is benign. */
-    { unsigned hw = 0u; while (s_pop_halt && hw++ < 20000000u) { } }
+    {   /* REVERT(dp201): timed PROBE-bit4 attribution (see witness decls). */
+        unsigned t_h = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
+        unsigned hw = 0u; while (s_pop_halt && hw++ < 20000000u) { }
+        if (g_csd_probe_mask & 16u) { unsigned d = csd_ups_now() - t_h;
+            g_csd_p_halt += d; if (d > 64u) g_csd_p_halt_n++; } }
     /* dp147 REVERT: ATOMIC FEED -- pops commit only while no feed claim
      * is held, so the delivery ring is never consumed mid-boundary (no
      * torn push window, no c0/c1 stagger to model: the engine's output
@@ -913,8 +983,14 @@ int csd_ups_slot(unsigned ch, int w)
      * xsim oracle replays identically). LRCLK is software-generated and
      * the stall is bounded (same bound as dp118/dp134); gated on
      * s_rec_on so shipping behaviour (probe off) is untouched. */
-    if (s_rec_on) { unsigned fw = 0u; while (s_in_feed && fw++ < 20000000u) { } }
-    { unsigned spm = (unsigned)(uintptr_t)&w; s_witness_sp_slot = spm; } /* dp120: param addr = stack identity */
+    if (s_rec_on) {
+        /* REVERT(dp201): timed PROBE-bit4 attribution. */
+        unsigned t_f = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
+        unsigned fw = 0u; while (s_in_feed && fw++ < 20000000u) { }
+        if (g_csd_probe_mask & 16u) { unsigned d = csd_ups_now() - t_f;
+            g_csd_p_ifed += d; if (d > 64u) g_csd_p_ifed_n++; } }
+    /* REVERT(dp198): dp120 s_witness_sp_slot store removed from every pop
+     * (~3 t); the DP-view bug class it hunted closed at dp131. */
     int32_t v;
     unsigned idx_pop = 0xFFFFFFFFu;    /* dp95: ring word consumed */
     unsigned kabs = 0u;                  /* dp128: fn-scope (accept block needs it) */
@@ -1072,6 +1148,9 @@ int csd_ups_slot(unsigned ch, int w)
          * freeze handshake (id1: entry=5873, zero accepts, progress dies
          * at word 2 — interleaved passes). One core, one copier. */
         if (s_snap_claimed && ch == 0u && (int)rw != 0) {
+            /* REVERT(dp201): timed PROBE-bit4 attribution (whole in-pop
+             * capture, entry through freeze release). */
+            unsigned t_s = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
             unsigned spm2 = (unsigned)(uintptr_t)&rw;
             s_witness_sp_snap = spm2;
             s_snap_freeze = 1u;
@@ -1189,6 +1268,9 @@ int csd_ups_slot(unsigned ch, int w)
                 s_pop_clock_reset = 1u;
             }
             s_snap_freeze = 0u;              /* dp145: single release point */
+            /* REVERT(dp201): close the capture-attribution window. */
+            if (g_csd_probe_mask & 16u) { g_csd_p_snap += csd_ups_now() - t_s;
+                                          g_csd_p_snap_n++; }
         }
     }
     /* dp151 REVERT: pair-complete release. dp148 assumed the pair commits

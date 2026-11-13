@@ -69,6 +69,7 @@ void     csd_ups_feed(int l, int r);
 /* One wire slot OUT, at LRCLK cadence (audiohub I2S output loop). PURE POP.
  * Returns w unchanged when the path is not active. */
 int      csd_ups_slot(unsigned ch, int w);
+int      csd_ups_pop_active(unsigned ch, int w); /* REVERT(dp198): no-active-check producer pop */
 
 /* ---- diagnostics (read-only) -------------------------------------------- */
 
