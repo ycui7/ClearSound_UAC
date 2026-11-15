@@ -87,6 +87,8 @@ unsigned csd_ups_diag_feed_enter(void);          /* block-engine entries (11.11.
 unsigned csd_ups_diag_feed_pc(void);             /* last (phase<<1|chan) entered    */
 unsigned csd_ups_diag_feed_in_pc(void);          /* 1 while a compute runs          */
 unsigned csd_ups_diag_block_ticks_max(void);     /* worst burst, 10 ns ticks */
+unsigned csd_ups_diag_push_n(void);              /* session 14 blocks-since-reset */
+unsigned csd_ups_diag_push_over(void);           /* session 14 cap-backoff hits */
 unsigned csd_ups_diag_rate_calls(void);          /* rate hand-overs accepted+seen */
 unsigned csd_ups_diag_last_req_hz(void);         /* last rate requested */
 

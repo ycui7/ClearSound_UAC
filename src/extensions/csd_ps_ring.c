@@ -159,6 +159,8 @@ unsigned g_csd_p_pop2 = 0, g_csd_p_passn = 0;
 unsigned g_csd_p_ubm = 0, g_csd_p_ubmn = 0;
 extern unsigned csd_ups_now(void);
 extern unsigned g_csd_probe_mask;
+extern volatile unsigned s_pass_pm;   /* csd_ups_block.c: per-pass mask
+                                       * snapshot (s16 close-out lean-gate) */
 void csd_ub_consume_if_new(void)
 {
     unsigned sq;
@@ -192,10 +194,13 @@ void csd_ps_produce_pair(void)
      * dp189) and the redundant ps_produced counter are off the pass.
      * ps_seq still counts passes (== old prod_n). PACE? reports the
      * witnesses at their last-written values. */
-    unsigned t_p = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;   /* REVERT(dp201) */
+    /* Session 16 close-out: ONE mask read per pass (dp204 lean-gate rule)
+     * published for the pop path's gated sites (s_pass_pm). */
+    s_pass_pm = g_csd_probe_mask;
+    unsigned t_p = (s_pass_pm & 16u) ? csd_ups_now() : 0u;   /* REVERT(dp201) */
     unsigned w0 = (unsigned)csd_ups_pop_active(0u, 0);   /* REVERT(dp198) */
     unsigned w1 = (unsigned)csd_ups_pop_active(1u, 0);
-    if (g_csd_probe_mask & 16u) { g_csd_p_pop2 += csd_ups_now() - t_p;  /* REVERT(dp201) */
+    if (s_pass_pm & 16u) { g_csd_p_pop2 += csd_ups_now() - t_p;  /* REVERT(dp201) */
                                   g_csd_p_passn++; }
     g_csd_ps_mbox_seq += 1u;                  /* odd = publish window open */
     g_csd_ps_mbox_w0 = (int)w0;

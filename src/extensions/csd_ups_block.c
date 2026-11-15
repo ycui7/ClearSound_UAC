@@ -75,7 +75,9 @@ static volatile unsigned s_want = 0u;
  * UBM hot path never reaches into this file. Definition below (needs
  * csd_ups_active). REVERT with the feed. */
 static void csd_ups_push_feed_owner(void);
-static void ups_reconfigure(void);   /* wrapper defined with the publisher */
+static void ups_reconfigure(unsigned site); /* wrapper defined with the publisher */
+/* REVERT(s15-diag): per-site reconfigure attribution (periodic ring-reset hunt). */
+static unsigned s_rc_total, s_rc_site[4], s_rc_last;
 /* EXPERIMENT 11.11.34: arm-generation handoff (REVERT with the tap).
  * ups_fidx survives across streams (only ups_reconfigure resets it), so a
  * newly armed stream started its 128-frame block grid at an unknown phase
@@ -154,13 +156,25 @@ static int32_t         *ups_scratch;   /* heap, 8-aligned */
 static int32_t         (*ups_in)[CSD_UPS_FRAME_ADVANCE];
 #define ups_fidx  (ups_st->fidx)
 
-/* Wire delivery ring: one full block (frame_advance * max ratio) words per
- * channel, filled whole at the block boundary and drained one pop per wire
- * slot. Power-of-two size: the pop is a mask, never a divide. */
+/* Wire delivery ring: TWO blocks (frame_advance * max ratio, doubled --
+ * see csd_ups_block_conf.h) words per channel. Blocks are pushed whole
+ * into alternating halves at the block boundary and drained one pop per
+ * wire slot, so the pop always has the previous block while the next
+ * computes (session 14). Power-of-two size: the pop is a mask, never a
+ * divide. */
 static int32_t         (*ups_q)[CSD_UPS_RING_WORDS];
-typedef struct { unsigned fidx, phases, rd[2], occ[2]; int32_t last[2]; } ups_st_t;
+/* pushn: blocks committed since the last ring reset (double-buffer region
+ * parity + the pop-side lead gate). pushov: capacity-backoff bound hits.
+ * HEAP, not static: the pop-side reader runs on the wire/producer core,
+ * the committing writer on the EQ task core -- plain statics across that
+ * boundary are exactly the dp121 per-core-view class (only the malloc heap
+ * is proven visible to EVERY core). */
+typedef struct { unsigned fidx, phases, rd[2], occ[2]; int32_t last[2];
+                 unsigned pushn, pushov; } ups_st_t;
 static ups_st_t        *ups_st;   /* shared-heap scalars (dp121) */
 #define ups_rd    (ups_st->rd)
+#define ups_pushn (ups_st->pushn)
+#define ups_pushov (ups_st->pushov)
 #define ups_occ   (ups_st->occ)
 #define ups_last  (ups_st->last)
 
@@ -197,8 +211,47 @@ volatile unsigned s_diag_pops_claim[2];
 volatile unsigned s_diag_popn_claim, s_diag_kabs_claim;
 volatile unsigned s_diag_pops_accept[2], s_diag_popn_accept;
 static unsigned        s_blocks;           /* bank computes run          */
+/* Session 14 (2026-11-14) double-buffered delivery: blocks alternate
+ * between the two halves of the (2 x FA x MAX_RATIO)-word ring, so the
+ * pop stream always has the previous block to drain while the next one
+ * computes. The counters live in ups_st (heap): pop-side reader core vs
+ * committing writer core -- dp121 rule, plain statics are NOT shared. */
 static unsigned        s_block_ticks_max;  /* worst compute burst, 10 ns ticks */
 static unsigned        s_rate_calls, s_last_req_hz;
+/* REVERT(s16-diag): block-granularity ring witnesses (ratio-4 zero-run hunt).
+ * Pop side (producer core): zero-valued popped words, cumulative and bucketed
+ * per pop-block period (fill pops) into a last-4 histogram — distinguishes a
+ * block-PHASED zero cycle (region/parity defect) from uniform loss. Push side
+ * (task core, block cadence): last commit's base, occ after commit, and a
+ * stale-region-overwrite count (first word of the target region non-zero when
+ * the pop stream claims it consumed) — classifies zeros never-pushed vs
+ * pushed-then-overwritten-early. All PROBE-bit5 gated; read via INFO tail. */
+volatile unsigned s16_popz[2];         /* zero-valued pops, cumulative     */
+volatile unsigned s16_lgg[2], s16_lggz[2]; /* lead-gate holds / zero holds */
+volatile unsigned s16_blkz[2][4];      /* [ch][age]: zero pops, last 4 pop-blocks */
+static    unsigned s16_blkcnt[2], s16_blkph[2];
+volatile unsigned s16_pbase, s16_pocc[2], s16_ovlv;
+/* Session 16 close-out (dp204 lean-gate rule): ONE probe-mask read per
+ * producer pass, taken in csd_ps_produce_pair(); every gated site on the
+ * pop path tests this snapshot. The pop path carried ~7 independent
+ * g_csd_probe_mask loads per pass (2 pops x lead/halt/ifed/popz) -- pure
+ * shared-region traffic inside the 260.4 t wire-stride budget. Staleness
+ * is one pass (witnesses only). */
+volatile unsigned s_pass_pm;
+/* Session 16 close-out: hold-last is PRODUCER-side state (writer = pop
+ * side, readers = pop empty branch + lead gate, same core). Keeping it off
+ * the shared heap removes one RMW per pop; semantics unchanged (last
+ * POPPED live word, honest repeat). */
+static int32_t s_ups_last[2];
+
+/* Session 16 close-out: the pop-side LEAD seed (see csd_ups_pop_active) --
+ * one function so the feed-side commit cap cannot drift from the gate. */
+static unsigned ups_lead_seed(void)
+{
+    const unsigned fb = CSD_UPS_FRAME_ADVANCE * ups_phases;
+    const unsigned maxb = fb ? (CSD_UPS_RING_WORDS / fb) : 2u;
+    return (maxb >= 3u && fb >= CSD_UPS_RING_WORDS / 4u) ? 3u : 2u;
+}
 
 /* (Re)load the bank for the current host rate and clear all streaming
  * state. Every caller is control plane: stream start, rate change, arm,
@@ -360,8 +413,11 @@ static void *ups_alloc(unsigned bytes)
  * ring and produced the partial-zero-header capture). A single
  * allocation cannot self-overlap. */
 /* dp124 REVERT: heap budget forced the allocation domain to the ratios
- * certification exercises (R<=2). Larger banks refuse via geometry. */
-#define UPS_ALLOC_RATIO 2u
+ * certification exercises (R<=2). Session 14 (2026-11-14) extends the
+ * domain to R=8 for the ratio-4/8 armed gates; en_stat + ups_heap_total
+ * witnesses prove the heap fits on-device (a NULL would free-and-refuse,
+ * never a partial state). */
+#define UPS_ALLOC_RATIO 8u
 #define UPS_BLOB_WORDS ((unsigned)UPS_ALLOC_RATIO * 2u * (CSD_UPS_MAX_DATA_WORDS + 640u))
 #define UPS_SCAL 16u
 static unsigned *ups_mega;   /* raw handle (REVERT with the block) */
@@ -438,6 +494,7 @@ static void ups_reconfigure_inner(void)
      * the scratch is state too. */
     memset(ups_scratch, 0, (CSD_UPS_MAX_TD_BLOCK_LENGTH + 8u) * 4u);
     ups_fidx = 0u;
+    ups_pushn = 0u;                   /* session 14: double-buffer parity */
     for (unsigned c = 0u; c < 2u; c++) {
         ups_rd[c] = 0u; ups_occ[c] = 0u; ups_last[c] = 0;
     }
@@ -501,7 +558,7 @@ void csd_ups_note_stream_rate(unsigned hz)
         return;
     }
     s_in_hz = hz;
-    ups_reconfigure();
+    ups_reconfigure(0u);   /* REVERT(s15-diag): site = note_stream_rate change */
 }
 
 /* Confirm the real wire rate the board configured. Two families are
@@ -515,13 +572,14 @@ void csd_ups_note_wire_rate(unsigned out_hz)
     if (out_hz == 0u || (want_out != 0u && out_hz != want_out) ||
         (want_out == 0u && out_hz != 384000u && out_hz != 352800u)) {
         if (s_out_hz != 0u || !s_bypass) {
-            s_out_hz = 0u; s_bypass = 1u; ups_reconfigure();
+            s_out_hz = 0u; s_bypass = 1u;
+            ups_reconfigure(1u); /* REVERT(s15-diag): site = wire reject */
         }
         return;
     }
     if (s_out_hz != out_hz) {
         s_out_hz = out_hz; s_bypass = 0u;
-        ups_reconfigure();
+        ups_reconfigure(2u);     /* REVERT(s15-diag): site = wire accept */
     }
 }
 
@@ -544,7 +602,8 @@ void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
             s_out_hz = 0u;
             s_bypass = 1u;
         }
-        ups_reconfigure();          /* a mode switch is a stream restart */
+        ups_reconfigure(3u);          /* a mode switch is a stream restart;
+                                       * REVERT(s15-diag): site = set_enabled */
     }
 }
 unsigned csd_ups_is_enabled(void) { return s_enabled; }
@@ -576,8 +635,10 @@ static void csd_ups_push_feed_owner(void)
 }
 
 /* Wrapper so EVERY reconfigure exit (early returns included) republishes. */
-static void ups_reconfigure(void)
+static void ups_reconfigure(unsigned site)
 {
+    /* REVERT(s15-diag): always-on attribution (cold path, ~4 RMWs). */
+    s_rc_total++; s_rc_last = site; if (site < 4u) s_rc_site[site]++;
     ups_reconfigure_inner();
     csd_ups_push_feed_owner();
 }
@@ -732,6 +793,8 @@ void csd_ups_feed(int l, int r)
     if (s_arm_seen != s_arm_gen) {       /* first armed frame of a new arm */
         s_arm_seen = s_arm_gen;
         ups_fidx = 0u;
+        ups_pushn = 0u;                  /* session 14: region parity + lead
+                                          * restart with the rings */
         for (unsigned c = 0u; c < 2u; c++) { ups_rd[c] = 0u; ups_occ[c] = 0u; }
     }
     ups_in[0][ups_fidx] = (int32_t)l;
@@ -761,6 +824,69 @@ void csd_ups_feed(int l, int r)
      * s_blocks). */
     s_feed_enter++;
     const unsigned shift = s_ratio_shift;
+    const unsigned fill  = CSD_UPS_FRAME_ADVANCE * ups_phases;
+    /* Session 16 root cause (fix96, 2026-11-14): the delivery ring is
+     * drained LINEARLY by the pop (rd++ & MASK), so the push cursor must be
+     * the matching FIFO position, not a two-region parity. With the
+     * session-14 parity base (pushn&1)*fill the pop could only ever trail
+     * the commit by <= one block (it reads region k-1's words at linear
+     * position (k-1)*fill mod RING, which coincides with the parity region
+     * only while the pop stays close behind); the measured pre-commit occ
+     * sat at ~98 words -- a JIT stream. Any late commit (529 us worst
+     * compute vs a 1.33 ms block period at ratio 4) drained the ring and
+     * the pop rode ring-empty, holding ups_last (the LAST-PUSHED word: a
+     * future-block sample, a sine near-zero ~ as often as not) for 200-256
+     * pops: the deterministic 256-zero-runs-every-512 host samples,
+     * zerofrac 0.39-0.43, harm -15..-20 and ~10-16% reps at ratio 4, with
+     * the pop's own words proven non-zero (s16 popz witnesses: 0/0 under
+     * bit6). At ratio 2 the double period and half compute hide it (fixT
+     * CLEAN). FIFO base = popn + occ + lead: the ring becomes its full
+     * 2048/fill blocks (4 at ratio 4) of slack; the capacity guard and the
+     * pop lead gate keep the cursors legal (pop never overtakes, push never
+     * writes within occ words of rd). At ratio 8, fill == RING/2 and this
+     * is exactly the old parity map -- shipping behaviour unchanged there. */
+    const unsigned base  = (ups_pushn * fill) & CSD_UPS_RING_MASK;
+    /* Double-buffer capacity guard (session 14): the new block lands in
+     * the region the pop stream consumed TWO blocks ago; it may be
+     * overwritten only once at least one block (fill words) has been
+     * consumed from the ring. Steady state never spins here (fill rate ==
+     * drain rate); the bound + s_push_over witness keep the failure
+     * honest if that ever stops holding. occ only shrinks on the pop
+     * side, so checking before the compute burst is sound: nothing here
+     * grows occ until the end-of-block commit. */
+    {   /* Session 16 close-out (fixT crawl control + attribution): this wait
+         * used to be a 2M-iteration bounded spin on occ+fill > RING. Two
+         * defects: (1) the spin forms a cross-core wait cycle -- the task
+         * waits HERE on the producer's pop to drain occ, while the
+         * producer's pass blocks in csd_ub_consume_if_new ->
+         * UserBufferManagement -> csd_eq_handoff's armed flow-control spin
+         * waiting on THIS task to drain the EQ in-ring; once drift puts occ
+         * over the line both waits go active and the system locks into the
+         * timeout-crawling equilibrium measured on-device at 192k armed
+         * (blocks ~3.5% of rate, UBM ~25 us/call ~= whole pass time,
+         * eq_stalls/eq_overrun ~1k/s). The spin can never fix the drift
+         * (the pop lives on the thread stuck behind this task), so NEVER
+         * wait: drop the block (honest wire repeat, self-recovering).
+         * (2) RING was not a lead bound: at ratio 2 the task pre-ran seven
+         * blocks ahead and steady occ pinned AT the guard -- every commit
+         * raced the pop (drop/pushov ~40/s, R-window repeats ~29k/s,
+         * 3 x 256-word deficits per window). The real contract is the
+         * double-buffer LEAD, so cap the task at seed+1 committed blocks:
+         * steady occ sits between seed and seed+1 blocks of absorption.
+         * At ratio 4 (seed 3) seed+1 blocks IS the ring, and at ratio 8 the
+         * ring is the tighter bound, so those ratios are bit-identical to
+         * the shipped gates; only ratio 2's cap tightens (768 << 2048).
+         * pushov stays as the anomaly witness: a balanced stream never
+         * takes this branch. */
+        const unsigned cap = (ups_lead_seed() + 1u) * fill;
+        const unsigned capx = (cap < CSD_UPS_RING_WORDS) ? cap
+                                                         : CSD_UPS_RING_WORDS;
+        if (ups_occ[0] + fill > capx || ups_occ[1] + fill > capx) {
+            ups_pushov++;
+            s_in_feed = 0u;
+            return;
+        }
+    }
     for (unsigned c = 0u; c < 2u; c++) {
         int32_t *q = ups_q[c];
         for (unsigned p = 0u; p < R; p++) {
@@ -834,7 +960,7 @@ void csd_ups_feed(int l, int r)
              * phase p -> wire word (j << shift) + p. */
             const int32_t *v = &ups_scratch[bank->phases[p].frame_overlap];
             for (unsigned j = 0u; j < CSD_UPS_FRAME_ADVANCE; j++) {
-                q[(j << shift) + p] = v[j];
+                q[(base + ((j << shift) + p)) & CSD_UPS_RING_MASK] = v[j];
                 if (c == 0u && p == 0u && s_probe_qw_n < 64u) {
                     s_probe_qwpop[s_probe_qw_n] = s_pop_clock; s_probe_qw_n++;
                 }
@@ -845,21 +971,35 @@ void csd_ups_feed(int l, int r)
             s_feed_tile  = (unsigned)get_local_tile_id();
         }
         if (c == 0u) s_probe_c0pop = s_pop_clock;  /* stagger witness */
-        ups_rd[c] = 0u;
-        /* dp195: occ must be the WRITTEN extent, not the allocation. The
-         * push writes indices [0, FA*R) (de-interleave (j<<shift)+p);
-         * claiming RING_WORDS (=FA*MAX_RATIO=1024) let the pop run ~3-10
-         * words past the block boundary per block and silently deliver
-         * never-written ring memory (boot zeros / stale ratio-8 words)
-         * while reps stayed 0 (grid_probe: pops 383.53k/s vs push
-         * 379.14k/s, reps 0). With the honest count those pops take the
-         * existing empty-ring branch: counted, hold-last repeat. */
-        const unsigned occ_push = CSD_UPS_FRAME_ADVANCE * ups_phases;
-        ups_occ[c] = occ_push;
-        ups_last[c] = q[occ_push - 1u];
-        if (s_occ_high[c] < occ_push)
-            s_occ_high[c] = occ_push;
     }
+    /* Session 14: SINGLE end-of-block commit. dp195 occ honesty still
+     * governs -- occ advances by the extent WRITTEN this block (the far
+     * region [base, base+fill)), never the ring allocation. The commit was
+     * hoisted out of the c loop because the producer pops a PAIR (L then
+     * R) per pass: committing per channel let a pass consume block k+1's
+     * L while occ_R had not advanced yet (R still computing), so every
+     * pass inside the c1 window manufactured an R repeat -- measured
+     * repsR 38.2k/s (10% of pops) with repsL 0 at ratio 4, and the same
+     * lottery flipped to repsL 65.7k on the ECHO-1 leg (phase, not
+     * channel, is the culprit). occ[c] += fill keeps the accumulated
+     * two-block lead across the compute burst. */
+    for (unsigned c = 0u; c < 2u; c++) {
+        /* REVERT(s16-diag): commit-time view + stale-overwrite classification
+         * (target region first word still non-zero while occ says consumed =>
+         * the pop stream is behind the parity region map). */
+        if (g_csd_probe_mask & 64u) {
+            s16_pbase = base;
+            s16_pocc[c] = ups_occ[c] + fill;
+            if (ups_q[c][base & CSD_UPS_RING_MASK] != 0) s16_ovlv++;
+        }
+        ups_occ[c] += fill;
+        /* s16: ups_last now maintained by the pop side (honest last-POPPED
+         * word); the old commit-time assignment published a future-block
+         * word as the starvation repeat — see the pop-site comment. */
+        if (s_occ_high[c] < ups_occ[c])
+            s_occ_high[c] = ups_occ[c];
+    }
+    ups_pushn++;
     const unsigned dt = csd_ups_now() - t0;
     if (g_csd_probe_mask & 16u) { g_csd_eq_stage = 4u; } /* REVERT(dp201):
      * compute done, back in feed body; bit4-gated per dp202 lean-gate */
@@ -969,12 +1109,62 @@ int csd_ups_slot(unsigned ch, int w)
  * only while g_csd_ps_active). */
 int csd_ups_pop_active(unsigned ch, int w)
 {
+    /* Session 14: seed pop-side LEAD at arm/reconfigure.
+     * The wire pops from the instant the client arms, but the engine
+     * needs a block period (frame_advance host pairs) to produce the
+     * first block and another to have two committed; consuming inside
+     * that window rode whatever lead the transient left -- at ratio 4+
+     * the transient left none and the pop stream rode ring-empty
+     * (JIT delivery), every c1 commit landing after its pops. Hold the
+     * last pair (zeros after the epoch-clear; NO rep credit: this is
+     * fill phase, not starvation) until the lead commits land, so the
+     * pop always drains old blocks while the next computes.
+     * Session 16 (fix96): two blocks was a zero-margin seed. Pops drain
+     * exactly one block per commit period, so with a 2-block seed the
+     * occupancy sits AT zero when each commit lands: any commit jitter
+     * (worst compute 529 us vs a 1.33 ms ratio-4 block period) drained
+     * the ring and the pop rode the repeat branch ~14% of pops (repsL
+     * 55k/s, phase lottery -- a window with holds fails the peak rule,
+     * a lucky window passes). Seed THREE blocks whenever the ring fits
+     * them (RING/fill >= 3: true at ratio<=4, RING=4x fill there):
+     * steady occupancy 2 blocks, one full block of absorption for
+     * commit jitter, and the FIFO write cursor stays one block clear of
+     * the read cursor. At ratio 8, fill == RING/2 and three blocks do
+     * not fit (the capacity guard would wedge commit 2 with pops held),
+     * so the seed stays 2 -- the maximum legal there, behaviour as
+     * shipped. csd_ups_pop_active has no other pre-commit caller. */
+    {   /* Session 16 close-out (fixT control experiment): seed 3 only where
+         * one block is >= RING/4 -- the zero-margin (JIT) regime that needs
+         * the extra absorption block (ratio 4). At ratio 2 the third seed
+         * block holds the pop stream an extra block period at arm/re-seed;
+         * the fixT legs on the seed-3 image crawled (blocks ~13% of rate,
+         * producer capacity-guard spins push_over > 0, peak 955-957), the
+         * seed-2 control did not. Seed 2 at ratio 2 and 8. The feed-side
+         * commit cap shares ups_lead_seed() -- see the capacity guard. */
+        /* Session 16 close-out: pushn/seed are control-plane values (task
+         * writes them per commit, ~1.5k/s); sample every 8th pass. A re-arm
+         * can leave the gate open for <= 8 passes (~2 us) -- bounded and
+         * pre-fill phase, same credit as the boot hold. */
+        static unsigned pn_c = 0u, sd_c = 2u, pn_div = 0u;
+        if (++pn_div >= 8u) { pn_div = 0u; pn_c = ups_pushn; sd_c = ups_lead_seed(); }
+        if (pn_c < sd_c) {
+            /* REVERT(s16-diag): lead-gate hold counter — words emitted through
+             * the pre-commit return are invisible to the pop witnesses; this
+             * closes that blind spot (would show 2-block zero windows per
+             * pushn re-seed). */
+            if (s_pass_pm & 64u) {
+                s16_lgg[ch]++;
+                if ((int)s_ups_last[ch & 1u] == 0) s16_lggz[ch]++;
+            }
+            return (int)s_ups_last[ch & 1u];
+        }
+    }
     /* dp118: the task core owns the capture; wait out its halt window.
      * LRCLK is software-generated in this loop, so the delay is benign. */
     {   /* REVERT(dp201): timed PROBE-bit4 attribution (see witness decls). */
-        unsigned t_h = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
+        unsigned t_h = (s_pass_pm & 16u) ? csd_ups_now() : 0u;
         unsigned hw = 0u; while (s_pop_halt && hw++ < 20000000u) { }
-        if (g_csd_probe_mask & 16u) { unsigned d = csd_ups_now() - t_h;
+        if (s_pass_pm & 16u) { unsigned d = csd_ups_now() - t_h;
             g_csd_p_halt += d; if (d > 64u) g_csd_p_halt_n++; } }
     /* dp147 REVERT: ATOMIC FEED -- pops commit only while no feed claim
      * is held, so the delivery ring is never consumed mid-boundary (no
@@ -985,9 +1175,9 @@ int csd_ups_pop_active(unsigned ch, int w)
      * s_rec_on so shipping behaviour (probe off) is untouched. */
     if (s_rec_on) {
         /* REVERT(dp201): timed PROBE-bit4 attribution. */
-        unsigned t_f = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;
+        unsigned t_f = (s_pass_pm & 16u) ? csd_ups_now() : 0u;
         unsigned fw = 0u; while (s_in_feed && fw++ < 20000000u) { }
-        if (g_csd_probe_mask & 16u) { unsigned d = csd_ups_now() - t_f;
+        if (s_pass_pm & 16u) { unsigned d = csd_ups_now() - t_f;
             g_csd_p_ifed += d; if (d > 64u) g_csd_p_ifed_n++; } }
     /* REVERT(dp198): dp120 s_witness_sp_slot store removed from every pop
      * (~3 t); the DP-view bug class it hunted closed at dp131. */
@@ -1002,13 +1192,32 @@ int csd_ups_pop_active(unsigned ch, int w)
     const unsigned phase = ups_rd[ch] & (ups_phases - 1u);
     if (ups_occ[ch] == 0u) {
         s_repeats[ch]++;               /* starvation, visible on the host */
-        v = ups_last[ch];
+        v = s_ups_last[ch];
     } else {
         idx_pop = ups_rd[ch];
         v = ups_q[ch][idx_pop];
         ups_rd[ch] = (ups_rd[ch] + 1u) & CSD_UPS_RING_MASK;
         ups_occ[ch]--;
         s_pops[ch]++;
+        /* Session 16: hold-last is the last POPPED live word, not the last
+         * pushed word. The commit-time assignment made a starvation repeat
+         * emit a FUTURE-block sample (a content lie); repeating the last
+         * emitted word is the honest wire repeat. Boot/pre-pop value stays
+         * 0 (lead-gate fill phase, no rep credit — unchanged). Producer
+         * static (see s_ups_last decl): writer and readers are this core. */
+        s_ups_last[ch] = v;
+    }
+    /* REVERT(s16-diag): zero-value pop bucketing, PROBE bit5 only. One mask
+     * load; counts BOTH the honest-repeat zeros and real pops of zero words
+     * (the host cannot tell them apart; reps counters attribute). */
+    if (s_pass_pm & 64u) {
+        if (v == 0) { s16_popz[ch]++; s16_blkcnt[ch]++; }
+        if (++s16_blkph[ch] >= CSD_UPS_FRAME_ADVANCE * ups_phases) {
+            s16_blkph[ch] = 0u;
+            s16_blkz[ch][3] = s16_blkz[ch][2]; s16_blkz[ch][2] = s16_blkz[ch][1];
+            s16_blkz[ch][1] = s16_blkz[ch][0]; s16_blkz[ch][0] = s16_blkcnt[ch];
+            s16_blkcnt[ch] = 0u;
+        }
     }
     /* ---- wire-word capture tap (bench instrumentation) -----------------
      * ONE writer: the audiohub core, here only. Reader: the UBM mirror in
@@ -1313,8 +1522,43 @@ unsigned csd_probe_blkdiff(void) { return s_blocks - s_probe_preblocks; }
 unsigned csd_probe_qpop1(unsigned i)
 { return (s_probe_qpop1 && i < CSD_PROBE_RING) ? s_probe_qpop1[i] : 0u; }
 unsigned csd_ups_diag_block_ticks_max(void) { return s_block_ticks_max; }
+/* Session 14 double-buffer witnesses (REVERT with the double-buffer). */
+unsigned csd_ups_diag_push_n(void)     { return ups_st ? ups_st->pushn : 0u; }
+unsigned csd_ups_diag_push_over(void)  { return ups_st ? ups_st->pushov : 0u; }
 unsigned csd_ups_diag_rate_calls(void)      { return s_rate_calls; }
 unsigned csd_ups_diag_last_req_hz(void)     { return s_last_req_hz; }
+/* REVERT(s15-diag): reconfigure attribution witnesses. */
+unsigned csd_ups_diag_rc_total(void)        { return s_rc_total; }
+unsigned csd_ups_diag_rc_site(unsigned i)   { return (i < 4u) ? s_rc_site[i] : 0u; }
+unsigned csd_ups_diag_rc_last(void)         { return s_rc_last; }
+/* REVERT(s16-diag): indexed block-granularity ring witnesses (bit5-written).
+ * 0/1 = last-4 pop-block zero histograms per channel, packed 8 bits each,
+ * newest in bits 0-7, saturating at 255; 2/3 = cumulative zero pops L/R;
+ * 4 = last commit base; 5/6 = occ after last commit L/R; 7 = stale-region
+ * overwrite count. */
+unsigned csd_ups_diag_s16(unsigned i)
+{
+    switch (i) {
+    case 0u: case 1u: {
+        unsigned c = i, p = 0u;
+        for (unsigned a = 0u; a < 4u; a++) {
+            unsigned v = s16_blkz[c][3u - a];
+            if (v > 255u) v = 255u;
+            p |= v << (a * 8u);
+        }
+        return p; }
+    case 2u: return s16_popz[0];
+    case 3u: return s16_popz[1];
+    case 4u: return s16_pbase;
+    case 5u: return s16_pocc[0];
+    case 6u: return s16_pocc[1];
+    case 7u: return s16_ovlv;
+    case 8u: return s16_lgg[0];
+    case 9u: return s16_lgg[1];
+    case 10u: return s16_lggz[0];
+    default: return s16_lggz[1];
+    }
+}
 
 /* 2026-11-12 THE MIC PATH IS NOT A BIT-EXACT CAPTURE: at ratio>1 the USB
  * mic endpoint (245k slots/s) samples the pop mailbox while the engine
