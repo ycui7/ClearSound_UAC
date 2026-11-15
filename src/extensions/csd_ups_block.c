@@ -162,7 +162,20 @@ static int32_t         (*ups_in)[CSD_UPS_FRAME_ADVANCE];
  * wire slot, so the pop always has the previous block while the next
  * computes (session 14). Power-of-two size: the pop is a mask, never a
  * divide. */
+/* Session 17c: TWO delivery rings. The CERTIFIED ring is the committed
+ * 2 x max-ratio-block ring (2048 words/ch) and sits at the head of the one
+ * heap block, exactly where the committed image had it -- every ratio below
+ * MAX streams through it with the committed mask, base and seed, and every
+ * other region keeps its committed offset. The EXTENDED ring (2 x
+ * CSD_UPS_RING_WORDS) is appended at the END of the allocation and is used
+ * ONLY at R == CSD_UPS_MAX_RATIO, the one ratio that needs four blocks in
+ * flight. Growing the physical ring in place perturbed ratio 4 (a shared
+ * heap-layout coupling, measured across three images), so R=8's growth must
+ * not move anything R<8 reads. */
+#define CSD_UPS_RING_CERT_WORDS (2u * CSD_UPS_FRAME_ADVANCE * CSD_UPS_MAX_RATIO)
 static int32_t         (*ups_q)[CSD_UPS_RING_WORDS];
+static int32_t         (*ups_q_cert)[CSD_UPS_RING_CERT_WORDS];
+static int32_t          *ups_qp[2];   /* ACTIVE per-channel ring base */
 /* pushn: blocks committed since the last ring reset (double-buffer region
  * parity + the pop-side lead gate). pushov: capacity-backoff bound hits.
  * HEAP, not static: the pop-side reader runs on the wire/producer core,
@@ -244,13 +257,57 @@ volatile unsigned s_pass_pm;
  * POPPED live word, honest repeat). */
 static int32_t s_ups_last[2];
 
-/* Session 16 close-out: the pop-side LEAD seed (see csd_ups_pop_active) --
- * one function so the feed-side commit cap cannot drift from the gate. */
+/* Session 17: pop-side LEAD seed, expressed in BLOCKS of the effective ring.
+ * The invariant is the reserve at the point where the capacity guard admits
+ * the next commit: at R = MAX one block is exactly a quarter of the ring, so
+ * the session-16 rule (seed 3 there, 2 below) still holds and every ratio
+ * keeps its certified behaviour -- see ups_ring_geometry. */
+static unsigned ups_ring_w = CSD_UPS_RING_WORDS;   /* EFFECTIVE ring words  */
+static unsigned ups_ring_mask = CSD_UPS_RING_WORDS - 1u;
+
+/* Session 17b: the physical ring is sized for the DEEPEST ratio (4 x MAX
+ * blocks -- the fix48 anti-starvation geometry), but the ring a given ratio
+ * streams through is the LARGER of the session-14 minimum (two MAX-ratio
+ * blocks, 2048 words) and four blocks of THAT ratio. Every site that indexes
+ * or bounds the ring (push base, pop cursor, capacity guard, seed) uses the
+ * effective values, so a ratio below MAX streams through exactly the geometry
+ * it was certified at -- enlarging the physical ring must not change it.
+ * Measured (image 74dd4278, armed 96k = ratio 4): with the full 4 x MAX ring
+ * the ratio-4 leg regressed to one whole 128-frame block of hold-last per ~7
+ * blocks (repsL 65k/s, maxrun 128, 375*ratio comb, peak 960.6); the SAME
+ * source at the 2048-word ring (old image 18f1d44e) was clean (repsL 0.4/s).
+ * Seed, cap and fill were numerically identical in both -- only the ring
+ * words differed -- hence the per-ratio effective ring. At MAX the effective
+ * ring is the whole physical ring, so the fix48 behaviour is untouched. */
+static void ups_ring_select(void)
+{
+    if (!ups_q || !ups_q_cert) return;         /* pre-alloc */
+    for (unsigned c = 0u; c < 2u; c++)
+        ups_qp[c] = (ups_ring_w > CSD_UPS_RING_CERT_WORDS)
+                  ? &ups_q[c][0] : &ups_q_cert[c][0];
+}
+
+static void ups_ring_geometry(unsigned R)
+{
+    const unsigned minw = 2u * CSD_UPS_FRAME_ADVANCE * CSD_UPS_MAX_RATIO;
+    const unsigned four = 4u * CSD_UPS_FRAME_ADVANCE * (R ? R : 1u);
+    unsigned w = (four > minw) ? four : minw;
+    if (w > CSD_UPS_RING_WORDS) w = CSD_UPS_RING_WORDS;
+    ups_ring_w = w;              /* always a power of two, so the mask holds */
+    ups_ring_mask = w - 1u;
+    ups_ring_select();
+}
+
+/* Seed in BLOCKS of the effective ring, with the session-16 rule (seed 3
+ * where one block is >= eff/4 -- i.e. at R = MAX, whose ring is exactly four
+ * blocks -- and 2 elsewhere). Certified seeds: R=8 -> 3 (fix48), R=4 -> 3,
+ * R=2 -> 2, R=1 -> 2. */
 static unsigned ups_lead_seed(void)
 {
     const unsigned fb = CSD_UPS_FRAME_ADVANCE * ups_phases;
-    const unsigned maxb = fb ? (CSD_UPS_RING_WORDS / fb) : 2u;
-    return (maxb >= 3u && fb >= CSD_UPS_RING_WORDS / 4u) ? 3u : 2u;
+    if (fb == 0u) return 2u;
+    const unsigned maxb = ups_ring_w / fb;
+    return (maxb >= 3u && fb >= ups_ring_w / 4u) ? 3u : 2u;
 }
 
 /* (Re)load the bank for the current host rate and clear all streaming
@@ -431,7 +488,8 @@ static unsigned ups_bump(unsigned w) { return (w + 3u) & ~3u; }
 static void ups_state_alloc(void)
 {
     if (ups_heap_ok) return;
-    const unsigned wq = 2u * CSD_UPS_RING_WORDS;
+    const unsigned wq = 2u * CSD_UPS_RING_WORDS;       /* R==MAX ring */
+    const unsigned wqc = 2u * CSD_UPS_RING_CERT_WORDS; /* certified    */
     const unsigned wi = 2u * CSD_UPS_FRAME_ADVANCE;
     const unsigned wb = UPS_BLOB_WORDS;
     const unsigned wd = (unsigned)UPS_ALLOC_RATIO * 2u
@@ -439,18 +497,27 @@ static void ups_state_alloc(void)
     const unsigned wf = (unsigned)UPS_ALLOC_RATIO
                         * (unsigned)(sizeof *ups_filter / 4u);
     const unsigned ws = CSD_UPS_MAX_TD_BLOCK_LENGTH + 8u;
+    /* Session 17b: the delivery ring is allocated LAST on purpose. It is the
+     * only region whose size scales with the physical ring (2 x RING_WORDS),
+     * and it is the engine's only cross-task (producer pop vs EQ task feed)
+     * shared state. Growing it in place shifted every compute buffer's
+     * address by 16 KB and measurably perturbed the pop/feed phase at ratio 4
+     * (see ups_ring_geometry); keeping the compute regions at their certified
+     * offsets leaves that geometry bit-identical to the image being fixed. */
     unsigned total = 0u;
-    const unsigned oq = total;  total = ups_bump(total + wq);
+    const unsigned oqc = total; total = ups_bump(total + wqc);
     const unsigned oi = total;  total = ups_bump(total + wi);
     const unsigned ob = total;  total = ups_bump(total + wb);
     const unsigned oda = total; total = ups_bump(total + wd);
     const unsigned of_ = total; total = ups_bump(total + wf);
     const unsigned osc = total; total = ups_bump(total + ws);
     const unsigned ost = total; total = ups_bump(total + UPS_SCAL);
+    const unsigned oq = total;  total = ups_bump(total + wq);
     ups_heap_total = total;               /* dp126 witness */
     unsigned *m = ups_alloc(total * 4u);
     if (!m) { ups_heap_fail++; return; }
     ups_mega = m;
+    ups_q_cert = (int32_t (*)[CSD_UPS_RING_CERT_WORDS])(m + oqc);
     ups_q = (int32_t (*)[CSD_UPS_RING_WORDS])(m + oq);
     ups_in = (int32_t (*)[CSD_UPS_FRAME_ADVANCE])(m + oi);
     ups_blob = (int32_t (*)[2][CSD_UPS_MAX_DATA_WORDS])(m + ob);
@@ -459,6 +526,7 @@ static void ups_state_alloc(void)
     ups_scratch = (int32_t *)(m + osc);
     ups_st = (ups_st_t *)(m + ost);
     ups_heap_ok = 1u;
+    ups_ring_select();
 }
 
 static void ups_reconfigure_inner(void)
@@ -475,6 +543,10 @@ static void ups_reconfigure_inner(void)
     }
     const unsigned R = ratio_for(s_in_hz);
 
+    /* Session 17b: pick the effective ring for THIS ratio before any pop can
+     * run against it (pop gate, push base and capacity guard all read it). */
+    ups_ring_geometry(R);
+
     ups_state_alloc();
     if (!ups_heap_ok || R > UPS_ALLOC_RATIO) { ups_phases = 0u; return; }
     /* dp127: refuse THIS reconfigure by idling (phases=0 -> inactive),
@@ -485,6 +557,7 @@ static void ups_reconfigure_inner(void)
     ups_phases = 0u;
     memset(ups_in, 0, 2u * CSD_UPS_FRAME_ADVANCE * 4u);
     memset(ups_q, 0, 2u * CSD_UPS_RING_WORDS * 4u);
+    memset(ups_q_cert, 0, 2u * CSD_UPS_RING_CERT_WORDS * 4u);
     /* dp104: reconfigure had missed the compute scratch. With all-zero
      * input blocks the fd compute short-circuits on the ZERO_EXP sentinel
      * and NEVER writes ups_scratch, so the push copied stale scratch words
@@ -845,7 +918,7 @@ void csd_ups_feed(int l, int r)
      * pop lead gate keep the cursors legal (pop never overtakes, push never
      * writes within occ words of rd). At ratio 8, fill == RING/2 and this
      * is exactly the old parity map -- shipping behaviour unchanged there. */
-    const unsigned base  = (ups_pushn * fill) & CSD_UPS_RING_MASK;
+    const unsigned base  = (ups_pushn * fill) & ups_ring_mask;
     /* Double-buffer capacity guard (session 14): the new block lands in
      * the region the pop stream consumed TWO blocks ago; it may be
      * overwritten only once at least one block (fill words) has been
@@ -879,8 +952,7 @@ void csd_ups_feed(int l, int r)
          * pushov stays as the anomaly witness: a balanced stream never
          * takes this branch. */
         const unsigned cap = (ups_lead_seed() + 1u) * fill;
-        const unsigned capx = (cap < CSD_UPS_RING_WORDS) ? cap
-                                                         : CSD_UPS_RING_WORDS;
+        const unsigned capx = (cap < ups_ring_w) ? cap : ups_ring_w;
         if (ups_occ[0] + fill > capx || ups_occ[1] + fill > capx) {
             ups_pushov++;
             s_in_feed = 0u;
@@ -888,7 +960,7 @@ void csd_ups_feed(int l, int r)
         }
     }
     for (unsigned c = 0u; c < 2u; c++) {
-        int32_t *q = ups_q[c];
+        int32_t *q = ups_qp[c];
         for (unsigned p = 0u; p < R; p++) {
             s_pc = (p << 1) | c;
             s_in_pc = 1u;
@@ -960,14 +1032,14 @@ void csd_ups_feed(int l, int r)
              * phase p -> wire word (j << shift) + p. */
             const int32_t *v = &ups_scratch[bank->phases[p].frame_overlap];
             for (unsigned j = 0u; j < CSD_UPS_FRAME_ADVANCE; j++) {
-                q[(base + ((j << shift) + p)) & CSD_UPS_RING_MASK] = v[j];
+                q[(base + ((j << shift) + p)) & ups_ring_mask] = v[j];
                 if (c == 0u && p == 0u && s_probe_qw_n < 64u) {
                     s_probe_qwpop[s_probe_qw_n] = s_pop_clock; s_probe_qw_n++;
                 }
             }
         }
         if (c == 0u) {
-            s_feed_qaddr = (unsigned)(uintptr_t)&ups_q[0][0];
+            s_feed_qaddr = (unsigned)(uintptr_t)ups_qp[0];
             s_feed_tile  = (unsigned)get_local_tile_id();
         }
         if (c == 0u) s_probe_c0pop = s_pop_clock;  /* stagger witness */
@@ -990,7 +1062,7 @@ void csd_ups_feed(int l, int r)
         if (g_csd_probe_mask & 64u) {
             s16_pbase = base;
             s16_pocc[c] = ups_occ[c] + fill;
-            if (ups_q[c][base & CSD_UPS_RING_MASK] != 0) s16_ovlv++;
+            if (ups_qp[c][base & ups_ring_mask] != 0) s16_ovlv++;
         }
         ups_occ[c] += fill;
         /* s16: ups_last now maintained by the pop side (honest last-POPPED
@@ -1195,8 +1267,8 @@ int csd_ups_pop_active(unsigned ch, int w)
         v = s_ups_last[ch];
     } else {
         idx_pop = ups_rd[ch];
-        v = ups_q[ch][idx_pop];
-        ups_rd[ch] = (ups_rd[ch] + 1u) & CSD_UPS_RING_MASK;
+        v = ups_qp[ch][idx_pop];
+        ups_rd[ch] = (ups_rd[ch] + 1u) & ups_ring_mask;
         ups_occ[ch]--;
         s_pops[ch]++;
         /* Session 16: hold-last is the last POPPED live word, not the last
@@ -1328,7 +1400,7 @@ int csd_ups_pop_active(unsigned ch, int w)
          * commit. Equal: the pop really delivered the ring. Different:
          * SOMETHING rewrote that entry in the same commit window — and
          * for ch1 we also ship the post-commit ring word to the host. */
-        const int32_t rw = ups_q[ch][idx_pop];
+        const int32_t rw = ups_qp[ch][idx_pop];
         if ((int)rw != v) { if (ch == 0u) s_probe_mis0++; else s_probe_mis1++; }
         if (ch == 0u) {
             /* dp149 REVERT: ch0 rows by core A's OWN consumption counter,
@@ -1660,8 +1732,8 @@ void csd_probe_snapshot(void)
          * core reads zeros. Discriminate visibility vs nested-index codegen
          * (DP-relative addressing) by walking one base pointer. REVERT. */
         unsigned rc = 0u, rn = 0u;
-        const int32_t *flat = &ups_q[0][0];
-        for (unsigned i = 0u; i < 2u * CSD_UPS_RING_WORDS; i++) {
+        const int32_t *flat = ups_qp[0];
+        for (unsigned i = 0u; i < 2u * ups_ring_w; i++) {
             unsigned v = (unsigned)flat[i];
             if (v) rn++;
             rc = (rc ^ v) * 0x01000193u;
@@ -1669,8 +1741,8 @@ void csd_probe_snapshot(void)
         s_probe_ring_direct_crc = rc;
         s_probe_ring_direct_nz  = rn;
     }
-    {   const int32_t *fq = &ups_q[0][0];   /* dp119 flat walk */
-        for (unsigned i = 0u; i < 2u * CSD_UPS_RING_WORDS; i++) {
+    {   const int32_t *fq = ups_qp[0];   /* dp119 flat walk */
+        for (unsigned i = 0u; i < 2u * ups_ring_w; i++) {
             csd_probe_snap[w++] = (unsigned)fq[i];
             if ((i & 63u) == 0u) s_snap_progress = w;   /* dp129 */
         }

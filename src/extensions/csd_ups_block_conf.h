@@ -21,17 +21,23 @@
 #define CSD_UPS_FRAME_ADVANCE (128)
 #define CSD_UPS_MAX_RATIO (8)
 
-/* TWO full blocks of wire words per channel (frame_advance inputs x
- * max ratio x 2): the minimum that lets ratio 8 -- fill == RING/2, the
- * deepest block -- keep two blocks in flight (session 14). Session 16
- * made the push cursor a true FIFO (base = pushn*fill mod RING, matching
- * the pop's linear drain) and the pop lead gate seed up to 3 blocks:
- * at ratio<=4 the ring is >= 4 blocks and holds 2 blocks of steady
- * occupancy + 1 block of jitter absorption (a 2-block seed sat AT zero
- * occupancy when each commit landed: commit jitter drained the ring,
- * 14% ring-empty repeats at ratio 4 -- fix96 defect). Power of two so
- * the delivery ring wraps with a mask, never a divide on the pop side. */
-#define CSD_UPS_RING_WORDS (CSD_UPS_FRAME_ADVANCE * CSD_UPS_MAX_RATIO * 2)
+/* PHYSICAL allocation: FOUR full blocks of wire words per channel
+ * (frame_advance inputs x max ratio x 4). Two was the session-14
+ * minimum and it left ratio 8 -- fill == RING/2 -- with exactly ONE
+ * block of reserve at the point where the capacity guard admits the
+ * next commit, so the pop stream rode the empty edge: any commit
+ * later than the drain put occ at 0 and the pop held the last word
+ * for a whole block period (1024 wire words = 128 identical host
+ * samples, the measured fix48 plateau + 375 Hz comb). This constant
+ * sizes the ALLOCATION only; the ring each ratio actually streams
+ * through is the effective ring set per reconfigure in
+ * csd_ups_block.c (ups_ring_geometry): max(two max-ratio blocks,
+ * four blocks of the current ratio) -- 4096 words at ratio 8, 2048
+ * below it. Enlarging this allocation must never change a lower
+ * ratio's streaming geometry (measured: the full 4-block ring at
+ * ratio 4 regressed). Power of two so the delivery ring wraps with a
+ * mask, never a divide on the pop side. */
+#define CSD_UPS_RING_WORDS (CSD_UPS_FRAME_ADVANCE * CSD_UPS_MAX_RATIO * 4)
 #define CSD_UPS_RING_MASK (CSD_UPS_RING_WORDS - 1)
 
 /* Kernel-state sizing by the C compiler from the vendor's own
