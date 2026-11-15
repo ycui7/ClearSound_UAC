@@ -2411,6 +2411,12 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     extern unsigned g_csd_w_pubn[2],  g_csd_w_pubz[2];
     extern unsigned g_csd_w_shipn[2], g_csd_w_shipz[2];
     extern unsigned g_csd_w_exch;
+    /* REVERT(s15-diag): receive_command wake-code histogram (xua_audiohub.xc). */
+    extern unsigned g_csd_cmd_tot, g_csd_cmd_sr, g_csd_cmd_start;
+    extern unsigned g_csd_cmd_stop, g_csd_cmd_unh, g_csd_cmd_last;
+    unsigned csd_ups_diag_rc_total(void);
+    unsigned csd_ups_diag_rc_site(unsigned i);
+    unsigned csd_ups_diag_s16(unsigned i); /* REVERT(s16-diag) */
     extern unsigned g_csd_w_iter;  /* REVERT(dp203) */
     extern unsigned g_csd_w_dsdn;  /* REVERT(dp203) */
     extern unsigned g_csd_w_portu[2]; /* REVERT(dp203) */
@@ -2508,8 +2514,30 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                       /* 13 more (REVERT(dp181)): mic zero-birth witnesses
                        * (xua_audiohub.xc g_csd_w_*): portn0/1, portz0/1,
                        * pubn0/1, pubz0/1, shipn0/1, shipz0/1, exch.
-                       * REVERT(dp203): +1 = iter, dsdn, portu0/1 (skip hunt). */
-                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                       * REVERT(dp203): +1 = iter, dsdn, portu0/1 (skip hunt).
+                       * REVERT(s14): +2 = push_n, push_over (double-buffer
+                       * commit parity + capacity-backoff witness). */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u"
+                      /* REVERT(s15-diag): +11 = cmd_tot, cmd_sr, cmd_start,
+                       * cmd_stop, cmd_unh, cmd_last (receive_command wake
+                       * codes, xua_audiohub.xc) + rc_total, rc_site0..3
+                       * (ups_reconfigure attribution, csd_ups_block.c).
+                       * REVERT(s16-diag): trailing comma inside the s15
+                       * literal removed (it was the last literal, so it
+                       * only emitted a stray separator; as a NON-last
+                       * literal it would silently turn every later literal
+                       * into an extra arg — the dp181 comma trap). */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u"
+                      /* REVERT(s16-diag): +8 = blkzL, blkzR (last-4
+                       * pop-block zero histograms, 8 b/slot, newest low),
+                       * popzL, popzR (cumulative zero pops), pbase (last
+                       * commit base), pocc0/1 (occ after last commit),
+                       * ovlv (stale-region overwrite count).
+                       * +4 = lgg0/1 (lead-gate holds), lggz0/1 (lead-gate
+                       * holds of a zero last word). */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u"
+                      ",%u,%u,%u,%u",
 
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
@@ -2672,7 +2700,22 @@ g_csd_span_min, g_csd_span_max,
                       g_csd_w_shipn[0], g_csd_w_shipn[1],
                       g_csd_w_shipz[0], g_csd_w_shipz[1],
                       g_csd_w_exch, g_csd_w_iter, g_csd_w_dsdn,
-                      g_csd_w_portu[0], g_csd_w_portu[1]);  /* REVERT(dp203): +iter,dsdn,portu.
+                      g_csd_w_portu[0], g_csd_w_portu[1],
+                      csd_ups_diag_push_n(), csd_ups_diag_push_over(),
+                      /* REVERT(s15-diag): see format block above. */
+                      g_csd_cmd_tot, g_csd_cmd_sr, g_csd_cmd_start,
+                      g_csd_cmd_stop, g_csd_cmd_unh, g_csd_cmd_last,
+                      csd_ups_diag_rc_total(), csd_ups_diag_rc_site(0),
+                      csd_ups_diag_rc_site(1), csd_ups_diag_rc_site(2),
+                      csd_ups_diag_rc_site(3),
+                      /* REVERT(s16-diag): block-granularity ring witnesses. */
+                      csd_ups_diag_s16(0u), csd_ups_diag_s16(1u),
+                      csd_ups_diag_s16(2u), csd_ups_diag_s16(3u),
+                      csd_ups_diag_s16(4u), csd_ups_diag_s16(5u),
+                      csd_ups_diag_s16(6u), csd_ups_diag_s16(7u),
+                      csd_ups_diag_s16(8u), csd_ups_diag_s16(9u),
+                      csd_ups_diag_s16(10u), csd_ups_diag_s16(11u));
+                      /* REVERT(dp203): +iter,dsdn,portu.
                        * REVERT(dp202): dp197 dec_* chunk
                        * removed with its witnesses (decouple.xc reverted);
                        * tail field count 157 -> 147, verified on-device. */
