@@ -140,6 +140,30 @@ unsigned csd_pop_seq    = 0u;   /* 11.11.40 freshness: bumped per commit */
  * scores the pop stream against the oracle fed by the schedule. */
 unsigned g_csd_ups_echo_mode = 0u;
 unsigned g_csd_ups_mirror_seq = 0xFFFFFFFFu;  /* last pop seq the mirror saw */
+/* REVERT(bp21): ECHO-0 mirror stride-jitter witnesses. The mirror used to
+ * gate on a pop seqlock and re-emit the previous pair whenever the seq had
+ * not moved, which made the emitted wire stride alternate (d = j - R*i in
+ * 15/14-frame runs, net zero) and cost ~6% coverage at 192k. The pop side
+ * (csd_ups_block.c, single writer, same core) now publishes ONE pair per
+ * host frame at a fixed slot phase, and the mirror copies it every frame
+ * (zero-order hold when no new pair landed). One decision, one place: the
+ * selection lives with the pop counter, not with the reader's timing.
+ *   g_csd_mir_pub_n  -- pairs published (pop side)   */
+unsigned g_csd_mir_pub_n  = 0u;
+unsigned g_csd_mir_copy_n = 0u;   /* mirror copies (one per audio frame)     */
+unsigned g_csd_mir_hold_n = 0u;   /* copies with no new pair since the last  */
+/* REVERT(bp31): mic-frame-aligned mirror state (see the ECHO-0 branch of
+ * UserBufferManagement). s_mir_cur indexes the pop side's phase-0 pair series
+ * in PAIR units (one pair = one host frame = R wire words) and advances by
+ * exactly 1 per host frame, so the emitted stream is a FIXED decimation of
+ * the pop stream: the capture's d = j - R*i is constant for the whole
+ * window instead of dithering by +-1 word in 3..19-frame runs. s_mir_w0/w1 is
+ * the zero-order hold register (honest repeat when the pop side has not yet
+ * published the pair this frame needs). */
+static unsigned s_mir_cur = 0u;
+static int      s_mir_w0 = 0, s_mir_w1 = 0;
+unsigned g_csd_mir_relock_n = 0u;  /* FIFO window escapes (re-locks)          */
+unsigned g_csd_mir_lag_n = 0u;     /* live skew prod_n - cursor at last read  */
 unsigned g_csd_feed_writes = 0u;   /* INFO? field 98 witness: feed stores done
                                     * by UBM (REVERT with the feed) */
 unsigned g_csd_eq_frames;
@@ -1052,28 +1076,41 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
             sampsFromAudioToUsb[0] = (unsigned)csd_feed_w0;
             sampsFromAudioToUsb[1] = (unsigned)csd_feed_w1;
         } else {
-            /* 11.11.40 freshness gate: publish a pop pair only when a NEW
-             * commit (tap seqlock bump) happened since the last publish.
-             * A frozen mailbox is then visible as a ZERO pair instead of a
-             * stale one — the scorer treats zeros as dead frames, never as
-             * data. Tear-safe: odd seq = pair mid-commit, hold previous. */
-            unsigned sq = csd_pop_seq;
-            /* REVERT(dp180): hold-last, not zero-inject. A host-clock
-             * mailbox is a zero-order hold: a stale read must repeat the
-             * last pair (correct DAC semantics), never invent zeros.
-             * 11.11.40 injected zeros to make freeze visible to the
-             * scorer — that diagnostic corrupted every ratio-2 mic FFT
-             * (zerofrac 13/36) while the underlying stream was sound.
-             * Staleness remains COUNTED via g_csd_ups_mirror_seq/stale. */
-            if ((sq & 1u) == 0u && sq != g_csd_ups_mirror_seq) {
-                g_csd_ups_mirror_seq = sq;
-                unsigned a = (unsigned)csd_pop_w0;
-                unsigned b = (unsigned)csd_pop_w1;
-                if (csd_pop_seq == sq) {
-                    sampsFromAudioToUsb[0] = a;
-                    sampsFromAudioToUsb[1] = b;
+            /* REVERT(bp31): MIC-FRAME-ALIGNED deterministic emission. This
+             * call IS the host mic-frame boundary (UBM runs once per USB
+             * transfer = once per ratio wire frames; its sampsFromAudioToUsb
+             * store is what the mic buffer ships), so the pair it writes is
+             * the pair "destined for that host frame". The pop side publishes
+             * one pair per host frame into the FIFO at ring phase 0; here we
+             * take pair #s_mir_cur -- a monotone index that advances by
+             * EXACTLY 1 per host frame -- so the emitted stream is a fixed
+             * decimation of the pop stream and the capture maps with one
+             * constant d instead of a +-1-word dither (bp21 fixed WHEN the
+             * pair was written, not WHICH pair: the phase-0 pairs landed
+             * 8+-1 per host frame, so latest-wins still dithered).
+             * Reads are tear-free: same core, words stored before the count
+             * stamp, and slot k is only reused CSD_MIR_Q pairs (~1.3 ms)
+             * later. If the requested pair is not published yet this is an
+             * honest zero-order hold (COUNTED); if the reader ever falls
+             * CSD_MIR_Q/2 pairs behind, the slot would have been overwritten,
+             * so it re-locks to the newest pair (COUNTED, one frame cost). */
+            const unsigned pn = csd_mir_prod_n;
+            if (pn > s_mir_cur) {
+                if ((pn - s_mir_cur) > (CSD_MIR_Q / 2u)) {
+                    s_mir_cur = pn - 2u;
+                    g_csd_mir_relock_n++;
                 }
+                const unsigned qi = s_mir_cur & (CSD_MIR_Q - 1u);
+                s_mir_w0 = (int)csd_mir_q0[qi];
+                s_mir_w1 = (int)csd_mir_q1[qi];
+                s_mir_cur++;
+                g_csd_mir_copy_n++;
+            } else {
+                g_csd_mir_hold_n++;
             }
+            g_csd_mir_lag_n = pn - s_mir_cur;   /* skew witness: bounded */
+            sampsFromAudioToUsb[0] = (unsigned)s_mir_w0;
+            sampsFromAudioToUsb[1] = (unsigned)s_mir_w1;
         }
         g_csd_feed_writes++;   /* INFO? field 98 (REVERT with the feed) */
     }

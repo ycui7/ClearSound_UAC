@@ -2537,7 +2537,19 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * +4 = lgg0/1 (lead-gate holds), lggz0/1 (lead-gate
                        * holds of a zero last word). */
                       ",%u,%u,%u,%u,%u,%u,%u,%u"
-                      ",%u,%u,%u,%u",
+                      ",%u,%u,%u,%u"
+                      /* REVERT(bp21): +3 = mirror-selection witnesses
+                       * (csd_dsp.xc): pub_n (pop-side pairs published, one
+                       * per host frame at slot phase 0), copy_n (mirror
+                       * copies, one per audio frame), hold_n (copies with
+                       * no new pair). delta(pub_n)==delta(copy_n) proves
+                       * skew-free 1:1 mirror-to-pop accounting. */
+                      ",%u,%u,%u"
+                      /* REVERT(bp31): +2 = mic-frame-aligned mirror skew
+                       * witnesses (csd_dsp.xc): mir_relock_n (FIFO window
+                       * escapes) and mir_lag (prod_n - cursor at the last
+                       * read: bounded constant == skew-free 1:1). */
+                      ",%u,%u",
 
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
@@ -2714,7 +2726,11 @@ g_csd_span_min, g_csd_span_max,
                       csd_ups_diag_s16(4u), csd_ups_diag_s16(5u),
                       csd_ups_diag_s16(6u), csd_ups_diag_s16(7u),
                       csd_ups_diag_s16(8u), csd_ups_diag_s16(9u),
-                      csd_ups_diag_s16(10u), csd_ups_diag_s16(11u));
+                      csd_ups_diag_s16(10u), csd_ups_diag_s16(11u),
+                      /* REVERT(bp21): see format block above. */
+                      g_csd_mir_pub_n, g_csd_mir_copy_n, g_csd_mir_hold_n,
+                      /* REVERT(bp31): see format block above. */
+                      g_csd_mir_relock_n, g_csd_mir_lag_n);
                       /* REVERT(dp203): +iter,dsdn,portu.
                        * REVERT(dp202): dp197 dec_* chunk
                        * removed with its witnesses (decouple.xc reverted);

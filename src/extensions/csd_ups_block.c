@@ -286,6 +286,16 @@ static int32_t s_ups_last[2];
  * once per 8 pops, so the per-pop path tests a register instead of loading a
  * cross-tile global. */
 static unsigned ht_c = 0u, rc_c = 0u;
+/* REVERT(bp31): mic-frame-aligned mirror FIFO (see csd_ups_block.h). The pop
+ * side is the ONLY writer and it writes one pair per host frame, at ring
+ * phase 0 -- the same phase the 11.11.40 mailbox used, but now indexed
+ * instead of latest-wins, so the mirror can emit pair k for host frame k
+ * regardless of when its own frame boundary falls. Two words then the count
+ * store: the reader uses csd_mir_prod_n as its availability stamp. */
+int      csd_mir_q0[CSD_MIR_Q];
+int      csd_mir_q1[CSD_MIR_Q];
+unsigned csd_mir_prod_n = 0u;
+static unsigned   s_mir_k = 0u;    /* pairs published (writer-private) */
 
 /* Session 17: pop-side LEAD seed, expressed in BLOCKS of the effective ring.
  * The invariant is the reserve at the point where the capacity guard admits
@@ -1377,6 +1387,24 @@ int csd_ups_pop_active(unsigned ch, int w)
      * REVERT: fold these stores back inside the s_tap block. */
     s_tap_pend[ch] = v;
     if (ch == 1u) {
+        /* REVERT(bp31): publish the pair destined for THIS host frame into
+         * the mic-frame-aligned FIFO. Ring phase 0 is the R-channel pop that
+         * closes a host frame (ups_rd resets in whole blocks of R per push),
+         * so exactly one pair per host frame lands here, selected by the pop
+         * counter alone. Two word stores + one count store per host frame:
+         * off the per-pop budget by construction. The mirror reads by index,
+         * so it no longer matters when the reader's frame boundary falls --
+         * that timing was the +-1-word dither (d = 8+-1 @48k, 490 plateau
+         * transitions / 8192 frames @192k). */
+        if (phase == 0u) {
+            const unsigned k = s_mir_k;
+            csd_mir_q0[k & (CSD_MIR_Q - 1u)] = (int)s_tap_pend[0];
+            csd_mir_q1[k & (CSD_MIR_Q - 1u)] = (int)v;
+            s_mir_k = k + 1u;
+            __asm__ __volatile__("" ::: "memory");  /* words BEFORE stamp */
+            csd_mir_prod_n = k + 1u;   /* availability stamp (after words) */
+            g_csd_mir_pub_n++;
+        }
         csd_pop_seq++;
         csd_pop_w0 = (int)s_tap_pend[0];
         csd_pop_w1 = (int)v;

@@ -121,6 +121,33 @@ extern int      csd_feed_w1;
 extern int      csd_pop_w0;      /* 11.11.34 dual echo: pop-word mailbox */
 extern int      csd_pop_w1;
 extern unsigned csd_pop_seq;     /* 11.11.40 seqlock: odd = mid-commit */
+/* REVERT(bp31): MIC-FRAME-ALIGNED mirror FIFO (DEFINED in csd_ups_block.c).
+ * Producer = the pop side, one PAIR per host frame at ring phase 0 (a pair
+ * every R pops, so the series is deterministic in the pop counter -- no
+ * reader timing anywhere). Consumer = the ECHO-0 mirror in csd_dsp.xc, once
+ * per host frame, at UBM time (the same instant the mic buffer for that USB
+ * frame is written), selecting by monotone pair index: it advances exactly
+ * one pair per host frame, so the emitted stream is a fixed decimation of
+ * the pop stream and the capture's d = j - R*i is constant. Single writer,
+ * single reader, same core: plain stores, no seqlock.
+ *   csd_mir_prod_n  -- pairs published (monotone, never reset)            */
+#define CSD_MIR_Q 64u
+/* Plain objects on purpose: xcc rejects `volatile` on a reference/array
+ * TYPE and cross-language symbol types must match EXACTLY (a volatile C
+ * definition against this plain XC extern fails the link), so ordering is
+ * enforced where it matters -- a compiler barrier in the writer between the
+ * words and the count stamp. Single writer, single reader, same core. */
+extern int      csd_mir_q0[CSD_MIR_Q];
+extern int      csd_mir_q1[CSD_MIR_Q];
+extern unsigned csd_mir_prod_n;
+extern unsigned g_csd_mir_relock_n;   /* FIFO window escapes (re-locks)     */
+extern unsigned g_csd_mir_lag_n;      /* live skew prod_n - cursor at a read*/
+/* REVERT(bp21): mirror-selection witnesses, DEFINED in csd_dsp.xc.
+ * pub_n = pairs published by the pop side (one per host frame, slot phase
+ * 0), copy_n = mirror copies (one per audio frame), hold_n = copies that
+ * found no new pair. Passing armed legs: delta(pub_n) == delta(copy_n) and
+ * hold_n/near-zero (startup transient only). */
+extern unsigned g_csd_mir_pub_n, g_csd_mir_copy_n, g_csd_mir_hold_n;
 
 #ifdef __cplusplus
 }
