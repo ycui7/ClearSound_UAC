@@ -69,7 +69,7 @@
 #define ES9219Q_VOLUME_RATE							(0b010 << 0)
 
 #define ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE      (0x07)
-#define ES9219Q_FILTER_SHAPE            	     	(0 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
+#define ES9219Q_FILTER_SHAPE            	     (6 << 5)    //0: linear phase fast roll-off, 6: hybrid fast roll-off 
 #define ES9219Q_BYPASS_OSF             	     	(0 << 3)    //0: built-in upsampling filter, 1: external 8x upsampling
 /* Reg 7 bit 3, spelled out. Datasheet v1.3 p40 and the Sample Rate Notation
  * table p13: with BYPASS_OSF=1 the chip takes FSR = frame clock rate and its
