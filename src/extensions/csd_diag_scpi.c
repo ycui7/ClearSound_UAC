@@ -996,6 +996,15 @@ static SCPI_FPTR_CMD scpi_result_t set_dsp(scpi_t *context)
         SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
         return SCPI_RES_ERR;
     }
+#if defined(CSD_RELEASE) && CSD_RELEASE
+    /* RELEASE image: the DSP path is pinned (preset 0, engine unarmed in
+     * csd_ups_block.c / csd_dsp.xc), so there is nothing to install a preset
+     * into. The command is ACCEPTED -- a host script must not have to know
+     * the build -- and discarded; DIAG:DSP:PRESet? keeps answering 0, which
+     * is the truth here. Nothing else in the DSP's own code is stubbed: its
+     * per-frame body is the certified byte-exact bypass. */
+    return SCPI_RES_OK;
+#endif
     struct preset_post pp = { v };
     if (!krnl_update_seq(preset_post_cb, &pp)) {
         SCPI_ErrorPush(context, CSD_ERR_ADOPT_TIMEOUT);
@@ -3076,6 +3085,16 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
         return SCPI_RES_ERR;                /* the file's own idiom */
     }
     unsigned ap = 0u, sf = 0u, rf = 0u;
+#if defined(CSD_RELEASE) && CSD_RELEASE
+    /* RELEASE image: the resampler is pinned disarmed (csd_ups_block.c pins
+     * want/enabled/active/armed to 0), so the command is ACCEPTED and
+     * answered with the true state -- which stays "off" -- and touches
+     * neither the codec, the journal nor the engine. A release board cannot
+     * be armed into the DSP path; nothing else about the engine is stubbed. */
+    (void)enable; (void)ap; (void)sf; (void)rf;
+    ups_reply(context);
+    return SCPI_RES_OK;
+#endif
     /* persist=1: an operator command is the only thing that journals the
      * setting. A rate-change re-grant goes through the codec path with 0. */
     if (!csd_diag_ups_set(enable, 1u, &ap, &sf, &rf)) {

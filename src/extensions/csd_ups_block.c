@@ -47,6 +47,36 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* ---- CSD_RELEASE: the shipping image is a GUARANTEED relay --------------
+ * WHY (2026-11-16 release cut): the certified pass path is "engine not
+ * armed": csd_ups_active()==0 makes csd_ups_slot() return every feed word
+ * untouched, the producer thread sleeps 1 ms/pass and the board takes the
+ * native-rate branch (no forced 384 k, no MCLK change, no codec OSF).
+ * That path is bit-perfect by construction at every host rate. The release
+ * build must be UNABLE to leave it: not by an operator command, not by a
+ * persisted flash trim, not by a stale boot preset.
+ *
+ * One flag, DEFAULT OFF (dev/bisect builds keep the full engine):
+ *   EXTRA_BUILD_FLAGS=...;-DCSD_RELEASE=1
+ *
+ * PIN THE ARMING INPUTS ONLY. Every function runs its normal body, so the
+ * release image IS the certified dev image at want=0/enabled=0/armed=0 --
+ * the same one that passed the 9/9 relay. An earlier cut of this guard also
+ * early-returned from the data plane (feed, rate notes, frame hook); that
+ * link was NOT reproducible (a bisect image carrying that whole guard set
+ * still answered *IDN? on the bench), so nothing here claims it caused the
+ * transport loss. The rule stands on its own: pin inputs, never delete a
+ * body or a blocking call -- only these five decision points are pinned:
+ *   get_want -> 0, active -> 0, armed -> 0,
+ *   set_want/set_enabled -> state write forced 0, bookkeeping unchanged.
+ * Rate notes, feed and the pop all still run the certified pass-mode code.
+ */
+#if defined(CSD_RELEASE) && CSD_RELEASE
+#define CSD_REL 1
+#else
+#define CSD_REL 0
+#endif
+
 /* XS3 local timer (10 ns ticks), read through the app's XC shim
  * (clearsounddac_board.xc: app C translation units cannot claim a timer
  * resource). Two reads per BLOCK (once per frame_advance host pairs), used
@@ -87,7 +117,18 @@ static unsigned s_rc_total, s_rc_site[4], s_rc_last;
 static volatile unsigned s_arm_gen  = 0u;
 static unsigned          s_arm_seen = 0xFFFFFFFFu;
 
-void     csd_ups_set_want(unsigned w) { s_want = w ? 1u : 0u;
+void     csd_ups_set_want(unsigned w)
+{
+#if CSD_REL
+    /* RELEASE: arming is refused at the single point of intent, and the call
+     * still runs the DISARM body below (s_want <- 0, the no-op EQ post, the
+     * feed-owner publish) -- the exact bookkeeping the certified image
+     * executes at boot. A persisted flash trim (DAC_TRIM_UPS_GET) or a
+     * DIAG:UPSAMPLing:STATe 1 write therefore lands here as a disarm: the
+     * board never forces a wire rate and the engine never arms. */
+    w = 0u;
+#endif
+    s_want = w ? 1u : 0u;
                                         if (w) s_arm_gen++;
                                         /* 11.11.39 (REVERT-tagged bisect): every
                                          * arm/disarm posts a no-op EQ config so
@@ -100,8 +141,17 @@ void     csd_ups_set_want(unsigned w) { s_want = w ? 1u : 0u;
                                          * change uses; stream-safe by design. */
                                         csd_eq_cfg_post(csd_eq_cfg_on_get(),
                                                         csd_eq_cfg_idx_get());
-                                        csd_ups_push_feed_owner(); }
-unsigned csd_ups_get_want(void)       { return s_want; }
+                                        csd_ups_push_feed_owner();
+}
+unsigned csd_ups_get_want(void)
+{
+#if CSD_REL
+    return 0u;      /* RELEASE: the board's one read of "should I force the
+                     * fabric rate" answers never. */
+#else
+    return s_want;
+#endif
+}
 
 /* Family map -- THE one source of truth for "host rate -> forced family wire
  * rate". lib_xua's audiohub (ConfigAudioPorts fabric decision) and the board
@@ -700,6 +750,12 @@ void csd_ups_note_wire_rate(unsigned out_hz)
 
 void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
 {
+#if CSD_REL
+    /* RELEASE: the codec OSF grant is pinned to "not granted". The body then
+     * runs unchanged -- and since enabled is already 0, it takes its normal
+     * no-change path, exactly as the certified image does at boot. */
+    enable = 0u;
+#endif
     const unsigned now = enable ? 1u : 0u;
     if (now != s_enabled) {
         s_enabled = now;
@@ -734,9 +790,16 @@ unsigned csd_ups_is_enabled(void) { return s_enabled; }
  * rate and feeds the pair here; csd_ups_slot pops only when this is 1. */
 unsigned csd_ups_active(void)
 {
+#if CSD_REL
+    /* RELEASE: THE relay guarantee. csd_ups_slot() == "return w" and the
+     * producer thread idles at 1 ms/pass, so the wire carries the host
+     * words verbatim at every rate. */
+    return 0u;
+#else
     return (ups_heap_ok != 0u && s_want && s_enabled && s_out_hz != 0u
             && !s_bypass && ups_phases != 0u)
            ? 1u : 0u;
+#endif
 }
 
 /* Cold-path publisher: recompute the armed-mic gate into the csd_dsp.xc
@@ -762,11 +825,19 @@ unsigned csd_ups_bypass_witness(void)  { return s_bypass; }
 unsigned csd_ups_enabled_witness(void) { return s_enabled; }
 unsigned csd_ups_armed(void)      /* armed regardless of the codec grant */
 {
+#if CSD_REL
+    /* RELEASE: pinned. The producer thread's `if (!armed) sleep 1 ms` gate
+     * and the board's `!armed` re-apply guards then all take the certified
+     * pass-mode branch, and no diagnostic can act on an engine that cannot
+     * be armed. */
+    return 0u;
+#else
     /* want is part of arming: the resampler client exists only where the
      * operator's own enable (DIAG:UPSAMPLing:STATe / trim) put it. With want
      * cleared, every armed read goes 0, so no guard or diagnostic can act on
      * a resampler the operator just switched off. */
     return (s_want && s_out_hz != 0u && !s_bypass) ? 1u : 0u;
+#endif
 }
 
 /* One host pair in, at host-pair cadence. The frame is left untouched --
