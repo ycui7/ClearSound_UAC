@@ -5,14 +5,28 @@ Factory power-on-reset image, built 2026-11-16. Tag: `legacy-POR-release` → `0
 
 | File | md5 | Notes |
 |---|---|---|
-| `csd-legacy-POR-094dad0b.xe` | `0d5535697feda5eda367d7002cb8419d` | Factory image, 3,654,296 B |
-| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `684844b9dc9e0e7a5f5d0ccc6aea36da` | DFU upgrade slot-1 bin |
+| `csd-legacy-POR-094dad0b.xe` | `50c5c9a48dba77cce0afe40c1a2e839e` | Factory image, 2,956,928 B |
+| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `217c086a1d630fc74b8e44014846ce29` | DFU upgrade slot-1 bin |
 
 ## Build provenance
-- Toolchain XTC 15.3.1, same pinned flag set as the campaign builds minus `CSD_*` flags.
+- Toolchain XTC 15.3.1 (user directive 2026-11-16), build system xcommon_cmake.
+- FIRST CUT RETIRED (md5 0d553569/684844b9): that build used the modern-tree
+  CMakeLists + campaign flags (NATIVE_DSD, DSD_CHANS_DAC=2, UAC_FORCE_FEEDBACK,
+  campaign config 2AMi2o2xxxxxd), un-pinned module HEADs, and xcommon_cmake
+  silently FetchContent-downloaded any missing module from GitHub at HEAD.
+  User caught it ("did you get all dependency to the right time?") — no.
 - Isolated sandbox `~/sw-audio-sc/por094sb`: app worktree at `094dad0b` under `sb/`
-  (xcommon resolves the sandbox as `app/../..` — depth matters), `deps.cmake` copied in,
-  shared modules symlinked, `lib_xua` = worktree of era XMOS develop `c4ea3f59` (5.1.0).
+  (xcommon resolves the sandbox as `app/../..` — depth matters), `sb/deps.cmake` =
+  era Makefile set (lib_xua, lib_i2c, lib_sw_pll; the app's relative
+  `../../../shared/version.h` include is served by `sb/shared` -> era sw_usb_audio
+  worktree `57ffd61`), and ALL fifteen module worktrees era-detached (<=2025-07-11):
+  lib_xua c4ea3f59, lib_i2c 5757817, lib_sw_pll 8e629ba, lib_adat 5b52c5e,
+  lib_locks 3076f7f, lib_logging b8e939c, lib_mic_array 8620978, lib_spdif 9bfeff3,
+  lib_xassert c8b59c9, lib_xcore_math 175dd19, lib_xud cd126400,
+  lib_audio_dsp d9c15049, lib_board_support 921c3a1, lib_i2s 2cae684, libscpi 698eabe.
+- Build config = era Makefile name `2AMi2o2xxxxxx` with the VERBATIM BUILD_FLAGS
+  (no DSD, no forced feedback, BOARD_SUPPORT_BOARD set; only the two linker-only
+  -Xmapper map flags dropped, the cmake harness hands them to xcc).
 - Two build shims, behavior-neutral, documented in `~/sw-audio-sc/LOG.md` (2026-11-16 late-3):
   1. `extern void process_xscope(chanend);` prototype in `lib_xua/src/core/main.xc`
      (carried by XTC 15.3.0, absent in 15.3.1).
