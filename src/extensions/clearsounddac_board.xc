@@ -712,7 +712,9 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
     btn_pair_fsm_init(&btn_pair);
     timer btn_both_tmr;
     unsigned btn_both_to = 0, do_both = 0;
-    const unsigned BTN_HOLD_TICKS = 100u * BTN_DEBOUNCE_TICKS;  /* 1 s */
+    const unsigned BTN_HOLD_TICKS = 20u * BTN_DEBOUNCE_TICKS;  /* 1 s
+        * (was 100u x -- 50 ms x 100 = 5 s, not 1 s; found by the full-loop
+        * xsim sim 2026-11-16) */
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
 
