@@ -83,7 +83,7 @@ linear-phase pass-sheet numbers — re-run the gates and read back reg 7 (expect
 ## Legacy POR release
 | File | Description | Commit | md5 |
 |---|---|---|---|
-| `csd-legacy-POR-094dad0b.xe` | Legacy power-on-reset factory image (`094dad0` "default FIR to linear phase slow roll off", 2025-07-10, pre-USB-refactor; 3,654,296 B). Tag `legacy-POR-release`. | `094dad0b` | `8baa27232d64a7480ccf028305df93a9` |
+| `csd-legacy-POR-094dad0b.xe` | Legacy power-on-reset factory image (`094dad0` "default FIR to linear phase slow roll off", 2025-07-10, pre-USB-refactor; 3,654,296 B). Tag `legacy-POR-release`. | `094dad0b` | `35b307db783efa91e1a6ee46fc4e0d4d` |
 
 Built from an isolated sandbox (`~/sw-audio-sc/por094sb`) against era lib_xua (XMOS develop c4ea3f59, 5.1.0) with the same pinned flag set minus the CSD_* campaign flags. Two minimal build shims were needed (neither changes behavior; both documented in LOG.md 2026-11-16): `extern void process_xscope(chanend);` prototype (carried by XTC 15.3.0, absent in 15.3.1) and restoring the `uc_audiohw2` definition commented out at this WIP commit. Factory-flash with: `xflash -f --boot-partition-size 1048576 --factory <xe> --upgrade 1 <xe> --data bootFlash trim_journal_erased_4k.bin`.
 
