@@ -47,6 +47,11 @@ static int      s_w1[CSD_PS_RING];
 unsigned g_csd_ps_seq      = 0u;   /* pairs published (producer writes)    */
 unsigned g_csd_ps_consumed = 0u;   /* pairs claimed   (consumer writes)    */
 static unsigned s_produced_local = 0u; /* producer-private copy            */
+/* REVERT(dp207): producer-private publish sequence (see csd_ps_produce_pair).
+ * Single writer = the producer; the two stores below keep the odd/even
+ * window the reader validates, without paying the shared-memory LOADs the
+ * `g_csd_ps_mbox_seq += 1` RMWs implied on the zero-margin pass. */ 
+static unsigned s_pub_seq = 0u;
 extern unsigned g_csd_ps_active;   /* REVERT(dp189): defined below; the
                                     * producer refreshes it in produce_pair */
 unsigned g_csd_ps_produced  = 0;   /* witnesses (monotone, SCPI-visible)   */
@@ -202,10 +207,22 @@ void csd_ps_produce_pair(void)
     unsigned w1 = (unsigned)csd_ups_pop_active(1u, 0);
     if (s_pass_pm & 16u) { g_csd_p_pop2 += csd_ups_now() - t_p;  /* REVERT(dp201) */
                                   g_csd_p_passn++; }
-    g_csd_ps_mbox_seq += 1u;                  /* odd = publish window open */
+    /* REVERT(dp207): publish without the two cross-tile LOADS the
+     * `seq += 1` RMWs implied. WHY: armed 192k needs one producer pass per
+     * wire frame (384,000/s = 260 t at 100 MHz) and, once dp206 made the
+     * occupancy exact, the ring no longer hid a slow pass: measured passes
+     * 379,776/s (263 t) with UBM on every second pass -> 1.1% chronic
+     * shortfall, ps_fresh 343.8k vs wire_n 383.9k (10% honest holds).
+     * The producer is the ONLY writer of the mailbox sequence, so it can
+     * carry the counter in a register and issue two plain STORES: the
+     * odd/even window the reader validates is preserved exactly. Saves the
+     * two shared-memory reads (~15-20 t each) off the zero-margin pass. */
+    s_pub_seq += 1u;
+    g_csd_ps_mbox_seq = s_pub_seq;            /* odd = window open  */
     g_csd_ps_mbox_w0 = (int)w0;
     g_csd_ps_mbox_w1 = (int)w1;
-    g_csd_ps_mbox_seq += 1u;                  /* even = pair complete      */
+    s_pub_seq += 1u;
+    g_csd_ps_mbox_seq = s_pub_seq;            /* even = pair complete */
     s_produced_local++;
     g_csd_ps_seq = s_produced_local;          /* pass rate (PACE?) */
     if ((s_act_n++ & 15u) == 0u) { g_csd_ps_active = csd_ups_active(); }

@@ -183,12 +183,37 @@ static int32_t          *ups_qp[2];   /* ACTIVE per-channel ring base */
  * boundary are exactly the dp121 per-core-view class (only the malloc heap
  * is proven visible to EVERY core). */
 typedef struct { unsigned fidx, phases, rd[2], occ[2]; int32_t last[2];
-                 unsigned pushn, pushov; } ups_st_t;
+                 unsigned pushn, pushov;
+                 /* REVERT(dp206): MONOTONE occupancy. occ[] above is kept for
+                  * the snap/witness readers but is NO LONGER a decision
+                  * variable: `filled` (single writer: the commit, EQ-task
+                  * core) and `popped[]` (single writer: the producer pop,
+                  * audiohub core) are the truth, occ == filled - popped[].
+                  * WHY: occ[] was a cross-core read-modify-write (commit
+                  * `occ[c] += fill` vs pop `occ[ch]--` over the shared-memory
+                  * link, not atomic). With the wire paced to the producer the
+                  * pop phase locks to the commit phase and the two RMWs
+                  * collide DETERMINISTICALLY on the channel popped first:
+                  * measured armed 192k, image 25636e62 -- popsL 372,106/s vs
+                  * popsR 383,672/s, repsL 11,566/s vs repsR 0 (L-only ring
+                  * drain; the free-running image had repsL 0.75/s because its
+                  * drifting phase rarely collided). Two single-writer
+                  * counters cannot lose an update: the subtraction is exact
+                  * by construction, independent of cross-core ordering.
+                  * Still inside the 16-word UPS_SCAL region: 12 words used,
+                  * no heap layout change. */
+                 unsigned filled, popped[2]; } ups_st_t;
 static ups_st_t        *ups_st;   /* shared-heap scalars (dp121) */
 #define ups_rd    (ups_st->rd)
 #define ups_pushn (ups_st->pushn)
 #define ups_pushov (ups_st->pushov)
 #define ups_occ   (ups_st->occ)
+/* REVERT(dp206): exact cross-core occupancy (see ups_st_t). Single-writer
+ * counters; the difference is order-independent. */
+#define ups_filled  (ups_st->filled)
+#define ups_popped  (ups_st->popped)
+static inline unsigned ups_occ_of(unsigned c)
+{   return (unsigned)(ups_filled - ups_popped[c]); }
 #define ups_last  (ups_st->last)
 
 static unsigned        s_in_hz;            /* host stream rate          */
@@ -256,6 +281,11 @@ volatile unsigned s_pass_pm;
  * the shared heap removes one RMW per pop; semantics unchanged (last
  * POPPED live word, honest repeat). */
 static int32_t s_ups_last[2];
+/* REVERT(dp208-leangate): producer-core mirrors of the two capture/halt
+ * guards (see the /8 control-plane tick in csd_ups_pop_active). Refreshed
+ * once per 8 pops, so the per-pop path tests a register instead of loading a
+ * cross-tile global. */
+static unsigned ht_c = 0u, rc_c = 0u;
 
 /* Session 17: pop-side LEAD seed, expressed in BLOCKS of the effective ring.
  * The invariant is the reserve at the point where the capacity guard admits
@@ -568,8 +598,10 @@ static void ups_reconfigure_inner(void)
     memset(ups_scratch, 0, (CSD_UPS_MAX_TD_BLOCK_LENGTH + 8u) * 4u);
     ups_fidx = 0u;
     ups_pushn = 0u;                   /* session 14: double-buffer parity */
+    ups_filled = 0u;                  /* REVERT(dp206): monotone occupancy */
     for (unsigned c = 0u; c < 2u; c++) {
         ups_rd[c] = 0u; ups_occ[c] = 0u; ups_last[c] = 0;
+        ups_popped[c] = 0u;
     }
     if (R < 2u || R > CSD_UPS_MAX_RATIO) return;
 
@@ -868,7 +900,8 @@ void csd_ups_feed(int l, int r)
         ups_fidx = 0u;
         ups_pushn = 0u;                  /* session 14: region parity + lead
                                           * restart with the rings */
-        for (unsigned c = 0u; c < 2u; c++) { ups_rd[c] = 0u; ups_occ[c] = 0u; }
+        ups_filled = 0u;                 /* REVERT(dp206) */
+        for (unsigned c = 0u; c < 2u; c++) { ups_rd[c] = 0u; ups_occ[c] = 0u; ups_popped[c] = 0u; }
     }
     ups_in[0][ups_fidx] = (int32_t)l;
     ups_in[1][ups_fidx] = (int32_t)r;
@@ -951,9 +984,21 @@ void csd_ups_feed(int l, int r)
          * the shipped gates; only ratio 2's cap tightens (768 << 2048).
          * pushov stays as the anomaly witness: a balanced stream never
          * takes this branch. */
-        const unsigned cap = (ups_lead_seed() + 1u) * fill;
+        /* REVERT(dp206b): with EXACT occupancy (dp206) the old seed+1 cap
+         * sits exactly ON the steady-state commit value (occ drains to seed
+         * blocks per block period), so every jitter tick refused a commit:
+         * measured armed 192k -- push_over 15.9/s, blocks 1484.8/s (should
+         * be 1500), i.e. whole 128-frame blocks DROPPED. The pre-dp206 racy
+         * occ under-counted by exactly that margin, which is why the shipped
+         * image never tripped it. Grant ONE extra block of lead only where
+         * the ring keeps a spare block beyond it, so R=8 (cap 3 blocks of 4)
+         * and R=4 (cap == ring) stay byte-identical to the shipped gates and
+         * R=2 goes 3 -> 4 blocks of 8. */
+        unsigned cap = (ups_lead_seed() + 1u) * fill;
+        if (ups_ring_w >= (ups_lead_seed() + 3u) * fill) cap += fill;
         const unsigned capx = (cap < ups_ring_w) ? cap : ups_ring_w;
-        if (ups_occ[0] + fill > capx || ups_occ[1] + fill > capx) {
+        /* REVERT(dp206): exact occupancy, not the racy occ[] RMW. */
+        if (ups_occ_of(0u) + fill > capx || ups_occ_of(1u) + fill > capx) {
             ups_pushov++;
             s_in_feed = 0u;
             return;
@@ -1061,16 +1106,21 @@ void csd_ups_feed(int l, int r)
          * the pop stream is behind the parity region map). */
         if (g_csd_probe_mask & 64u) {
             s16_pbase = base;
-            s16_pocc[c] = ups_occ[c] + fill;
+            s16_pocc[c] = ups_occ_of(c) + fill;
             if (ups_qp[c][base & ups_ring_mask] != 0) s16_ovlv++;
         }
-        ups_occ[c] += fill;
+        /* REVERT(dp206): mirror for the snap/witness readers only -- the
+         * commit's SINGLE-WRITER truth is ups_filled (below, once per block
+         * outside this loop). */
+        ups_occ[c] = ups_occ_of(c) + fill;
         /* s16: ups_last now maintained by the pop side (honest last-POPPED
          * word); the old commit-time assignment published a future-block
          * word as the starvation repeat — see the pop-site comment. */
         if (s_occ_high[c] < ups_occ[c])
             s_occ_high[c] = ups_occ[c];
     }
+    /* REVERT(dp206): THE commit edge -- one store, single writer. */
+    ups_filled += fill;
     ups_pushn++;
     const unsigned dt = csd_ups_now() - t0;
     if (g_csd_probe_mask & 16u) { g_csd_eq_stage = 4u; } /* REVERT(dp201):
@@ -1218,7 +1268,17 @@ int csd_ups_pop_active(unsigned ch, int w)
          * can leave the gate open for <= 8 passes (~2 us) -- bounded and
          * pre-fill phase, same credit as the boot hold. */
         static unsigned pn_c = 0u, sd_c = 2u, pn_div = 0u;
-        if (++pn_div >= 8u) { pn_div = 0u; pn_c = ups_pushn; sd_c = ups_lead_seed(); }
+        /* REVERT(dp208-leangate): the two dead-ish guards below read
+         * CROSS-TILE globals on every pop (s_pop_halt, s_rec_on). At 192k
+         * the pass must close inside the 260.4 t wire stride and measured
+         * 262.8 t (free-run: p_tdl 67275 vs p_pndl 51200 over the window),
+         * so 3 cross-tile loads x 2 pops = the whole margin. Both are
+         * CONTROL PLANE (halt is probe/capture exclusion, rec_on flips only
+         * when a capture starts) -- sample them with pushn/seed on the same
+         * /8 tick; <=8 pops (~5 us) of staleness, same bound the lead gate
+         * already accepts for pushn. */
+        if (++pn_div >= 8u) { pn_div = 0u; pn_c = ups_pushn; sd_c = ups_lead_seed();
+                              ht_c = s_pop_halt; rc_c = s_rec_on; }
         if (pn_c < sd_c) {
             /* REVERT(s16-diag): lead-gate hold counter — words emitted through
              * the pre-commit return are invisible to the pop witnesses; this
@@ -1235,7 +1295,7 @@ int csd_ups_pop_active(unsigned ch, int w)
      * LRCLK is software-generated in this loop, so the delay is benign. */
     {   /* REVERT(dp201): timed PROBE-bit4 attribution (see witness decls). */
         unsigned t_h = (s_pass_pm & 16u) ? csd_ups_now() : 0u;
-        unsigned hw = 0u; while (s_pop_halt && hw++ < 20000000u) { }
+        unsigned hw = 0u; while (ht_c && hw++ < 20000000u) { }
         if (s_pass_pm & 16u) { unsigned d = csd_ups_now() - t_h;
             g_csd_p_halt += d; if (d > 64u) g_csd_p_halt_n++; } }
     /* dp147 REVERT: ATOMIC FEED -- pops commit only while no feed claim
@@ -1245,7 +1305,7 @@ int csd_ups_pop_active(unsigned ch, int w)
      * xsim oracle replays identically). LRCLK is software-generated and
      * the stall is bounded (same bound as dp118/dp134); gated on
      * s_rec_on so shipping behaviour (probe off) is untouched. */
-    if (s_rec_on) {
+    if (rc_c) {
         /* REVERT(dp201): timed PROBE-bit4 attribution. */
         unsigned t_f = (s_pass_pm & 16u) ? csd_ups_now() : 0u;
         unsigned fw = 0u; while (s_in_feed && fw++ < 20000000u) { }
@@ -1262,14 +1322,20 @@ int csd_ups_pop_active(unsigned ch, int w)
      * rd legitimately stalls (honest repeat) -- the witnesses tell. */
     s_pop_in_commit = 1u;              /* dp118: capture mutual exclusion */
     const unsigned phase = ups_rd[ch] & (ups_phases - 1u);
-    if (ups_occ[ch] == 0u) {
+    /* REVERT(dp206): emptiness from the monotone pair (exact across cores). */
+    if (ups_occ_of(ch) == 0u) {
         s_repeats[ch]++;               /* starvation, visible on the host */
         v = s_ups_last[ch];
     } else {
         idx_pop = ups_rd[ch];
         v = ups_qp[ch][idx_pop];
         ups_rd[ch] = (ups_rd[ch] + 1u) & ups_ring_mask;
-        ups_occ[ch]--;
+        ups_popped[ch]++;              /* REVERT(dp206): single writer */
+        /* REVERT(dp208-leangate): the occ[] mirror store is GONE. After
+         * dp206 nothing reads occ[] except the commit, which overwrites it
+         * with ups_occ_of(c)+fill on the next line; snap/diag readers use
+         * ups_occ_of(). One cross-tile store per pop (2/pass) off the
+         * 260 t pass for a value no decision and no witness consumes. */
         s_pops[ch]++;
         /* Session 16: hold-last is the last POPPED live word, not the last
          * pushed word. The commit-time assignment made a starvation repeat
@@ -1356,7 +1422,7 @@ int csd_ups_pop_active(unsigned ch, int w)
         if (s_snap_wanted && idx_pop != 0xFFFFFFFFu && kabs < 256u)
             s_snap_noowner++;
         s_pop_clock = kabs + 1u;
-        if (s_rec_on) {
+        if (rc_c) {
             const unsigned k = s_probe_pop_n;
             if (k < CSD_PROBE_RING) {
                 s_probe_pop[k][0] = s_tap_pend[0];
@@ -1395,7 +1461,7 @@ int csd_ups_pop_active(unsigned ch, int w)
             s_tap_seq++;
         }
     }
-    if (s_rec_on && idx_pop != 0xFFFFFFFFu) {
+    if (rc_c && idx_pop != 0xFFFFFFFFu) {
         /* dp95 decisive witness: re-read the consumed ring word AFTER
          * commit. Equal: the pop really delivered the ring. Different:
          * SOMETHING rewrote that entry in the same commit window — and
@@ -1716,7 +1782,7 @@ void csd_probe_snapshot(void)
             csd_probe_snap[w++] = (unsigned)ups_in[c][i];
     for (unsigned c = 0u; c < 2u; c++) {
         csd_probe_snap[w++] = ups_rd[c];
-        csd_probe_snap[w++] = ups_occ[c];
+        csd_probe_snap[w++] = ups_occ_of(c);   /* REVERT(dp206): exact */
         csd_probe_snap[w++] = (unsigned)ups_last[c];
     }
     /* THE DELIVERY RING ITSELF (dp91 fo1): rows 0..93 matched only
