@@ -83,9 +83,15 @@ linear-phase pass-sheet numbers — re-run the gates and read back reg 7 (expect
 ## Legacy POR release
 | File | Description | Commit | md5 |
 |---|---|---|---|
-| `csd-legacy-POR-094dad0b.xe` | Legacy power-on-reset factory image (`094dad0` "default FIR to linear phase slow roll off", 2025-07-10, pre-USB-refactor; 3,654,296 B). Tag `legacy-POR-release`. | `094dad0b` | `273673351e659d59ad79719e6184c8b3` |
+| `csd-legacy-POR-original.xe` | **Canonical** legacy power-on-reset factory image — the user-provided ORIGINAL factory .xe (config `2AMi2o2xxxxxd`, "XMOS (UAC2.0)", serial `123456789`, built Windows `C:/SpecialtyCircuits/usb_audio_sc`, XTC 15.3.1; 3.0 MB). Tag `legacy-POR-release` → `094dad0b`. DFU bin: `csd-dfu-upgrade-legacy-POR-original.bin`. | `094dad0b` | `d1fbea85d82ebbe1de7b51c5db5dd02c` |
 
-Built from an isolated sandbox (`~/sw-audio-sc/por094sb`) against era lib_xua (XMOS develop c4ea3f59, 5.1.0) with the same pinned flag set minus the CSD_* campaign flags. Two minimal build shims were needed (neither changes behavior; both documented in LOG.md 2026-11-16): `extern void process_xscope(chanend);` prototype (carried by XTC 15.3.0, absent in 15.3.1) and restoring the `uc_audiohw2` definition commented out at this WIP commit. Factory-flash with: `xflash -f --boot-partition-size 1048576 --factory <xe> --upgrade 1 <xe> --data bootFlash trim_journal_erased_4k.bin`.
+The canonical image is the ORIGINAL factory binary, not a rebuild. Five
+source-reconstruction attempts (era module pins, config `2AMi2o2xxxxxd`,
+lib_xua_mod fork `1b824ca1`) were all retired — see `release/RELEASE-legacy-POR.md`
+for the forensic recipe and the honest record. NOTE: this bare-POR app does not
+run on the bench unit at bus 5-2 (hardware fault: ep0 real-time failures, device
+crashes off-bus; that unit was XTAG-recovered to the modern 16e image).
+Factory-flash with: `xflash -f --boot-partition-size 1048576 --factory <xe> --upgrade 1 <xe> --data bootFlash trim_journal_erased_4k.bin`.
 
 ## Flash
 ```
