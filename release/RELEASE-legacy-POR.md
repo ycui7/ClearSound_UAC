@@ -7,6 +7,8 @@ Factory power-on-reset image, built 2026-11-16. Tag: `legacy-POR-release` → `0
 |---|---|---|
 | `csd-legacy-POR-094dad0b.xe` | `273673351e659d59ad79719e6184c8b3` | Factory image, 3,654,296 B (era DSD config) |
 | `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `302c6a86a25186004e116f27232b3d1b` | DFU upgrade slot-1 bin |
+| `csd-legacy-POR-original.xe` | THE ORIGINAL factory image as built on the original PC (XTC 15.3.1 Windows, C:/SpecialtyCircuits/usb_audio_sc). User-provided 2026-11-16. | `094dad0b` (era tree) | `d1fbea85d82ebbe1de7b51c5db5dd02c` |
+| `csd-dfu-upgrade-legacy-POR-original.bin` | DFU upgrade slot-1 bin built FROM THE ORIGINAL .xe (98,304 B) -- canonical POR restore image. | `094dad0b` (era tree) | `6f7cfaa5914db24a57a4047159a471fa` |
 
 ## Build provenance
 - Toolchain XTC 15.3.1 (user directive 2026-11-16), build system xcommon_cmake.
