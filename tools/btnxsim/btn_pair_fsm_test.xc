@@ -212,6 +212,22 @@ static void s8_partial_release_no_rearm(void)
     scenario_end(sc);
 }
 
+static void s9_double_confirm_same_press(void)
+{
+    /* Full-loop xsim sim 2026-11-16 found: two windows confirming the SAME
+     * press (double edge, no confirmed release between) must step ONCE.
+     * Pre-fix the FSM stepped on every level-1 confirmation. */
+    tw_t w; tw_init(&w);
+    const char *sc = "S9 double-confirm same press steps once";
+    expect(sc, tw_press(&w, BTN_PAIR_UP), BTN_PAIR_EV_STEP_UP, "press steps");
+    tw_edge(&w, BTN_PAIR_UP);                    /* second edge, pad stays 1 */
+    expect(sc, tw_window(&w, BTN_PAIR_UP), BTN_PAIR_EV_NONE, "re-confirm silent");
+    expect(sc, w.fsm.hold_armed, 0u, "no phantom hold arm");
+    expect(sc, tw_release(&w, BTN_PAIR_UP), BTN_PAIR_EV_NONE, "release");
+    expect(sc, tw_press(&w, BTN_PAIR_UP), BTN_PAIR_EV_STEP_UP, "new press steps");
+    scenario_end(sc);
+}
+
 static void all_tests(void)
 {
     s1_single_press();
@@ -222,6 +238,7 @@ static void all_tests(void)
     s6_bounce_during_hold();
     s7_single_after_combo();
     s8_partial_release_no_rearm();
+    s9_double_confirm_same_press();
     printf("BTNTEST-DONE rc=%d\n", failures);
 #ifdef HOST_TEST
     exit(failures ? 1 : 0);

@@ -69,7 +69,13 @@ static inline unsigned btn_pair_fsm_stable(btn_pair_fsm_t *s,
                                            unsigned which, unsigned level)
 {
     unsigned ev = BTN_PAIR_EV_NONE;
-    unsigned other;
+    unsigned other, prev;
+
+    /* Last CONFIRMED level before this one. A step fires only on a genuine
+     * 0->1 transition: two windows confirming the same press (double edge
+     * with no confirmed release in between -- found by the full-loop xsim
+     * sim 2026-11-16) must emit ONE step, not two. */
+    prev = (which == BTN_PAIR_UP) ? s->up_val : s->dn_val;
 
     if (which == BTN_PAIR_UP) { s->up_val = level; s->up_stable = 1u; }
     else                      { s->dn_val = level; s->dn_stable = 1u; }
@@ -84,7 +90,7 @@ static inline unsigned btn_pair_fsm_stable(btn_pair_fsm_t *s,
     other = (which == BTN_PAIR_UP) ? s->dn_val : s->up_val;
     if (other != 0u) {
         s->hold_armed = 1u;                  /* I2: silent combo entry */
-    } else {
+    } else if (prev == 0u) {
         ev = (which == BTN_PAIR_UP) ? BTN_PAIR_EV_STEP_UP
                                     : BTN_PAIR_EV_STEP_DOWN;   /* I1 */
     }
