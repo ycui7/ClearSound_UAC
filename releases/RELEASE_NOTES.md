@@ -56,9 +56,16 @@ L 0, R 0. Zero real mismatches.
 | `csd-relay-release-2026-11-16-linearphase.xe` | linear phase fast roll-off (`000`, default; group delay 35/fs) | `2026.11.16.7-67d107b` | `f42d2e7b95e6e54d85965577ee0b0947` |
 | `csd-relay-release-2026-11-16.xe` | same as above (canonical release name) | `2026.11.16.7-67d107b` | `f42d2e7b95e6e54d85965577ee0b0947` |
 | `csd-relay-release-2026-11-16-hybrid.xe` | hybrid fast roll-off (`110`; group delay 18.5/fs, pre-ring suppressed, −3 dB at 0.430·fs) | `2026.11.16.8-3ec09fa` | `070467f36c5c9a1505556528985eb925`, sha256 `c7a8fa59…cbefc`, 5,275,268 B |
-| `csd-relay-2026-11-16c-hybrid-btnftr.xe` | hybrid BOOT default + **two-button hold toggles the FIR at runtime** (hold VOL UP+DOWN >1 s; SCPI `DIAG:FILTer:STATe?`/`DIAG:FILTer:TOGgle`) | `2026.11.16.10-f99e7d2` | `93afccb6f811ebae7a9f85e8e6ae2d86` |
+| `csd-relay-2026-11-16d-hybrid-btnftr.xe` | hybrid BOOT default + **two-button hold toggles the FIR at runtime** (hold VOL UP+DOWN >1 s; SCPI `DIAG:FILTer:STATe?`/`DIAG:FILTer:TOGgle`) | `2026.11.16.11-f024130` | `82bcafdab2e75f1956ca7665803a9615` |
 
-The `16b`/`fbbb18b` btnftr image is **withdrawn** (md5 `0bb62c21…`, deleted):
+The `16b`/`16c` btnftr images are **withdrawn** (md5s `0bb62c21…`, `93afccb6…`,
+deleted). `16c` additionally carried a broken `DIAG:FILTer:STATe?`: the ES9219Q
+I2C READBACK PATH IS DEAD on this board -- every register, CHIP_ID included,
+answers 0x00 (measured 2026-11-16, both bench units). `16d` reports the FIR
+state from the tile-0 owner (s_filter_bits) instead; boot=HYBRID and the
+TOGgle LINEAR/HYBRID round trip verified on 8c5357f6. All historical
+`REGister:READ?` "verifications" (the 0x60 hybrid check included) were noise.
+Original `16b` defects:
 the full-loop xsim sim (`wt/tools/btnxsim/btn_deglitch_sim.xc`, 5/5 PASS)
 found two defects in it — (1) a single confirmed press could emit **two**
 volume steps (double-confirm of the same press stepped on every level-1
