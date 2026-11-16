@@ -234,7 +234,8 @@ static unsigned csd_osf_bits(void)
  * 3'b000 (linear phase) <-> 3'b110 (hybrid); the only two legal presets. */
 static unsigned s_filter_bits = ES9219Q_FILTER_SHAPE;
 static unsigned led_state  = LED_ST_SOLID_RED;
-static unsigned led_on     = 1;      /* blink phase */
+static unsigned led_on     = 1;      /* blink phase (error states) */
+static unsigned led_flt_on = 1;      /* blink phase: D2-B linear-phase flash */
 static unsigned led_tier   = 0;      /* last rate tier */
 /* Last 8D reset word requested by GPIO_WR bank 0; the renderer ORs LED bits
  * on top of it so both intents compose inside the one writer task. */
@@ -251,33 +252,45 @@ static void led_write_words(unsigned v4f, unsigned v4e, unsigned v8d, unsigned d
 
 static void led_render(void)
 {
+    unsigned v4f, v4e, v8d, d3g;
     switch (led_state) {
         case LED_ST_MUTED:       /* every lit die is blue */
-            led_write_words(0x0B, 0x0B, LED_8D_OFF_BITS, 1);
+            v4f = 0x0B; v4e = 0x0B; v8d = LED_8D_OFF_BITS; d3g = 1;
             break;
         case LED_ST_CHIPID_FAIL:
         case LED_ST_BYPASS:
-            if (led_on) led_write_words(0xD, 0x7, 0x70, 1);   /* D1-R, D2-R, D3-R */
-            else        led_write_words(0xF, 0xF, LED_8D_OFF_BITS, 1);
+            if (led_on) { v4f = 0xD; v4e = 0x7;  v8d = 0x70; d3g = 1; }  /* D1-R, D2-R, D3-R */
+            else        { v4f = 0xF; v4e = 0xF;  v8d = LED_8D_OFF_BITS; d3g = 1; }
             break;
         case LED_ST_ALL_OFF:
-            led_write_words(0xF, 0xF, LED_8D_OFF_BITS, 1);
+            v4f = 0xF; v4e = 0xF; v8d = LED_8D_OFF_BITS; d3g = 1;
             break;
         case LED_ST_RATE:
             /* Words verified against the XU316-1024-QF60A datasheet pad table +
              * current ASB netlist (LOW = lit): 4F{b1 D1-R, b2 D1-B, b3 D2-G},
              * 4E{b2 D2-B, b3 D2-R}, 8D{b6 D1-G, b7 D3-R}, 1A{D3-G}. Tiers accumulate. */
             switch (led_tier) {
-                case 1:  led_write_words(0xF, 0xF, 0xB0, 1); break;   /* D1-G */
-                case 2:  led_write_words(0x7, 0xF, 0xB0, 1); break;   /* +D2-G */
-                case 3:  led_write_words(0x7, 0xF, 0x00, 0); break;   /* +D3 yellow (D3-R b7 low, D3-G low) */
-                default: led_write_words(0x7, 0xF, 0xB0, 0); break;   /* tier4/DSD: all green */
+                case 1:  v4f = 0xF; v4e = 0xF; v8d = 0xB0; d3g = 1; break; /* D1-G */
+                case 2:  v4f = 0x7; v4e = 0xF; v8d = 0xB0; d3g = 1; break; /* +D2-G */
+                case 3:  v4f = 0x7; v4e = 0xF; v8d = 0x00; d3g = 0; break; /* +D3 yellow (D3-R b7 low, D3-G low) */
+                default: v4f = 0x7; v4e = 0xF; v8d = 0xB0; d3g = 0; break; /* tier4/DSD: all green */
             }
             break;
         default:                 /* SOLID_RED */
-            led_write_words(0xD, 0x7, 0x70, 1);
+            v4f = 0xD; v4e = 0x7; v8d = 0x70; d3g = 1;
             break;
     }
+    /* Linear-phase indication: D2 blue (4E b2, active-LOW) flashes at 1 Hz
+     * while the ES9219Q filter preset is linear phase (reg 7 [7:5] == 000).
+     * Lowest display priority -- muted (blue-solid owns the die) and the
+     * error states keep their proven display untouched. */
+    if ((led_state == LED_ST_RATE || led_state == LED_ST_ALL_OFF ||
+         led_state == LED_ST_SOLID_RED) &&
+        ((s_filter_bits >> 5) & 0x7u) == 0u) {
+        if (led_flt_on) v4e &= ~0x4u;   /* lit  (drive low) */
+        else            v4e |=  0x4u;   /* dark               */
+    }
+    led_write_words(v4f, v4e, v8d, d3g);
 }
 
 static inline void ES9219Q_REGREAD(unsigned reg, unsigned &val, client interface i2c_master_if i2c)
@@ -319,6 +332,7 @@ static void csd_filter_apply_toggle(client interface i2c_master_if i2c)
 {
     s_filter_bits ^= 0xC0u;
     csd_reg7_write(host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE, i2c);
+    led_render();     /* D2-B linear-phase flash follows the toggle now */
     debug_printf("FILTER_TOGGLE preset:%d\n", s_filter_bits >> 5u);
 }
 
@@ -864,6 +878,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         led_state = (led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF;
                     }
                 }
+                led_flt_on = !led_flt_on;         /* 1 Hz D2-B linear-phase flash */
 #ifdef CSD_PW_TRACE
                 {   /* DIAGNOSTIC (temporary): prove this select is reached,
                      * i.e. the server is not stuck inside another case. */
