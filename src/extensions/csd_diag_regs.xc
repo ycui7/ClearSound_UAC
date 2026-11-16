@@ -179,6 +179,15 @@ int csd_diag_reg_read(unsigned reg, unsigned *val)
     return 1;
 }
 
+/* Flip the codec 8x FIR preset on the tile[0] owner (see csd_diag.h). No
+ * reply: the state is readable by the caller via csd_diag_reg_read(7) >> 5. */
+void csd_diag_filter_toggle(void)
+{
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_FILTER_TOGGLE;
+    }
+}
+
 /* Soft-ramp window around an atomic kernel update (owner directive
  * 2026-11-10). One round trip per half: PRE asks the codec-server owner to
  * run the chip soft-mute ramp DOWN and wait it out, POST to unmute (the

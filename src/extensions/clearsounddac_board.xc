@@ -14,6 +14,7 @@ extern "C" {
 #include "csd_version.h"
 #include "csd_identity.h"     /* AUDIOHW_CMD_IDENTITY server: identity accessors */
 #include "button_debounce.h"
+#include "button_pair_fsm.h"
 #include "xua_defs.h"
 /* Power actuator command codes (CSD_PW_CMD_*). Included OUTSIDE the PCM_DSP_EN
  * gate on purpose: pw_execute_cmd() is compiled whenever CSD_IDLE_POWER is set,
@@ -223,6 +224,15 @@ static unsigned csd_osf_bits(void)
 {
     return s_osf_applied ? ES9219Q_BYPASS_OSF_BIT : 0u;
 }
+
+/* ---- FIR filter preset (owner request 2026-11-16) ------------------------
+ * Runtime-selected ES9219Q 8x FIR: reg 7 bits [7:5]. The compile-time macro
+ * is the BOOT default only (variant images keep their identity); the
+ * two-button hold and DIAG:FILTer toggle this at runtime. Every reg-7 write
+ * composes its top bits from here (see csd_reg7_compose), so no call site
+ * can desync the filter from the reported state. Toggle = XOR 0xC0 flips
+ * 3'b000 (linear phase) <-> 3'b110 (hybrid); the only two legal presets. */
+static unsigned s_filter_bits = ES9219Q_FILTER_SHAPE;
 static unsigned led_state  = LED_ST_SOLID_RED;
 static unsigned led_on     = 1;      /* blink phase */
 static unsigned led_tier   = 0;      /* last rate tier */
@@ -284,6 +294,32 @@ static inline void ES9219Q_REGWRITE(unsigned reg, unsigned val, client interface
 static inline void ES9219Q_PLL_REGWRITE(unsigned reg, unsigned val, client interface i2c_master_if i2c)
 {
     i2c.write_reg(ES9219Q_SYNC_I2C_DEVICE_ADDR, reg, val);
+}
+
+/* The ONE composer for reg 7 (FILTER_SHAPE & SYSTEM_MUTE): filter bits from
+ * s_filter_bits, OSF bit from csd_osf_bits(), everything else (mute etc.)
+ * from the caller. This is both the single source of truth for the filter
+ * state and the funnel that already denied call sites the OSF bit; the
+ * REGWR proxy funnels through it too, so SCPI cannot desync the filter. */
+static unsigned csd_reg7_compose(unsigned low)
+{
+    return (s_filter_bits & 0xE0u)
+         | (csd_osf_bits() & 0x08u)
+         | (low & ~0xE8u);
+}
+
+static void csd_reg7_write(unsigned low, client interface i2c_master_if i2c)
+{
+    ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE, csd_reg7_compose(low), i2c);
+}
+
+/* One implementation of the filter flip, shared by the button hold path and
+ * the AUDIOHW_CMD_FILTER_TOGGLE (SCPI) path so the two can never drift. */
+static void csd_filter_apply_toggle(client interface i2c_master_if i2c)
+{
+    s_filter_bits ^= 0xC0u;
+    csd_reg7_write(host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE, i2c);
+    debug_printf("FILTER_TOGGLE preset:%d\n", s_filter_bits >> 5u);
 }
 
 #define VOL_INTERNAL_MIN_DB8 (-64 * 256)
@@ -521,9 +557,7 @@ static void vol_apply_host_mute(unsigned muted, client interface i2c_master_if i
     if (muted != host_muted)
     {
         host_muted = muted;
-        ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-            (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
-             (muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+        csd_reg7_write((muted ? ES9219Q_MUTE : ES9219Q_UNMUTE), i2c);
         led_state = muted ? LED_ST_MUTED
                           : ((led_tier != 0) ? LED_ST_RATE : LED_ST_ALL_OFF);
         led_render();
@@ -599,8 +633,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
             led_render();
             break;
         case CSD_PW_CMD_DAC_OFF:
-            ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-                (ES9219Q_FILTER_SHAPE | csd_osf_bits() | ES9219Q_MUTE), i2c);
+            csd_reg7_write(ES9219Q_MUTE, i2c);
             /* DAC_MUTE_N = 8D bit4 low, and hold the codec in reset. */
             gpio_8d_reset &= ~0x30u;
             led_render();
@@ -667,6 +700,19 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
     timer btn_up_tmr, btn_dn_tmr;
     unsigned btn_up_to = 0, btn_dn_to = 0;
     const unsigned BTN_DEBOUNCE_TICKS = 5000000u;   /* 50 ms @ 100 MHz */
+    /* Two-button hold (owner request 2026-11-16): BOTH buttons stably
+     * pressed for >1 s toggles the codec FIR preset. Decision logic is the
+     * pure btn_pair_fsm_* functions (xsim-proven 2026-11-16, 8 scenarios);
+     * this select loop is the wrapper: edges arm the windows, window expiry
+     * RE-SAMPLES the pad (2026-11-16 fix: the old code acted on the value
+     * latched at the edge, so a sub-window spike could phantom-step the
+     * volume), and a third timer measures the hold. Arm it whenever
+     * hold_armed rises; the FSM validates stability at expiry. */
+    btn_pair_fsm_t btn_pair;
+    btn_pair_fsm_init(&btn_pair);
+    timer btn_both_tmr;
+    unsigned btn_both_to = 0, do_both = 0;
+    const unsigned BTN_HOLD_TICKS = 100u * BTN_DEBOUNCE_TICKS;  /* 1 s */
     set_port_pull_down(p_butt_up);
     set_port_pull_down(p_butt_down);
 
@@ -877,9 +923,14 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                      * says, so no call site can quietly re-enable the chip's
                      * FIR while the option is on. */
                     if (regAddr == ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE) {
-                        regValue = (regValue & ~ES9219Q_BYPASS_OSF_BIT) | csd_osf_bits();
+                        regValue = csd_reg7_compose(regValue);
                     }
                     ES9219Q_REGWRITE(regAddr, regValue, i2c);
+                }
+                else if (cmd == AUDIOHW_CMD_FILTER_TOGGLE)
+                {
+                    /* SCPI hook: same implementation as the button hold. */
+                    csd_filter_apply_toggle(i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_HWCFG_RATE)
                 {
@@ -1340,9 +1391,7 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 else if (cmd == AUDIOHW_CMD_MUTE_RESYNC)
                 {
                     /* AudioHwConfig's unmute just overwrote reg 7; re-assert mute. */
-                    ES9219Q_REGWRITE(ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE,
-                        (ES9219Q_FILTER_SHAPE | csd_osf_bits() |
-                         (host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE)), i2c);
+                    csd_reg7_write(host_muted ? ES9219Q_MUTE : ES9219Q_UNMUTE, i2c);
                 }
                 else if (cmd == AUDIOHW_CMD_EXIT)
                 {
@@ -1358,32 +1407,63 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
              * task entry); act on the edge confirmed stable for the window. */
             case btn_up_stable => p_butt_up when pinsneq(btn_up_val) :> btn_up_val:
                 btn_up_stable = 0;
+                btn_pair_fsm_edge(&btn_pair, BTN_PAIR_UP);
                 btn_up_tmr :> btn_up_to;
                 btn_up_to += BTN_DEBOUNCE_TICKS;
                 break;
             case !btn_up_stable => btn_up_tmr when timerafter(btn_up_to) :> void:
                 btn_up_stable = 1;
-                if (btn_up_val == 1) {                  /* confirmed press */
-                    volBtnDb8 += VOL_BTN_STEP_DB8;      /* +1 dB */
-                    vol_clamp_button();
-                    debug_printf("BTN_UP btn88:%d\n", volBtnDb8);
-                    vol_apply_all(i2c);
+                p_butt_up :> btn_up_val;                    /* RE-SAMPLE pad */
+                {
+                    unsigned ev = btn_pair_fsm_stable(&btn_pair, BTN_PAIR_UP,
+                                                      btn_up_val);
+                    if (ev == BTN_PAIR_EV_STEP_UP) {        /* confirmed press */
+                        volBtnDb8 += VOL_BTN_STEP_DB8;      /* +1 dB */
+                        vol_clamp_button();
+                        debug_printf("BTN_UP btn88:%d\n", volBtnDb8);
+                        vol_apply_all(i2c);
+                    }
+                    if (btn_pair.hold_armed && !do_both) {  /* arm the 1 s hold */
+                        do_both = 1;
+                        btn_both_tmr :> btn_both_to;
+                        btn_both_to += BTN_HOLD_TICKS;
+                    }
                 }
                 break;
 
             case btn_dn_stable => p_butt_down when pinsneq(btn_dn_val) :> btn_dn_val:
                 btn_dn_stable = 0;
+                btn_pair_fsm_edge(&btn_pair, BTN_PAIR_DOWN);
                 btn_dn_tmr :> btn_dn_to;
                 btn_dn_to += BTN_DEBOUNCE_TICKS;
                 break;
             case !btn_dn_stable => btn_dn_tmr when timerafter(btn_dn_to) :> void:
                 btn_dn_stable = 1;
-                if (btn_dn_val == 1) {                  /* confirmed press */
-                    volBtnDb8 -= VOL_BTN_STEP_DB8;      /* -1 dB */
-                    vol_clamp_button();
-                    debug_printf("BTN_DOWN btn88:%d\n", volBtnDb8);
-                    vol_apply_all(i2c);
+                p_butt_down :> btn_dn_val;                  /* RE-SAMPLE pad */
+                {
+                    unsigned ev = btn_pair_fsm_stable(&btn_pair, BTN_PAIR_DOWN,
+                                                      btn_dn_val);
+                    if (ev == BTN_PAIR_EV_STEP_DOWN) {      /* confirmed press */
+                        volBtnDb8 -= VOL_BTN_STEP_DB8;      /* -1 dB */
+                        vol_clamp_button();
+                        debug_printf("BTN_DOWN btn88:%d\n", volBtnDb8);
+                        vol_apply_all(i2c);
+                    }
+                    if (btn_pair.hold_armed && !do_both) {
+                        do_both = 1;
+                        btn_both_tmr :> btn_both_to;
+                        btn_both_to += BTN_HOLD_TICKS;
+                    }
                 }
+                break;
+
+            /* 1 s of BOTH buttons: the FSM re-validates (pressed AND stable
+             * AND not fired yet) and decides; we only act. Re-arm after a
+             * mid-hold bounce happens through the window-expiry path above. */
+            case do_both => btn_both_tmr when timerafter(btn_both_to) :> void:
+                do_both = 0;
+                if (btn_pair_fsm_hold_expired(&btn_pair) == BTN_PAIR_EV_FILTER_TOGGLE)
+                    csd_filter_apply_toggle(i2c);
                 break;
         }
     }

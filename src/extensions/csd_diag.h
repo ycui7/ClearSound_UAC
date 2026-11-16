@@ -85,6 +85,9 @@ unsigned csd_diag_reg_writes(void);      /* host codec writes through us */
  * bus. Both MAY BLOCK on that core. Return 0 on failure; the caller turns a 0
  * into an SCPI hardware error rather than reporting a stale value. */
 int csd_diag_reg_read(unsigned reg, unsigned *val);
+/* Flip the ES9219Q 8x FIR preset (linear phase <-> hybrid) on the codec
+ * server owner; fire-and-forget, state is readable via reg 7 [7:5]. */
+void csd_diag_filter_toggle(void);
 
 /* Kernel-update soft-ramp halves (see AUDIOHW_CMD_KRNL_SEQ_* and
  * csd_diag_scpi.c krnl_update_seq). post=0: ramp down and wait it out;

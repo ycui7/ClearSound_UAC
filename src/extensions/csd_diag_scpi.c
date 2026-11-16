@@ -427,6 +427,26 @@ static size_t b64_encode(const unsigned char *in, size_t n, char *out, size_t ca
  * checked would decode as a plausible-looking register map. */
 #define CSD_REG_MAX 64u
 
+/* FIR preset (owner request 2026-11-16). State is READ from the codec itself
+ * (reg 7 [7:5]) rather than a tile-1 mirror: the truth is what is on the
+ * wire, and the tile-0 writer composes it from s_filter_bits on every reg-7
+ * publish. TOGgle rides the same command the two-button hold uses. */
+static SCPI_FPTR_CMD scpi_result_t q_filter_state(scpi_t *context)
+{
+    unsigned v = 0;
+    if (!csd_diag_reg_read(0x07u, &v)) { push_hw_error(context); return SCPI_RES_ERR; }
+    const char *s = (((v >> 5) & 7u) == 6u) ? "HYBRID" : "LINEAR";
+    SCPI_ResultCharacters(context, s, strlen(s));
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t cmd_filter_toggle(scpi_t *context)
+{
+    (void) context;
+    csd_diag_filter_toggle();
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t reg_read_q(scpi_t *context)
 {
     char txt[4 * CSD_REG_MAX + 8];
@@ -3294,6 +3314,10 @@ static const scpi_command_t csd_commands[] = {
      * SCPI_Param*() inside the callback. */
     { .pattern = "REGister:READ?",  .callback = reg_read_q },
     { .pattern = "REGister:WRITE",  .callback = reg_write  },
+
+    /* FIR preset select (two-button hold companion, 2026-11-16). */
+    { .pattern = "DIAG:FILTer:STATe?", .callback = q_filter_state },
+    { .pattern = "DIAG:FILTer:TOGgle", .callback = cmd_filter_toggle },
 
     /* Function generator. Set and query halves are separate entries, and no
      * pattern carries a parameter placeholder -- both rules established by

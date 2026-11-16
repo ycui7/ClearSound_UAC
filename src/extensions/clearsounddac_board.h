@@ -77,7 +77,12 @@ typedef enum
      * MUTE (host mute still wins), restore Reg 6 to its boot rate. No-op
      * while powered down: the wake path re-applies every codec register. */
     AUDIOHW_CMD_KRNL_SEQ_PRE,
-    AUDIOHW_CMD_KRNL_SEQ_POST
+    AUDIOHW_CMD_KRNL_SEQ_POST,
+    /* Two-button hold (owner request 2026-11-16): flip the codec 8x FIR
+     * between linear phase (reg 7 [7:5]=000) and hybrid (110). Carried by
+     * the button FSM AND the SCPI DIAG:FILTer hook; no argument, no reply.
+     * Appended per the positional-enum rule at the top of this list. */
+    AUDIOHW_CMD_FILTER_TOGGLE
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 
