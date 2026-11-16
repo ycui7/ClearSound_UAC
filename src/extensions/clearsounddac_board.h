@@ -82,7 +82,13 @@ typedef enum
      * between linear phase (reg 7 [7:5]=000) and hybrid (110). Carried by
      * the button FSM AND the SCPI DIAG:FILTer hook; no argument, no reply.
      * Appended per the positional-enum rule at the top of this list. */
-    AUDIOHW_CMD_FILTER_TOGGLE
+    AUDIOHW_CMD_FILTER_TOGGLE,
+    /* FIR preset READBACK. The codec's I2C read path is dead on this board
+     * (every register, CHIP_ID included, reads 0x00 -- measured 2026-11-16),
+     * so the truth is the tile[0] owner's s_filter_bits. Reply: preset
+     * value, reg 7 [7:5] (6 = hybrid, 0 = linear). Appended per the
+     * positional-enum rule. */
+    AUDIOHW_CMD_FILTER_STATE
 } audioHwCmd_t;
 
 /** Starts an I2C master server task. Must be started *before* the tile[1] csd_AudioHwInit calls. 

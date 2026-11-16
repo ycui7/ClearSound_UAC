@@ -188,6 +188,16 @@ void csd_diag_filter_toggle(void)
     }
 }
 
+unsigned csd_diag_filter_state(void)
+{
+    unsigned preset = 0;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_FILTER_STATE;
+        uc_audiohw_diag :> preset;
+    }
+    return preset;
+}
+
 /* Soft-ramp window around an atomic kernel update (owner directive
  * 2026-11-10). One round trip per half: PRE asks the codec-server owner to
  * run the chip soft-mute ramp DOWN and wait it out, POST to unmute (the

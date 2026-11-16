@@ -925,6 +925,11 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                      * says, so no call site can quietly re-enable the chip's
                      * FIR while the option is on. */
                     if (regAddr == ES9219Q_FILTER_SHAPE_N_SYSTEM_MUTE) {
+                        /* Adopt the writer's filter bits into the mirror
+                         * BEFORE composing, so a SCPI REGister:WRITE of reg 7
+                         * moves the state of record too (else the mirror and
+                         * the wire desync). OSF/mute composition follows. */
+                        s_filter_bits = regValue & 0xE0u;
                         regValue = csd_reg7_compose(regValue);
                     }
                     ES9219Q_REGWRITE(regAddr, regValue, i2c);
@@ -933,6 +938,12 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                 {
                     /* SCPI hook: same implementation as the button hold. */
                     csd_filter_apply_toggle(i2c);
+                }
+                else if (cmd == AUDIOHW_CMD_FILTER_STATE)
+                {
+                    /* The codec cannot be read back (dead I2C read path);
+                     * the owner's s_filter_bits IS the state last published. */
+                    c[i] <: ((s_filter_bits >> 5u) & 7u);
                 }
                 else if (cmd == AUDIOHW_CMD_HWCFG_RATE)
                 {

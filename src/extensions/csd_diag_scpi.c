@@ -427,15 +427,15 @@ static size_t b64_encode(const unsigned char *in, size_t n, char *out, size_t ca
  * checked would decode as a plausible-looking register map. */
 #define CSD_REG_MAX 64u
 
-/* FIR preset (owner request 2026-11-16). State is READ from the codec itself
- * (reg 7 [7:5]) rather than a tile-1 mirror: the truth is what is on the
- * wire, and the tile-0 writer composes it from s_filter_bits on every reg-7
- * publish. TOGgle rides the same command the two-button hold uses. */
+/* FIR preset (owner request 2026-11-16). Reported from the tile[0] OWNER's
+ * state of record (s_filter_bits), NOT a codec read: the ES9219Q I2C read
+ * path on this board answers 0x00 for EVERY register -- CHIP_ID reads 0
+ * (measured 2026-11-16, both bench units) -- so any codec-read status was
+ * fiction, including the pre-funnel REGister:READ? "verifications".
+ * TOGgle rides the same command the two-button hold uses. */
 static SCPI_FPTR_CMD scpi_result_t q_filter_state(scpi_t *context)
 {
-    unsigned v = 0;
-    if (!csd_diag_reg_read(0x07u, &v)) { push_hw_error(context); return SCPI_RES_ERR; }
-    const char *s = (((v >> 5) & 7u) == 6u) ? "HYBRID" : "LINEAR";
+    const char *s = (csd_diag_filter_state() == 6u) ? "HYBRID" : "LINEAR";
     SCPI_ResultCharacters(context, s, strlen(s));
     return SCPI_RES_OK;
 }

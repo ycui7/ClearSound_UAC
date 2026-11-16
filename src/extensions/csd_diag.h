@@ -89,6 +89,11 @@ int csd_diag_reg_read(unsigned reg, unsigned *val);
  * server owner; fire-and-forget, state is readable via reg 7 [7:5]. */
 void csd_diag_filter_toggle(void);
 
+/* FIR preset of record: the tile[0] owner's s_filter_bits >> 5
+ * (6 = hybrid, 0 = linear). The codec's I2C read path is dead (all regs
+ * read 0, CHIP_ID included), so csd_diag_reg_read() CANNOT be the source. */
+unsigned csd_diag_filter_state(void);
+
 /* Kernel-update soft-ramp halves (see AUDIOHW_CMD_KRNL_SEQ_* and
  * csd_diag_scpi.c krnl_update_seq). post=0: ramp down and wait it out;
  * post=1: unmute (chip ramps back to the volume registers' level) and
