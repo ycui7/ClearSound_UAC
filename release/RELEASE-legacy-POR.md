@@ -5,8 +5,8 @@ Factory power-on-reset image, built 2026-11-16. Tag: `legacy-POR-release` → `0
 
 | File | md5 | Notes |
 |---|---|---|
-| `csd-legacy-POR-094dad0b.xe` | `50c5c9a48dba77cce0afe40c1a2e839e` | Factory image, 2,956,928 B |
-| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `217c086a1d630fc74b8e44014846ce29` | DFU upgrade slot-1 bin |
+| `csd-legacy-POR-094dad0b.xe` | `8baa27232d64a7480ccf028305df93a9` | Factory image, 3,654,296 B (era DSD config) |
+| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `445cfa9aae6169838b4a669088ded0aa` | DFU upgrade slot-1 bin |
 
 ## Build provenance
 - Toolchain XTC 15.3.1 (user directive 2026-11-16), build system xcommon_cmake.
@@ -24,9 +24,14 @@ Factory power-on-reset image, built 2026-11-16. Tag: `legacy-POR-release` → `0
   lib_locks 3076f7f, lib_logging b8e939c, lib_mic_array 8620978, lib_spdif 9bfeff3,
   lib_xassert c8b59c9, lib_xcore_math 175dd19, lib_xud cd126400,
   lib_audio_dsp d9c15049, lib_board_support 921c3a1, lib_i2s 2cae684, libscpi 698eabe.
-- Build config = era Makefile name `2AMi2o2xxxxxx` with the VERBATIM BUILD_FLAGS
-  (no DSD, no forced feedback, BOARD_SUPPORT_BOARD set; only the two linker-only
-  -Xmapper map flags dropped, the cmake harness hands them to xcc).
+- Build config = the ERA-COMMITTED `CMakeLists.txt` at 094dad0b (byte-identical to
+  git blob 37deca90; config `2AMi2o2xxxxxd` incl. era NATIVE_DSD/DSD_CHANS_DAC/
+  UAC_FORCE_FEEDBACK -- the user's actual July build path; build_run.bat ran
+  bin\2AMi2o2xxxxxd). deps.cmake = lib_xua, lib_i2c, lib_sw_pll: the era app src
+  `git grep`s clean of scpi/audio_dsp/board_support/i2s (libscpi cmake integration
+  is only from 2026-10-30 -- provably not July 2025). Sole extra define:
+  -DSPECIALTYCIRCUITS_RELEASE (factory identity, in the build lineage since
+  2025-01-25; field POR units enumerated ClearSound DAC (UAC2.0)/UHA3-000-001).
 - Two build shims, behavior-neutral, documented in `~/sw-audio-sc/LOG.md` (2026-11-16 late-3):
   1. `extern void process_xscope(chanend);` prototype in `lib_xua/src/core/main.xc`
      (carried by XTC 15.3.0, absent in 15.3.1).
