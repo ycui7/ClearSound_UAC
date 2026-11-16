@@ -79,6 +79,13 @@ changes the codec's 8× FIR, which the analog loopback sees: do NOT reuse the
 linear-phase pass-sheet numbers — re-run the gates and read back reg 7 (expect
 0x60) before certifying hybrid.
 
+## Legacy POR release
+| File | Description | Commit | md5 |
+|---|---|---|---|
+| `csd-legacy-POR-094dad0b.xe` | Legacy power-on-reset factory image (`094dad0` "default FIR to linear phase slow roll off", 2025-07-10, pre-USB-refactor; 3,654,296 B). Tag `legacy-POR-release`. | `094dad0b` | `0d5535697feda5eda367d7002cb8419d` |
+
+Built from an isolated sandbox (`~/sw-audio-sc/por094sb`) against era lib_xua (XMOS develop c4ea3f59, 5.1.0) with the same pinned flag set minus the CSD_* campaign flags. Two minimal build shims were needed (neither changes behavior; both documented in LOG.md 2026-11-16): `extern void process_xscope(chanend);` prototype (carried by XTC 15.3.0, absent in 15.3.1) and restoring the `uc_audiohw2` definition commented out at this WIP commit. Factory-flash with: `xflash -f --boot-partition-size 1048576 --factory <xe> --upgrade 1 <xe> --data bootFlash trim_journal_erased_4k.bin`.
+
 ## Flash
 ```
 bash ~/.hermes/skills/clearsound-dac-xmos/scripts/flash_verified.sh <ABS path to .xe> f42d2e7b95e6e54d85965577ee0b0947
