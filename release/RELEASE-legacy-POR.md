@@ -5,8 +5,8 @@ Factory power-on-reset image, built 2026-11-16. Tag: `legacy-POR-release` → `0
 
 | File | md5 | Notes |
 |---|---|---|
-| `csd-legacy-POR-094dad0b.xe` | `8baa27232d64a7480ccf028305df93a9` | Factory image, 3,654,296 B (era DSD config) |
-| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `445cfa9aae6169838b4a669088ded0aa` | DFU upgrade slot-1 bin |
+| `csd-legacy-POR-094dad0b.xe` | `35b307db783efa91e1a6ee46fc4e0d4d` | Factory image, 3,654,296 B (era DSD config) |
+| `csd-dfu-upgrade-legacy-POR-094dad0b.bin` | `711aafd4cc15662b99c8aa99db522644` | DFU upgrade slot-1 bin |
 
 ## Build provenance
 - Toolchain XTC 15.3.1 (user directive 2026-11-16), build system xcommon_cmake.
