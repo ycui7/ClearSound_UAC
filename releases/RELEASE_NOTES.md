@@ -50,6 +50,25 @@ Zero-frame exclusions: exactly one head run per capture equal to the played 0.85
 lead-in zeros (run length == −d, proven per tag). No other zeros. low8 non-zero:
 L 0, R 0. Zero real mismatches.
 
+## Gates — HYBRID re-cert all PASS (image `4560ae64` = `16e`, one cold boot per rate, 2026-11-16)
+The "do NOT reuse linear-phase numbers" instruction is discharged: the suite was
+re-run cold per rate on the hybrid fleet image. `DIAG:FILTer:STATe?` (tile-0 owner
+mirror — I2C readback is dead) answered HYBRID on all 5 boots; stamp
+`2026.11.16.13-6aec215` on every boot. Harness: `scratch/hybgate_all.sh`
+(capv4_pass 16 s pattern → pass_verify → mic_tone_fft), log `/tmp/hybgate.log`.
+
+| Gate | Result |
+|---|---|
+| Relay 384k | 6,095,278/6,095,278 = **1.0000000** (d=−1005), low8 L0 R0 |
+| Relay 192k | 3,034,366/3,034,366 = **1.0000000** (d=−13776), low8 L0 R0 |
+| Relay 192k (2nd boot) | 3,035,323/3,035,323 = **1.0000000** (d=−12818), low8 L0 R0 |
+| Relay 96k | 1,517,456/1,517,456 = **1.0000000** (d=−6615), low8 L0 R0 |
+| Relay 48k | 758,702/758,702 = **1.0000000** (d=−3334), low8 L0 R0 |
+| FFT per fs | CLEAN ×4 (48/96/192/384k), PAC pop/pick counters all 0 |
+| Repeat-boot identity 192k | rigid-offset-aligned: **0 differing frames / 3,034,366** (payload24 and raw32 word-exact); naive frame-0 compare shifts by the boot head-offset delta (958 frames) — align content starts first |
+| Arming refused (48k) | `DIAG:STATe 1` + `DIAG:UPSAMPLing:PRESet 2` accepted; `DIAG:UPSAMPLing:INFO?` want/enabled/armed = 0,0,0; `*IDN?` ×5 alive, no wedge |
+
+
 ## Filter variants (reg 7 [7:5], ES9219Q_FILTER_SHAPE)
 | File | Filter | Build id | md5 |
 |---|---|---|---|
@@ -78,7 +97,10 @@ enable it.
 The gate suite below was certified on the LINEAR-PHASE build. The hybrid build
 changes the codec's 8× FIR, which the analog loopback sees: do NOT reuse the
 linear-phase pass-sheet numbers — re-run the gates and read back reg 7 (expect
-0x60) before certifying hybrid.
+0x60) before certifying hybrid. **DISCHARGED 2026-11-16: hybrid re-cert above
+(image `4560ae64`, 16e) — all gates PASS. Reg-7 readback expectation superseded:
+I2C readback is dead; `DIAG:FILTer:STATe?` owner mirror answered HYBRID on all
+five boots.**
 
 ## Legacy POR release
 | File | Description | Commit | md5 |
