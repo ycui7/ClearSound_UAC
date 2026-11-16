@@ -56,7 +56,16 @@ L 0, R 0. Zero real mismatches.
 | `csd-relay-release-2026-11-16-linearphase.xe` | linear phase fast roll-off (`000`, default; group delay 35/fs) | `2026.11.16.7-67d107b` | `f42d2e7b95e6e54d85965577ee0b0947` |
 | `csd-relay-release-2026-11-16.xe` | same as above (canonical release name) | `2026.11.16.7-67d107b` | `f42d2e7b95e6e54d85965577ee0b0947` |
 | `csd-relay-release-2026-11-16-hybrid.xe` | hybrid fast roll-off (`110`; group delay 18.5/fs, pre-ring suppressed, −3 dB at 0.430·fs) | `2026.11.16.8-3ec09fa` | `070467f36c5c9a1505556528985eb925`, sha256 `c7a8fa59…cbefc`, 5,275,268 B |
-| `csd-relay-2026-11-16b-hybrid-btnftr.xe` | hybrid BOOT default + **two-button hold toggles the FIR at runtime** (hold VOL UP+DOWN >1 s; SCPI `DIAG:FILTer:STATe?`/`DIAG:FILTer:TOGgle`) | `2026.11.16.9-fbbb18b` | `0bb62c21d2297b5dfd8c860e6f0b5a7f`, sha256 `bebc5ad1…9b531`, 5,314,516 B |
+| `csd-relay-2026-11-16c-hybrid-btnftr.xe` | hybrid BOOT default + **two-button hold toggles the FIR at runtime** (hold VOL UP+DOWN >1 s; SCPI `DIAG:FILTer:STATe?`/`DIAG:FILTer:TOGgle`) | `2026.11.16.10-f99e7d2` | `93afccb6f811ebae7a9f85e8e6ae2d86` |
+
+The `16b`/`fbbb18b` btnftr image is **withdrawn** (md5 `0bb62c21…`, deleted):
+the full-loop xsim sim (`wt/tools/btnxsim/btn_deglitch_sim.xc`, 5/5 PASS)
+found two defects in it — (1) a single confirmed press could emit **two**
+volume steps (double-confirm of the same press stepped on every level-1
+window; fixed by gating I1 on a 0→1 confirmed transition), (2) the combo
+hold was **5 s, not 1 s** (`100 × 50 ms`; fixed to `20 ×`). Fleet units are
+still on the `16` hybrid build without the button feature; flash `16c` to
+enable it.
 
 The gate suite below was certified on the LINEAR-PHASE build. The hybrid build
 changes the codec's 8× FIR, which the analog loopback sees: do NOT reuse the
