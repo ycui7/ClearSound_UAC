@@ -57,6 +57,7 @@ L 0, R 0. Zero real mismatches.
 | `csd-relay-release-2026-11-16.xe` | same as above (canonical release name) | `2026.11.16.7-67d107b` | `f42d2e7b95e6e54d85965577ee0b0947` |
 | `csd-relay-release-2026-11-16-hybrid.xe` | hybrid fast roll-off (`110`; group delay 18.5/fs, pre-ring suppressed, −3 dB at 0.430·fs) | `2026.11.16.8-3ec09fa` | `070467f36c5c9a1505556528985eb925`, sha256 `c7a8fa59…cbefc`, 5,275,268 B |
 | `csd-relay-2026-11-16d-hybrid-btnftr.xe` | hybrid BOOT default + **two-button hold toggles the FIR at runtime** (hold VOL UP+DOWN >1 s; SCPI `DIAG:FILTer:STATe?`/`DIAG:FILTer:TOGgle`) | `2026.11.16.11-f024130` | `82bcafdab2e75f1956ca7665803a9615` |
+| `csd-relay-2026-11-16e-hybrid-btnftr-led.xe` | Adds D2-blue 1 Hz flash while linear phase enabled (lowest display priority; mute/error display untouched). | `6aec215` | `4560ae6476256deda57d426fed464dc1` |
 
 The `16b`/`16c` btnftr images are **withdrawn** (md5s `0bb62c21…`, `93afccb6…`,
 deleted). `16c` additionally carried a broken `DIAG:FILTer:STATe?`: the ES9219Q
