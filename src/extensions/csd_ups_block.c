@@ -39,6 +39,7 @@
  * audio thread reads.
  */
 #include "csd_ups_block.h"
+#include "csd_errlog.h"   /* bench-death forensics (LOG 2026-11-18) */
 #include "csd_ups_block_conf.h"
 #include "csd_eq_ring.h"   /* 11.11.39: arm posts a task re-adoption */
 #include <string.h>
@@ -108,6 +109,17 @@ static void csd_ups_push_feed_owner(void);
 static void ups_reconfigure(unsigned site); /* wrapper defined with the publisher */
 /* REVERT(s15-diag): per-site reconfigure attribution (periodic ring-reset hunt). */
 static unsigned s_rc_total, s_rc_site[4], s_rc_last;
+/* REVERT(bench r8-rc): H1/H2/H3 discrimination witnesses. Writer: audio core. */
+unsigned s_rep_ph[2][8];                  /* repeats bucketed by phase */
+unsigned s_occ_low[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+unsigned s_rep_run, s_rep_run_max;
+unsigned s_pub_dup;
+static int      s_mir_lastw1 = 0x7FFFFFFF;
+unsigned s_off_hist[8];
+unsigned *s_probe_pop_fr;
+unsigned s_rec_force;   /* REVERT(bench r8): PROBE arms recorder without feed trigger */   /* REVERT(bench r8): 0 fresh 1 repeat 2 n/a */
+unsigned s_rc_midstream, s_rc_pop;
+volatile unsigned g_csd_pop_phase_live;
 /* EXPERIMENT 11.11.34: arm-generation handoff (REVERT with the tap).
  * ups_fidx survives across streams (only ups_reconfigure resets it), so a
  * newly armed stream started its 128-frame block grid at an unknown phase
@@ -115,6 +127,7 @@ static unsigned s_rc_total, s_rc_site[4], s_rc_last;
  * itself on the first armed feed after each arm (single-writer preserved:
  * SCPI only bumps the generation counter). */
 static volatile unsigned s_arm_gen  = 0u;
+unsigned g_csd_want1 = 0u;   /* REVERT(bench): raw set_want(1) call count */
 static unsigned          s_arm_seen = 0xFFFFFFFFu;
 
 void     csd_ups_set_want(unsigned w)
@@ -128,8 +141,26 @@ void     csd_ups_set_want(unsigned w)
      * board never forces a wire rate and the engine never arms. */
     w = 0u;
 #endif
+    g_csd_want1 += (w ? 1u : 0u);   /* REVERT(bench): raw set_want witness */
+    /* ROOT-CAUSE FIX (2026-11-17): the arm epoch must bump ONLY on a real
+     * 0->1 transition. csd_AudioHwConfig re-runs on every audiohub loop
+     * wake and re-applies the persisted trim via this entry point every
+     * time; the unconditional s_arm_gen++ made the feed-side new-arm reset
+     * (this file, s_arm_seen != s_arm_gen) re-zero ups_fidx/ups_pushn on
+     * EVERY call, so the 128-frame block boundary was never reached: no
+     * polyphase compute, empty pop ring, zero-order-hold wire. Masked in
+     * RELEASE by the w=0 refusal; every armed debug-era capture inherited
+     * it. The 11.11.39 no-op EQ post stays on every call (revival purpose
+     * served), only the epoch bump is now edge-triggered. */
+    const unsigned want_prev = s_want;
     s_want = w ? 1u : 0u;
-                                        if (w) s_arm_gen++;
+                                        if (w && !want_prev) s_arm_gen++;
+                                        /* ARM/DISARM journalled by the DIAG
+                                         * core (channel owner) in
+                                         * csd_diag_ups_want — this tile[1]
+                                         * task must never post: its writes
+                                         * are invisible to the tile[0]
+                                         * drain (2026-11-19 rule). */
                                         /* 11.11.39 (REVERT-tagged bisect): every
                                          * arm/disarm posts a no-op EQ config so
                                          * the task runs its full PAUSE -> drain
@@ -346,6 +377,14 @@ int      csd_mir_q0[CSD_MIR_Q];
 int      csd_mir_q1[CSD_MIR_Q];
 unsigned csd_mir_prod_n = 0u;
 static unsigned   s_mir_k = 0u;    /* pairs published (writer-private) */
+/* REVERT(dp204-workaround 2026-11-17): local R-pop counter. Under the
+ * emit-first pipeline (lib_xua 82a3f9bd) the ring `phase` no longer walks
+ * 0..R-1 (observed stuck at the tap slot: tap fires on EVERY R-pop, the
+ * phase==0 publish never runs -> armed mic frozen). The pop ORDER is still
+ * wire order, so publishing every 8th R-pop is a fixed-rate decimation at a
+ * fixed (unknown) phase; the scorer identifies the phase. Remove with the
+ * phase bookkeeping fix. */
+static unsigned   s_mir_popcnt = 0u;
 
 /* Session 17: pop-side LEAD seed, expressed in BLOCKS of the effective ring.
  * The invariant is the reserve at the point where the capacity guard admits
@@ -408,6 +447,14 @@ static unsigned ups_lead_seed(void)
 /* probe statics defined at EOF (DP-window placement); visible here */
 extern volatile unsigned s_probe_on, s_probe_base, s_probe_popbase;
 extern volatile unsigned s_rec_on;
+unsigned g_csd_ft1 = 0u, g_csd_ft2 = 0u, g_csd_ft3 = 0u;  /* REVERT(bench) */
+unsigned g_csd_bp = 0u;                                       /* REVERT(bench): block pushes */
+unsigned csd_ups_dbg_want1(void){ return g_csd_want1; }
+unsigned csd_ups_dbg_armgen(void){ return s_arm_gen; }
+unsigned csd_ups_dbg_pushn(void){ return (unsigned)ups_pushn; }
+unsigned csd_ups_dbg_fidx(void){ return (unsigned)ups_fidx; }
+unsigned csd_ups_dbg_refusals(void){ return s_refusals; }
+unsigned g_csd_ft4 = 0u, g_csd_ft5 = 0u;                    /* REVERT(bench) */
 extern volatile unsigned s_probe_reconfigs;
 extern volatile unsigned s_probe_pre;
 extern volatile unsigned s_probe_fidx;
@@ -488,8 +535,8 @@ extern volatile unsigned s_probe_pop_n, s_probe_feed_n;
 /* dp90 fn: the 34.6KB snapshot static + 192KB rings over-subscribed the
  * device heap (en_stat=2, the ONLY honest witness in the enable path —
  * TRUTH #9 again). 4096-row windows are 8x the scored requirement. */
-#define CSD_PROBE_RING 4224u          /* dp157: 4096 exactly at teardown -> last pop row lost its c1 qpop1 write; +128 drain rows */
-#define CSD_PROBE_FRING 4608u         /* absolute feed history — dp155: (dp155: 4352 missed the final scored boundary — feed row 4348 + window needs 4476) — dp154
+#define CSD_PROBE_RING 1024u          /* dp157: 4096 exactly at teardown -> last pop row lost its c1 qpop1 write; +128 drain rows */
+#define CSD_PROBE_FRING 1024u         /* absolute feed history — dp155: (dp155: 4352 missed the final scored boundary — feed row 4348 + window needs 4476) — dp154
                                        * REVERT: +256 rows so the last
                                        * scored pop (row 4095, stamped
                                        * 4231) has its boundary feed
@@ -532,7 +579,7 @@ unsigned s_probe_wchk_snap;              /* window checksum, pop core at snap  *
 unsigned s_probe_wchk_run;               /* running checksum at same instant */
 unsigned s_feedcalls_task;               /* csd_ups_feed calls from EQ task   */
 unsigned s_feedcalls_audio;              /* csd_ups_feed calls from audio path */
-#define CSD_PROBE_EV 4608u            /* dp157: feed events outgrew 4096 with FRING 4608 */
+#define CSD_PROBE_EV 1024u            /* dp157: feed events outgrew 4096 with FRING 4608 */
 extern volatile int32_t (*s_probe_pop)[2];
 extern volatile int32_t (*s_probe_feed)[2];
 /* dp121 REVERT: shared-heap allocator + state entry. malloc'd blocks are
@@ -623,13 +670,17 @@ static void ups_reconfigure_inner(void)
 {
     if (s_probe_on) {          /* engine clean start: await first real feed */
         /* Recording starts ONLY at the first nonzero feed (hook in
-         * csd_ups_feed): prefill zeros must not consume the window. */
-        s_rec_on = 0u;
+         * csd_ups_feed): prefill zeros must not consume the window.
+         * REVERT(bench 2026-11-17): s_rec_on clear REMOVED — ratio reconfigs
+         * fire mid-stream and erased the window before the pop-side /8 tick
+         * could latch rc_c; pop_n/feed_n resets below still rebase the rings
+         * on a fresh recording start via the trigger. */
         s_probe_reconfpop = s_pop_clock;
         s_probe_reconfigs++;
-        s_probe_pop_n = 0u;
-        s_probe_feed_n = 0u;
-        s_abs_feed = s_abs_calls = 0u;
+        /* REVERT(bench 2026-11-17): pop_n/feed_n/abs resets REMOVED —
+         * ratio reconfigs fire every block mid-stream; zeroing pop_n made
+         * every commit re-write ring row 0 (popn stuck at 1, ring never
+         * filled). The feed trigger is the sole rebase point. */
     }
     const unsigned R = ratio_for(s_in_hz);
 
@@ -758,6 +809,9 @@ void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
 #endif
     const unsigned now = enable ? 1u : 0u;
     if (now != s_enabled) {
+        /* ENABLE/DISABLE journalled by the diag core (csd_diag_upson/off
+         * ladder posts) — this function's tile affinity varies with its
+         * caller, and tile[1] posts never reach the tile[0] drain. */
         s_enabled = now;
         /* The capture tap follows the resampler lifecycle: armed exactly
          * when the client is enabled (csd_ups_slot early-returns unless
@@ -817,6 +871,10 @@ static void ups_reconfigure(unsigned site)
 {
     /* REVERT(s15-diag): always-on attribution (cold path, ~4 RMWs). */
     s_rc_total++; s_rc_last = site; if (site < 4u) s_rc_site[site]++;
+    /* REVERT(bench r8-rc): mid-stream restart decides H2 */
+    if (s_pops[0] != 0u && (s_pop_clock - s_rc_pop) < CSD_UPS_FRAME_ADVANCE * 8u)
+        s_rc_midstream++;
+    s_rc_pop = s_pop_clock;
     ups_reconfigure_inner();
     csd_ups_push_feed_owner();
 }
@@ -866,6 +924,11 @@ void csd_ups_feed(int l, int r)
         s_refusals++;                          /* on but refused: count, no queue */
         return;
     }
+    g_csd_ft1++;                                /* REVERT(bench): past gates */
+    if (!l && !r) g_csd_ft4++;                  /* REVERT(bench): zero pair */
+    else g_csd_ft5++;                           /* REVERT(bench): nonzero pair */
+    if (s_probe_on) g_csd_ft2++;                /* REVERT(bench) */
+    if (s_probe_on && !s_rec_on) g_csd_ft3++;   /* REVERT(bench) */
 
     /* ---- EXPERIMENT 11.11.29: feed-IN echo (REVERT with the tap) ---------
      * Publish what the engine RECEIVES, not what it pops. Owner-gated so an
@@ -1202,7 +1265,12 @@ void csd_ups_feed(int l, int r)
     }
     /* REVERT(dp206): THE commit edge -- one store, single writer. */
     ups_filled += fill;
+    g_csd_bp++;
     ups_pushn++;
+    {   /* REVERT(bench r8-rc): push-to-pop phase offset, one RMW per block */
+        const unsigned off_ = (ups_rd[0] - base) & ups_ring_mask;
+        s_off_hist[(off_ >> 7) & 7u]++;
+    }
     const unsigned dt = csd_ups_now() - t0;
     if (g_csd_probe_mask & 16u) { g_csd_eq_stage = 4u; } /* REVERT(dp201):
      * compute done, back in feed body; bit4-gated per dp202 lean-gate */
@@ -1359,7 +1427,9 @@ int csd_ups_pop_active(unsigned ch, int w)
          * /8 tick; <=8 pops (~5 us) of staleness, same bound the lead gate
          * already accepts for pushn. */
         if (++pn_div >= 8u) { pn_div = 0u; pn_c = ups_pushn; sd_c = ups_lead_seed();
-                              ht_c = s_pop_halt; rc_c = s_rec_on; }
+                              ht_c = s_pop_halt; rc_c = s_rec_on;
+                              { const unsigned o_ = ups_occ_of(ch);
+                                if (o_ < s_occ_low[ch & 1u]) s_occ_low[ch & 1u] = o_; } }
         if (pn_c < sd_c) {
             /* REVERT(s16-diag): lead-gate hold counter — words emitted through
              * the pre-commit return are invisible to the pop witnesses; this
@@ -1395,6 +1465,7 @@ int csd_ups_pop_active(unsigned ch, int w)
     /* REVERT(dp198): dp120 s_witness_sp_slot store removed from every pop
      * (~3 t); the DP-view bug class it hunted closed at dp131. */
     int32_t v;
+    unsigned is_rep = 2u;              /* REVERT(bench r8): row freshness */
     unsigned idx_pop = 0xFFFFFFFFu;    /* dp95: ring word consumed */
     unsigned kabs = 0u;                  /* dp128: fn-scope (accept block needs it) */
     /* Wire phase BEFORE any bump: pop index mod R is the polyphase phase
@@ -1403,11 +1474,17 @@ int csd_ups_pop_active(unsigned ch, int w)
      * rd legitimately stalls (honest repeat) -- the witnesses tell. */
     s_pop_in_commit = 1u;              /* dp118: capture mutual exclusion */
     const unsigned phase = ups_rd[ch] & (ups_phases - 1u);
+    if (ch == 1u) g_csd_pop_phase_live = phase;
     /* REVERT(dp206): emptiness from the monotone pair (exact across cores). */
     if (ups_occ_of(ch) == 0u) {
         s_repeats[ch]++;               /* starvation, visible on the host */
+        if (g_csd_probe_mask & 64u) s_rep_ph[ch & 1u][phase & 7u]++;
+        if (++s_rep_run > s_rep_run_max) s_rep_run_max = s_rep_run;
+        is_rep = 1u;
         v = s_ups_last[ch];
     } else {
+        s_rep_run = 0u;
+        is_rep = 0u;
         idx_pop = ups_rd[ch];
         v = ups_qp[ch][idx_pop];
         ups_rd[ch] = (ups_rd[ch] + 1u) & ups_ring_mask;
@@ -1468,6 +1545,8 @@ int csd_ups_pop_active(unsigned ch, int w)
          * that timing was the +-1-word dither (d = 8+-1 @48k, 490 plateau
          * transitions / 8192 frames @192k). */
         if (phase == 0u) {
+            if ((int)v == s_mir_lastw1) s_pub_dup++;
+            s_mir_lastw1 = (int)v;
             const unsigned k = s_mir_k;
             csd_mir_q0[k & (CSD_MIR_Q - 1u)] = (int)s_tap_pend[0];
             csd_mir_q1[k & (CSD_MIR_Q - 1u)] = (int)v;
@@ -1521,11 +1600,16 @@ int csd_ups_pop_active(unsigned ch, int w)
         if (s_snap_wanted && idx_pop != 0xFFFFFFFFu && kabs < 256u)
             s_snap_noowner++;
         s_pop_clock = kabs + 1u;
-        if (rc_c) {
+        if (rc_c || s_rec_force) {   /* REVERT(bench r8): force-capture */
             const unsigned k = s_probe_pop_n;
             if (k < CSD_PROBE_RING) {
                 s_probe_pop[k][0] = s_tap_pend[0];
                 s_probe_pop[k][1] = v;
+                if (s_probe_pop_fr) {
+                    unsigned *fw = &s_probe_pop_fr[k >> 2];
+                    const unsigned sh = (k & 3u) * 2u;
+                    *fw = (*fw & ~(3u << sh)) | ((is_rep & 3u) << sh);
+                }
                 s_probe_pop_n = k + 1u;
             }
             if (s_probe_pev_tot < CSD_PROBE_RING) {
@@ -1980,6 +2064,7 @@ void csd_probe_enable(unsigned on)             /* also resets (pre-run) */
         const unsigned ofp = total; total = ups_bump(total + CSD_PROBE_FRING * 2u);
         const unsigned ofe = total; total = ups_bump(total + CSD_PROBE_EV);
         const unsigned ope = total; total = ups_bump(total + CSD_PROBE_RING);
+        const unsigned ope2 = total; total = ups_bump(total + (CSD_PROBE_RING/4u + 1u));
         probe_heap_total = total;              /* dp126 witness */
         unsigned *mb = ups_alloc(total * 4u);
         if (!mb) { csd_probe_en_stat = 2u; return; }
@@ -1989,11 +2074,13 @@ void csd_probe_enable(unsigned on)             /* also resets (pre-run) */
         s_probe_feed = (int32_t (*)[2])(void *)(mb + ofp);
         s_probe_fev_t = mb + ofe;
         s_probe_pev_t = mb + ope;
+        s_probe_pop_fr = mb + ope2;
         s_probe_qpop1 = &s_probe_qpop1_buf[1][0];
         csd_probe_snap = s_probe_snapbuf;
     }
     csd_probe_en_stat = on ? 1u : 0u;
     s_probe_on = on ? 1u : 0u;
+    if (on && s_rec_force) { s_rec_on = 1u; s_probe_pop_n = 0u; }  /* REVERT(bench r8) */
     s_pop_clock = 0u;   /* rebases with the rings (el1: a reconfigure-
                          * anchored clock carried boot history: prepop=6368) */
     s_feed_abs = 0u;    /* absolute feed history rebases with the rings */
@@ -2067,17 +2154,54 @@ unsigned csd_probe_reconf(void)  { return s_probe_reconfigs; }
 unsigned csd_probe_pre(void)     { return s_probe_pre; }
 unsigned csd_probe_fidx(void)    { return s_probe_fidx; }
 unsigned csd_probe_popbase(void) { return s_probe_popbase; }
+unsigned csd_probe_pop_count(void) { return s_probe_pop_n; }  /* REVERT(bench) */
+unsigned g_csd_d2n = 0u, g_csd_d2rows = 0u;   /* REVERT(bench) */
+unsigned g_csd_d2nullq = 0u, g_csd_d2nullr = 0u;
+static char s_qpop2_buf[6144];
+unsigned csd_probe_dump_qpop2(unsigned off, unsigned cnt)
+{   /* REVERT(bench 2026-11-17): pop ring rows = [tap_pend, REAL popped
+     * word]. QPOP? dumps buf[1] (wire-emit latch ZOH-era); this dumps the
+     * pop recorder itself. Columns: v;tapp;v;tapp... */
+    int o = 0; unsigned i;
+    if (!s_probe_pop) return 0u;
+    volatile unsigned n = s_probe_pop_n;
+    if (n == 0u) return 0u;          /* REVERT(bench r8): n grows on the
+                                      * audio core; clamp instead of the old
+                                      * off>=n guard (a lagged read denied an
+                                      * otherwise-full ring) */
+    if (off >= CSD_PROBE_RING) return 0u;
+    if (off >= n) off = 0u;          /* wrap: reader lag -> restart */
+    if (cnt > CSD_PROBE_RING - off) cnt = CSD_PROBE_RING - off;
+    if (cnt > 256u) cnt = 256u;
+    for (i = 0u; i < cnt; i++) {
+        const unsigned k = off + i;
+        const int wr = snprintf(s_qpop2_buf + o, sizeof s_qpop2_buf - (unsigned)o,
+                                "%s%u;%d;%d", i ? ";" : "",
+                                (s_probe_pop_fr ? ((s_probe_pop_fr[k >> 2] >> ((k & 3u) * 2u)) & 3u) : 2u),
+                                (int)s_probe_pop[k][1], (int)s_probe_pop[k][0]);
+        if (wr < 0 || (unsigned)wr >= sizeof s_qpop2_buf - (unsigned)o) break;
+        o += wr;
+    }
+    return (unsigned)o;
+}
+const char *csd_probe_dump_qpop2_buf(void) { return s_qpop2_buf; }
+/* Gate witnesses for the QPOP2 handler's empty-reply diagnostic (task core). */
+unsigned csd_probe_dump_qpop2_null(void) { return s_probe_pop ? 1u : 0u; }
+unsigned csd_probe_dump_qpop2_n(void) { return s_probe_pop_n; }
+
 unsigned csd_probe_dump(unsigned off, unsigned cnt, int is_pop)
 {
     volatile unsigned n;
+    g_csd_d2n++;
     if (is_pop == 2) {                  /* dp95: post-commit ring words (u32) */
         int o = 0;
-        if (!s_probe_qpop1) return 0u;
+        if (!s_probe_qpop1) { g_csd_d2nullq++; return 0u; }
         n = s_probe_pop_n;
         if (n > CSD_PROBE_RING) n = CSD_PROBE_RING;
         for (unsigned i = 0u; i < cnt; i++) {
             const unsigned idx = off + i;
             if (idx >= n) break;
+            g_csd_d2rows++;
             const int wr = snprintf(s_probe_dump + o, sizeof s_probe_dump - (unsigned)o,
                                     "%s%u", i ? ";" : "", s_probe_qpop1[idx]);
             if (wr <= 0 || (unsigned)wr >= sizeof s_probe_dump - (unsigned)o) break;
@@ -2087,7 +2211,7 @@ unsigned csd_probe_dump(unsigned off, unsigned cnt, int is_pop)
     }
     volatile int32_t (*ring)[2] = is_pop ? s_probe_pop : s_probe_feed;
     int o = 0;
-    if (!ring) return 0u;
+    if (!ring) { g_csd_d2nullr++; return 0u; }
     if (is_pop) {
         n = s_probe_pop_n;
     } else {
@@ -2218,3 +2342,57 @@ unsigned csd_probe_ev_dump(unsigned off, unsigned cnt)
     }
     return (unsigned)o;
 }
+
+/* ===== REVERT(armed-capture bench 2026-11-17): mixer mic tap hook =========
+ * The 11.11.6 lib_xua mixer hook that shipped the UBM mirror store was
+ * REVERTED and stays reverted, so in the MIXER=1 shape the mic payload is
+ * the mixer sample buffer (ADC half), which is silent while armed. These
+ * two scalar hooks let the mixer pop ONE mirror pair per host mic frame
+ * directly from the mic-frame-aligned FIFO. The old ban targeted per-pop
+ * cross-thread reads on the mixer hot path; this is two scalar calls per
+ * HOST frame -- the shape csd_ups_block.h documented as the only safe
+ * consumer API ("scalar query, no pointer params: pointers across the XC/C
+ * boundary do not link in this tree"). Remove with the mixer.xc hook. */
+extern unsigned g_csd_ups_echo_mode;         /* csd_dsp.xc */
+/* REVERT(armed-capture bench 2026-11-17): named witnesses (INFO tail). */
+unsigned g_csd_flip_n = 0u;  /* audiohub host-frame flips */
+unsigned g_csd_tk_n   = 0u;  /* csd_mic_tap_take entries */
+unsigned g_csd_slot_n = 0u;  /* csd_ups_slot entries (pop calls) */
+unsigned g_csd_pub2_n = 0u;  /* mod-8 FIFO publishes */
+static int      s_miq_pair[2];
+static unsigned s_miq_cur = 0u;              /* mixer-side cursor */
+
+int csd_mic_tap_active(void)
+{
+    /* Same gate as the tap itself (csd_ups_pop_active, line ~1293): armed
+     * upsampler AND LOOPback on, so RELAY/bypass mic stays on the ADC1
+     * hardware path untouched. */
+    (void)g_csd_ups_echo_mode;
+    return (s_tap != 0u && csd_ups_active()) ? 1 : 0;  /* REVERT(bench r8): was gated echo_mode != 2 */
+}
+
+int csd_mic_tap_take(unsigned ch)
+{
+    /* REVERT(bench witness): tag the lag field with 0xDEAD0000|calls so a
+     * run proves WHICH reader pops the FIFO (UBM consumer writes a small
+     * skew there; this marker can only come from the mixer hook). */
+    g_csd_tk_n++;
+    if (ch == 0u) {
+        const unsigned pn = csd_mir_prod_n;
+        if (pn > s_miq_cur) {
+            if ((pn - s_miq_cur) > (CSD_MIR_Q / 2u)) {
+                s_miq_cur = pn - 2u;         /* escaped window: re-lock */
+                g_csd_mir_relock_n++;
+            }
+            const unsigned qi = s_miq_cur & (CSD_MIR_Q - 1u);
+            s_miq_pair[0] = csd_mir_q0[qi];
+            s_miq_pair[1] = csd_mir_q1[qi];
+            s_miq_cur++;
+            g_csd_mir_copy_n++;
+        } else {
+            g_csd_mir_hold_n++;              /* honest zero-order hold */
+        }
+    }
+    return (ch < 2u) ? s_miq_pair[ch] : 0;
+}
+/* ===== END REVERT(armed-capture bench) ===== */

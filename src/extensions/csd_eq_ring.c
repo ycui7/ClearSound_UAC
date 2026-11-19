@@ -165,6 +165,13 @@ unsigned csd_eq_cfg_on_get(void)  { return cfg_on; }
 unsigned csd_eq_cfg_idx_get(void) { return cfg_idx; }
 
 unsigned csd_eq_take_ready(void) { return rd != wr_pub; }
+/* REVERT(bench 2026-11-17): queue visibility witnesses — which cursor is stuck */
+unsigned csd_eq_dbg_wrp(void){ return wr_pub; }
+unsigned csd_eq_dbg_rd(void){ return rd; }
+unsigned csd_eq_dbg_wrl(void){ return wr_loc; }
+unsigned csd_eq_dbg_eng(void){ return engaged; }
+unsigned csd_eq_dbg_pend(void){ return pend; }
+unsigned csd_eq_dbg_gen(void){ return gen; }
 int csd_eq_take_l(void) { return rin[rd & CSD_EQ_RING_MASK][0]; }
 int csd_eq_take_r(void) { return rin[rd & CSD_EQ_RING_MASK][1]; }
 

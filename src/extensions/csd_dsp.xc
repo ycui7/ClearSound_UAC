@@ -242,6 +242,8 @@ unsigned g_csd_ubm_reg_max[5];
 #include "csd_eq_ring.h"
 
 extern unsigned s_feedcalls_task;   /* dp108 feed-call attribution */
+unsigned g_csd_ep0, g_csd_ep1, g_csd_ewz;      /* REVERT(bench) */
+unsigned g_csd_fb1, g_csd_fb2;                    /* REVERT(bench) */
 extern unsigned s_feedcalls_audio;
 extern unsigned g_csd_probe_mask;   /* REVERT(dp199): attribution mask for
                                      * hot-path diagnostic gates (defined in
@@ -473,10 +475,21 @@ void csd_dsp_frame(unsigned *s)
      * (11.12.6 witness: feed_pc=3, task frozen, eq_frames static). Armed
      * means task-owned, full stop (csd_eq_ring.c enqueues even when
      * disengaged while armed, for exactly this reason). */
-    if (!eq_pushed && !csd_feed_owner && !csd_ups_armed()) {
+    /* REVERT(bench 2026-11-17): DEBUG:CSD:PROBE bit5 (32) = EQ-BYPASS FEED
+     * mode for upsampler qualification. With PRESet 0 the EQ task never
+     * takes (queue empty) so this is still a SINGLE feed writer — the fd FIR
+     * state has one owner (this core) exactly as the disarmed case. */
+    g_csd_fb1++;   /* REVERT(bench): frames reaching the fallback gate */
+    if (!eq_pushed &&
+        (!csd_feed_owner || (g_csd_probe_mask & 32u)) &&
+        (!csd_ups_armed() || (g_csd_probe_mask & 32u))) {
+        g_csd_fb2++;   /* REVERT(bench): fallback feed taken */
         s_feedcalls_audio++;
         csd_ups_feed((int)s[0], (int)s[1]);
     }
+    /* REVERT(bench): audio-path word content + push attribution */
+    if (eq_pushed) g_csd_ep1++; else g_csd_ep0++;
+    if (s[0] | s[1]) g_csd_ewz++;
 #endif
 }
 
@@ -1067,10 +1080,7 @@ csd_mb_note_dac_sample(0u, CSD_NODE_PREDSP, (int)sampsFromUsbToAudio[0]);
      * mode 2 skips the mirror overwrite so the words the audiohub port
      * decimator published from ADC1 reach the host untouched. REVERT with
      * the echo block. */
-    if (csd_feed_owner && g_csd_ups_echo_mode != 2u)   /* EXPERIMENT 11.11.34 DUAL ECHO: even frames
-                           * carry the feed-IN pair (what csd_ups_feed
-                           * received), odd frames the last committed pop
-                           * pair (what csd_ups_slot emitted). REVERT. */
+    if (csd_feed_owner && g_csd_ups_echo_mode < 2u)
     {
         if (g_csd_ups_echo_mode == 1u) {
             sampsFromAudioToUsb[0] = (unsigned)csd_feed_w0;

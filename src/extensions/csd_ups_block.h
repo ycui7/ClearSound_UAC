@@ -148,6 +148,9 @@ extern unsigned g_csd_mir_lag_n;      /* live skew prod_n - cursor at a read*/
  * found no new pair. Passing armed legs: delta(pub_n) == delta(copy_n) and
  * hold_n/near-zero (startup transient only). */
 extern unsigned g_csd_mir_pub_n, g_csd_mir_copy_n, g_csd_mir_hold_n;
+/* REVERT(armed-capture bench 2026-11-17): named witnesses. */
+extern unsigned g_csd_flip_n, g_csd_tk_n;
+extern unsigned g_csd_slot_n, g_csd_pub2_n;
 
 #ifdef __cplusplus
 }

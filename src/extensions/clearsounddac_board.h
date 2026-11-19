@@ -64,6 +64,16 @@ typedef enum
     AUDIOHW_CMD_HWCFG_RATE,         //tile[1] reports the frame clock just configured
     AUDIOHW_CMD_TRIM_UPS_GET,       //tile[1] fetches the persisted upsampling intent
     AUDIOHW_CMD_IDENTITY,
+    AUDIOHW_CMD_ERRLOG_RSEC,        //load one 4 KiB ring sector into the cache
+    AUDIOHW_CMD_ERRLOG_ERASE,       //erase the 8 ring sectors (never sector 0)
+    AUDIOHW_CMD_ERRLOG_STAT,        //reply one errlog status word by index
+    AUDIOHW_CMD_ERRLOG_FMT,         //RETIRED (FMT deadlock): kept for value stability
+    AUDIOHW_CMD_ERRLOG_PTR,         //RETIRED (no cross-tile RAM): kept for value stability
+    AUDIOHW_CMD_ERRLOG_P0,          //post ladder: stage word 0 (ev)
+    AUDIOHW_CMD_ERRLOG_P1,          //post ladder: stage word 1 (a0)
+    AUDIOHW_CMD_ERRLOG_P2,          //post ladder: stage word 2 (a1)
+    AUDIOHW_CMD_ERRLOG_P3,          //post ladder: stage word 3 (a2)
+    AUDIOHW_CMD_ERRLOG_PGO,         //post ladder: commit staged post
     /* Kernel-update soft-ramp (owner directive 2026-11-10). The chip's own
      * glitch-free ramp does the muting: ES9219Q datasheet v1.3 "Soft Mute"
      * -- asserting Reg 7 MUTE ramps the output to -inf and clearing it ramps

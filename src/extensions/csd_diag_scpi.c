@@ -25,6 +25,7 @@
 #include "csd_gen.h"
 #include "csd_power.h"          /* POWER:TIMEout, owner case 14 */
 #include "csd_ups_block.h"  /* DIAG:UPSAMPLing, the DSP block engine behind it */
+#include "csd_errlog.h"     /* DIAG:ERRLOG — boot-flash death forensics      */
 /* L/R trim persistence (TODO 3) is reached through csd_diag.h's proxy calls,
  * never by including csd_trim_store.h: that header's entry points drive the
  * tile[0] SQI ports and may only be called by the tile[0] codec server. */
@@ -2483,6 +2484,20 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
     if (n > 0) {   /* REVERT(dp182): gate removed — was n < sizeof-8-82*11 */ /* tail is 80 fields
                                                           * after eq_kernel_src
                                                           * (2026-11-11 tap) */
+        /* REVERT(armed-capture bench 2026-11-17): named witnesses. */
+        extern unsigned g_csd_flip_n, g_csd_tk_n;
+        extern unsigned g_csd_slot_n, g_csd_pub2_n;
+        extern volatile unsigned s_rec_on;   /* csd_ups_block.c recorder */
+        extern unsigned csd_probe_pop_count(void);
+        extern unsigned s_feedcalls_task, s_feedcalls_audio;
+        extern unsigned csd_probe_en_get(void);
+        extern unsigned g_csd_fb1; extern unsigned g_csd_fb2;
+        extern unsigned csd_ups_dbg_pushn(void); extern unsigned csd_ups_dbg_fidx(void);
+        extern unsigned g_csd_ft1, g_csd_ft2, g_csd_ft3;
+        extern unsigned g_csd_ft4, g_csd_ft5, g_csd_ep0, g_csd_ep1, g_csd_ewz;
+        extern unsigned g_csd_bp;
+        const unsigned s_rec_on_w = s_rec_on;
+        const unsigned s_probe_pop_n_w = csd_probe_pop_count();
         const unsigned ratio = xua_csd_get_usb_ratio();
         unsigned ph = xua_csd_get_mic_phase();
         const unsigned mode = (ph == CSD_MIC_PHASE_AUTO) ? 0u : 1u;
@@ -2578,7 +2593,19 @@ static SCPI_FPTR_CMD scpi_result_t ups_info_q(scpi_t *context)
                        * witnesses (csd_dsp.xc): mir_relock_n (FIFO window
                        * escapes) and mir_lag (prod_n - cursor at the last
                        * read: bounded constant == skew-free 1:1). */
-                      ",%u,%u",
+                      /* REVERT(armed-capture bench 2026-11-17): +4 =
+                       * flip_n (audiohub host-frame flips), tk_n
+                       * (csd_mic_tap_take entries), slot_n (csd_ups_slot
+                       * pop entries), pub2_n (mod-8 FIFO publishes),
+                       * recon (recorder on), popn (pop ring count),
+                       * fct (feed calls task), fca (feed calls audio),
+                       * pen (probe enable stat: 1 on, 2 OOM),
+                       * d2n, d2rows, d2nullq, d2nullr (dump witnesses),
+                       * ft1/ft2/ft3 (feed past-gates / probe-on / !rec_on),
+                       * ft4/ft5 (zero/nonzero feed pair), ep0/ep1 (audio-path
+                       * push taken/skipped), ewz (audio word nonzero);
+                       * bp (block pushes) REUSES the ft4 slot. */
+                      ",%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
 
                       ph, ratio, mode,
                       /* 2026-11-10: these 16 fields reported the deleted latch
@@ -2759,7 +2786,40 @@ g_csd_span_min, g_csd_span_max,
                       /* REVERT(bp21): see format block above. */
                       g_csd_mir_pub_n, g_csd_mir_copy_n, g_csd_mir_hold_n,
                       /* REVERT(bp31): see format block above. */
-                      g_csd_mir_relock_n, g_csd_mir_lag_n);
+                      g_csd_mir_relock_n, g_csd_mir_lag_n,
+                      g_csd_flip_n, g_csd_tk_n,
+                      g_csd_slot_n, g_csd_pub2_n,
+                      s_rec_on_w, s_probe_pop_n_w,
+                      s_feedcalls_task, s_feedcalls_audio,
+                      csd_probe_en_get(),
+                      g_csd_fb1, g_csd_fb2,
+                      csd_ups_dbg_pushn(), csd_ups_dbg_fidx(),
+                      g_csd_ft1, g_csd_ft2, g_csd_ft3,
+                      g_csd_bp, g_csd_ft5, g_csd_ep0, g_csd_ep1, g_csd_ewz);
+        /* REVERT(bench r8-rc): +29 discrimination fields (append-only). */
+        {
+            extern unsigned s_rc_midstream;
+            extern unsigned s_occ_low[2];
+            extern unsigned s_rep_run_max;
+            extern unsigned s_pub_dup;
+            extern unsigned s_rep_ph[2][8];
+            extern unsigned s_off_hist[8];
+            extern volatile unsigned g_csd_pop_phase_live;
+            if (n > 0 && n < (int)sizeof(buf) - 12)
+                n += snprintf(buf + n, sizeof(buf) - (unsigned)n,
+                              ",%u,%u,%u,%u,%u",
+                              s_rc_midstream, s_occ_low[0], s_occ_low[1],
+                              s_rep_run_max, s_pub_dup);
+            for (unsigned i = 0u; i < 16u && n < (int)sizeof(buf) - 12; i++)
+                n += snprintf(buf + n, sizeof(buf) - (unsigned)n, ",%u",
+                              (&s_rep_ph[0][0])[i]);
+            for (unsigned i = 0u; i < 8u && n < (int)sizeof(buf) - 12; i++)
+                n += snprintf(buf + n, sizeof(buf) - (unsigned)n, ",%u",
+                              s_off_hist[i]);
+            if (n < (int)sizeof(buf) - 12)
+                n += snprintf(buf + n, sizeof(buf) - (unsigned)n, ",%u",
+                              (unsigned)g_csd_pop_phase_live);
+        }
                       /* REVERT(dp203): +iter,dsdn,portu.
                        * REVERT(dp202): dp197 dec_* chunk
                        * removed with its witnesses (decouple.xc reverted);
@@ -2920,6 +2980,7 @@ extern unsigned csd_probe_feed_count(void);
 extern int      csd_probe_pop_at(unsigned i, int out[2]);
 extern int      csd_probe_feed_at(unsigned i, int out[2]);
 
+extern unsigned s_rec_force;  /* REVERT(bench r8) */
 static SCPI_FPTR_CMD scpi_result_t ups_probe_set(scpi_t *context)
 {
     uint32_t on = 0u;
@@ -2948,6 +3009,140 @@ static SCPI_FPTR_CMD scpi_result_t ups_probe_q(scpi_t *context,
     const unsigned o = csd_probe_dump(off, cnt, is_pop);
     if (o > 0) SCPI_ResultCharacters(context, csd_probe_dump_buf(), (int)o);
     return SCPI_RES_OK;
+}
+
+unsigned csd_probe_dump_qpop2(unsigned off, unsigned cnt);
+const char *csd_probe_dump_qpop2_buf(void);
+unsigned csd_probe_dump_qpop2_null(void);
+unsigned csd_probe_dump_qpop2_n(void);
+static SCPI_FPTR_CMD scpi_result_t ups_qpop2_q(scpi_t *context)
+{
+    uint32_t off = 0u, cnt = 0u;
+    const char *why = NULL;
+    if (!gen_u32(context, "off", &off, 0u, 8191u, &why) ||
+        !gen_u32(context, "count", &cnt, 1u, 512u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    const unsigned o = csd_probe_dump_qpop2(off, cnt);
+    if (o > 0) { SCPI_ResultCharacters(context, csd_probe_dump_qpop2_buf(), (int)o); return SCPI_RES_OK; }
+    /* Empty dump must never be silent: an empty body was indistinguishable
+     * from a dead transport (bench 2026-11-17/18, hours lost). Name the gate
+     * that refused, task-core only, non-numeric so no parser reads it as a
+     * row. pop=1 alloc'd, n=pop ring count, en=enable stat (2 = OOM). */
+    {
+        extern unsigned csd_probe_en_get(void);
+        static char why[64];
+        snprintf(why, sizeof why, "GATE:pop=%u,n=%u,en=%u,off=%u",
+                 csd_probe_dump_qpop2_null(), csd_probe_dump_qpop2_n(),
+                 csd_probe_en_get(), off);
+        SCPI_ResultCharacters(context, why, (int)strlen(why));
+    }
+    return SCPI_RES_OK;
+}
+
+/* ---- boot-flash error log (bench 2026-11-18/19) -------------------------
+ * The board re-enumerates on USB every ~10 min (host -110) and RAM witnesses
+ * die with it; these commands read what the codec server journalled to the
+ * data partition before the death. ALL state and flash work is tile[0]'s
+ * (csd_errlog.c architecture note): sector loads and every status/data word
+ * ride the audiohw-diag channel as SINGLE scalars (the multi-word FMT
+ * protocol deadlocked the codec server, 2026-11-19 — scalars only, decode
+ * here); tile[1] posts ride the P0..P3/PGO ladder. */
+#define ERRL_SLOTS_PER_SECTOR 128u
+static char s_errlog_buf[6144];                  /* static: qpop2 precedent */
+
+static SCPI_FPTR_CMD scpi_result_t diag_errlog_q(scpi_t *context)
+{
+    unsigned off = 0u, cnt = 8u; const char *why = NULL;
+    if (!gen_u32(context, "off", &off, 0u, 1023u, &why) ||
+        !gen_u32(context, "cnt", &cnt, 1u, 2u, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    /* Window protocol: ERRLOG_RSEC loads a sector into tile[0]'s cache;
+     * STAT words 8..23 are its first 16 words (= slots 0 and 1). cnt is
+     * capped at 2: the pair sharing one load. Validation is the rig-side
+     * twin of el_slot_ok (csd_errlog.c): magic|nonce echo + XOR checksum. */
+    unsigned n = 0u, emitted = 0u;
+    for (unsigned k = 0u; k < cnt; k++) {
+        unsigned idx = off + k;
+        unsigned sec = idx / ERRL_SLOTS_PER_SECTOR;
+        unsigned slot = idx % ERRL_SLOTS_PER_SECTOR;
+        if (sec >= 8u) break;
+        if ((slot & 1u) == 0u &&
+            csd_diag_errlog_rsec(sec * 64u + (slot >> 1)) == 0u) break;
+        unsigned w[8];
+        for (unsigned j = 0u; j < 8u; j++)
+            w[j] = csd_diag_errlog_status(8u + (slot & 1u) * 8u + j);
+        unsigned cs = (w[1] ^ w[2] ^ w[3] ^ w[4] ^ w[5] ^ w[6]) & ~0xFFu;
+        if (w[0] != (0x4345524Cu | (w[7] & 0xFFu))) continue;
+        if ((w[7] & ~0xFFu) != cs) continue;
+        int m = snprintf(s_errlog_buf + n,
+                         (unsigned)sizeof s_errlog_buf - n,
+                         "%u,%u,%u,%u,%u,%u;",
+                         w[1], w[2], w[3], w[4], w[5], w[6]);
+        if (m <= 0 || (unsigned)m >= (unsigned)sizeof s_errlog_buf - n) break;
+        n += (unsigned)m;
+        emitted++;
+    }
+    s_errlog_buf[n] = '\0';
+    SCPI_ResultCharacters(context, s_errlog_buf, (int)n);
+    return (int)emitted != 0 ? SCPI_RES_OK : SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t diag_errlog_stat_q(scpi_t *context)
+{
+    char buf[768];                    /* 36 witness words fit (statics rule) */
+    unsigned len = 0u;
+    /* Layout (csd_errlog.h): 0..7 ring status, 8..23 raw cache window,
+     * 24..28 write-verify, 30..34 FIFO truth. */
+    for (unsigned i = 0u; i < 36u; i++) {
+        unsigned v = csd_diag_errlog_status(i);
+        char tmp[12];
+        int n = snprintf(tmp, sizeof tmp, (i ? ",%u" : "%u"), v);
+        if (n <= 0 || (unsigned)n >= (unsigned)sizeof buf - len) break;
+        memcpy(buf + len, tmp, (unsigned)n);
+        len += (unsigned)n;
+    }
+    SCPI_ResultCharacters(context, buf, (int)len);
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t diag_errlog_test(scpi_t *context)
+{
+    unsigned id = 0u, a1 = 0u, a2 = 0u; const char *why = NULL;
+    if (!gen_u32(context, "id", &id, 0u, 0xFFFFFFFFu, &why) ||
+        !gen_u32(context, "a1", &a1, 0u, 0xFFFFFFFFu, &why) ||
+        !gen_u32(context, "a2", &a2, 0u, 0xFFFFFFFFu, &why)) {
+        (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE);
+        return SCPI_RES_ERR;
+    }
+    /* tile[1] posts ONLY via the ladder: four stage words + commit, each a
+     * proven 1-word-in scalar command (tile-affinity rule, csd_errlog.c). */
+    csd_diag_errlog_post4(EVL_EV_TEST, id, a1, a2);
+    return SCPI_RES_OK;                            /* persistence proven by
+                                                    * reading it back later */
+}
+
+static SCPI_FPTR_CMD scpi_result_t diag_errlog_erase_cmd(scpi_t *context)
+{
+    if (csd_diag_errlog_erase() != 1u) {
+        SCPI_ErrorPush(context, SCPI_ERROR_EXECUTION_ERROR);
+        return SCPI_RES_ERR;
+    }
+    return SCPI_RES_OK;
+}
+
+static SCPI_FPTR_CMD scpi_result_t ups_recforce_set(scpi_t *context)
+{   unsigned v=0; const char *why=NULL;
+    extern unsigned s_rec_force;
+    if (!gen_u32(context, "val", &v, 0u, 1u, &why)) { (void)why;
+        SCPI_ErrorPush(context, SCPI_ERROR_ILLEGAL_PARAMETER_VALUE); return SCPI_RES_ERR; }
+    s_rec_force = v; return SCPI_RES_OK;
 }
 
 static SCPI_FPTR_CMD scpi_result_t ups_base_q(scpi_t *context)
@@ -3129,6 +3324,11 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
      * the next stream start can force the rate and the grant can then land. */
     csd_ups_set_want(enable);
     csd_ups_set_enabled(ap);
+    /* This handler is the diag core (tile[1]) and owns the audiohw-diag
+     * channel: the ARM/ENABLE journal rides the scalar ladder (tile-affinity
+     * rule, csd_errlog.c). */
+    csd_diag_errlog_post4(enable ? EVL_EV_ARM : EVL_EV_DISARM, ap, 0u, 0u);
+    if (ap) csd_diag_errlog_post4(EVL_EV_ENABLED, 1u, 0u, 0u);
     ups_reply(context);
     return SCPI_RES_OK;
 }
@@ -3303,6 +3503,14 @@ static const scpi_command_t csd_commands[] = {
     /* Unit identity. Queries only -- there is deliberately no setter and no
      * OTP write path. Patterns carry no parameter placeholders, same rule as
      * above: libscpi matches the pattern against the command HEADER only. */
+    /* Boot-flash error log: reads the data-partition ring the codec server
+     * appends to. Params are read with SCPI_Param* inside the callbacks,
+     * never as placeholders in the pattern (rule above). */
+    { .pattern = "DIAG:ERRLOG?",          .callback = diag_errlog_q       },
+    { .pattern = "DIAG:ERRLOG:STAT?",     .callback = diag_errlog_stat_q  },
+    { .pattern = "DIAG:ERRLOG:TEST",      .callback = diag_errlog_test    },
+    { .pattern = "DIAG:ERRLOG:ERASE",     .callback = diag_errlog_erase_cmd },
+
     { .pattern = "DIAG:IDENTity:SERial?", .callback = q_ident_serial },
     { .pattern = "DIAG:IDENTity:SOURce?", .callback = q_ident_source },
     { .pattern = "DIAG:IDENTity:HASH?",   .callback = q_ident_hash   },
@@ -3355,6 +3563,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "DIAG:UPSAMPLing:STATe",   .callback = ups_set           },
     { .pattern = "DIAG:UPSAMPLing:ECHO",    .callback = ups_echo_set      },
     { .pattern = "DIAG:UPSAMPLing:PROBE",   .callback = ups_probe_set     },
+    { .pattern = "DIAG:UPSAMPLing:RECFORCE",  .callback = ups_recforce_set  }, /* REVERT(bench r8) */
 
 
     { .pattern = "DIAG:UPSAMPLing:PACE?",   .callback = ups_pace_q        },
@@ -3366,6 +3575,7 @@ static const scpi_command_t csd_commands[] = {
     { .pattern = "DEBUG:CSD:SEG:CLEAR",     .callback = dbg_seg_clear     },
     { .pattern = "DIAG:UPSAMPLing:BASE?",   .callback = ups_base_q        },
     { .pattern = "DIAG:UPSAMPLing:POP?",    .callback = ups_pop_q         },
+    { .pattern = "DIAG:UPSAMPLing:QPOP2?",   .callback = ups_qpop2_q       },
     { .pattern = "DIAG:UPSAMPLing:QPOP?",   .callback = ups_qpop_q        },
     { .pattern = "DIAG:UPSAMPLing:FEED?",   .callback = ups_feed_q        },
     { .pattern = "DIAG:UPSAMPLing:EV?",     .callback = ups_ev_q          },

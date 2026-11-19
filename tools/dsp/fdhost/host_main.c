@@ -43,6 +43,7 @@ int main(int argc, char **argv)
     csd_dsp_fd_config(idx);
     if (!csd_dsp_fd_ready()) { printf("ADAPTER REFUSED CONFIG (fd_ready=0)\n"); return 3; }
 
+    static int32_t g_y[65536];
     double peak = 0.0;
     long   nz_count = 0;
     int    first_nonzero = -1, peak_at = -1;
@@ -55,7 +56,7 @@ int main(int argc, char **argv)
         int32_t q = (int32_t)lround(v * 2147483647.0);
         unsigned s[2] = { (unsigned)q, (unsigned)q };
         csd_dsp_fd_frame(s);                       /* in -> processed out */
-        int32_t y = (int32_t)s[0];
+        int32_t y = (int32_t)s[0]; g_y[i] = y;
         double a = fabs((double)y / 2147483647.0);
         if (a > peak) { peak = a; peak_at = i; }
         if (y != 0) nz_count++;
@@ -67,6 +68,8 @@ int main(int argc, char **argv)
             n_meas++;
         }
     }
+    { const char *dp = getenv("FD_DUMP");
+      if (dp) { FILE *f = fopen(dp, "wb"); fwrite(g_y, 4, (size_t)n, f); fclose(f); } }
     double gain = n_meas ? 2.0 * sqrt(re*re + im*im) / (double)n_meas / amp : 0.0;
     printf("in : amp=%.3f (%.2f dBFS) freq=%.0f Hz\n", amp, 20*log10(amp), f_in);
     printf("out: peak=%.6f (%.2f dBFS) nonzero=%ld/%d first_nonzero=%d peak_at=%d\n",

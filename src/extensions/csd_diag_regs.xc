@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include "csd_diag.h"
 #include "clearsounddac_board.h"
+#include "csd_errlog.h"        /* attach/self_ptr (identity rule) */
 #include "csd_ups_block.h"   /* csd_ups_diag_in_hz/out_hz for the ovr8 gate (REVERT with it) */
 
 /* Bound in src/core/user_main.h (unsafe cast of c_audiohw[4]). */
@@ -144,6 +145,61 @@ unsigned csd_diag_trim_status(unsigned idx)
     unsigned v;
     unsafe {
         uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_TRIM_STAT;
+        uc_audiohw_diag <: idx;
+        uc_audiohw_diag :> v;
+    }
+    return v;
+}
+
+/* ---- boot-flash error log proxies (bench 2026-11-18) ------------------
+ * Same channel, same scalar-only rule as the trim proxies: flash work
+ * belongs to tile[0]; the diag core only asks. */
+/* tile[1] post path: four stage commands + commit, ONE word per command
+ * (the proven scalar shape; multi-word FMT deadlocked the server). */
+void csd_diag_errlog_post4(unsigned ev, unsigned a0, unsigned a1, unsigned a2)
+{
+    const unsigned w[4] = { ev, a0, a1, a2 };
+    for (unsigned k = 0u; k < 4u; k++) {
+        unsafe {
+            uc_audiohw_diag <: (unsigned)(AUDIOHW_CMD_ERRLOG_P0 + (int)k);
+            uc_audiohw_diag <: w[k];
+            unsigned ack;
+            uc_audiohw_diag :> ack;
+        }
+    }
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_ERRLOG_PGO;
+        unsigned ack;
+        uc_audiohw_diag :> ack;
+    }
+}
+
+unsigned csd_diag_errlog_rsec(unsigned sec)
+{
+    unsigned v;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_ERRLOG_RSEC;
+        uc_audiohw_diag <: sec;
+        uc_audiohw_diag :> v;
+    }
+    return v;      /* cache generation, 0 = failed */
+}
+
+unsigned csd_diag_errlog_erase(void)
+{
+    unsigned v;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_ERRLOG_ERASE;
+        uc_audiohw_diag :> v;
+    }
+    return v;
+}
+
+unsigned csd_diag_errlog_status(unsigned idx)
+{
+    unsigned v;
+    unsafe {
+        uc_audiohw_diag <: (unsigned) AUDIOHW_CMD_ERRLOG_STAT;
         uc_audiohw_diag <: idx;
         uc_audiohw_diag :> v;
     }

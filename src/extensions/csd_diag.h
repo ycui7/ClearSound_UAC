@@ -123,6 +123,11 @@ void csd_diag_ups_get(unsigned *applied, unsigned *samfreq, unsigned *refusals);
  * Requests recomputation; it never writes a volume register itself. */
 void csd_diag_vol_reapply(void);
 unsigned csd_diag_trim_status(unsigned idx);   /* idx 0..10, see csd_trim_store.h */
+void csd_diag_errlog_post4(unsigned ev, unsigned a0,
+                           unsigned a1, unsigned a2); /* tile[1] ladder   */
+unsigned csd_diag_errlog_rsec(unsigned sec);   /* -> cache generation, 0 = fail */
+unsigned csd_diag_errlog_erase(void);          /* 1 = ok */
+unsigned csd_diag_errlog_status(unsigned idx); /* idx 0..7, see csd_errlog.h */
 int csd_diag_trim_save(unsigned packed);       /* journal this pair now */
 int csd_diag_trim_reset_store(void);           /* write defaults at current version */
 

@@ -37,6 +37,8 @@ extern "C" {
 #include "csd_dsp.h"
 #ifdef CSD_UPSAMPLE_EN
 #include "csd_ups_block.h"     /* the upsampling DSP block engine: option + fabric surface */
+#include "csd_errlog.h"        /* boot-flash error log: death forensics across
+                              * USB re-enumerations (bench 2026-11-18) */
 #ifdef CSD_UPS_ASYNC
 /* lib_xua audiohub's runtime USB->I2S ratio (xua_audiohub.xc). File scope:
  * xcc refuses function declarations in local scope. */
@@ -861,6 +863,16 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                          * the producer's copy is bounded, no starvation */
                     }
                 }
+                /* errlog: 1 ms heartbeat, one-shot boot_init, append.
+                 * boot_init lives HERE, not before the loop: the flash-call
+                 * rule of csd_trim_store.c says no fl_* may exist before the
+                 * server is demonstrably serving (the csd_identity death). */
+                {   static unsigned el_boot_done = 0u;
+                    unsafe { csd_errlog_set_clkblk((unsigned) c_trim_qspi); }
+                    if (!el_boot_done) { el_boot_done = 1u; csd_errlog_boot_init(); }
+                    csd_errlog_tick_1ms();
+                    (void) csd_errlog_drain();
+                }
                 vol_mb_now += 1000000;              /* 1 ms @ 100 MHz */
             }
             break;
@@ -886,6 +898,21 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     if ((++hb % 2u) == 1u) debug_printf("PWTRACE server alive t=%u\n", hb);
                 }
 #endif
+                {   /* errlog stall witness: enabled but the host-pair
+                     * counter frozen for 3 x 0.5 s is the exact shape of
+                     * the pre-death 'frozen witnesses' state we chase. */
+                    static unsigned el_fr_prev = 0u, el_stall_n = 0u, el_gen = 0u;
+                    unsigned f = csd_ups_diag_frames();
+                    if (csd_ups_is_enabled() && el_fr_prev != 0u && f == el_fr_prev) {
+                        if (++el_stall_n == 3u) { el_gen++; csd_errlog_post(
+                            EVL_EV_STALL, f, el_gen, 0u); }
+                    } else {
+                        if (el_stall_n >= 3u)
+                            csd_errlog_post(EVL_EV_RESUME, f, el_gen, 0u);
+                        el_stall_n = 0u;
+                    }
+                    el_fr_prev = f;
+                }
                 led_now += 50000000;              /* 0.5 s @ 100 MHz */
                 led_render();
 #ifdef CSD_IDLE_POWER
@@ -1155,7 +1182,22 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                          cmd == AUDIOHW_CMD_TRIM_STAT ||
                          cmd == AUDIOHW_CMD_TRIM_RESET ||
                          cmd == AUDIOHW_CMD_PW_TIMEOUT_GET ||
-                         cmd == AUDIOHW_CMD_PW_TIMEOUT_SAVE)
+                         cmd == AUDIOHW_CMD_PW_TIMEOUT_SAVE ||
+                         /* The ERRLOG commands MUST be listed here too: this
+                          * outer OR is the dispatch gate — a branch inside
+                          * the body that the gate does not admit can never
+                          * run and the request falls through to the unknown
+                          * path (deadlocks the requester). Root cause of the
+                          * 'every ERRLOG query kills SCPI core' chase,
+                          * 2026-11-19. */
+                         cmd == AUDIOHW_CMD_ERRLOG_RSEC ||
+                         cmd == AUDIOHW_CMD_ERRLOG_ERASE ||
+                         cmd == AUDIOHW_CMD_ERRLOG_STAT ||
+                         cmd == AUDIOHW_CMD_ERRLOG_P0 ||
+                         cmd == AUDIOHW_CMD_ERRLOG_P1 ||
+                         cmd == AUDIOHW_CMD_ERRLOG_P2 ||
+                         cmd == AUDIOHW_CMD_ERRLOG_P3 ||
+                         cmd == AUDIOHW_CMD_ERRLOG_PGO)
                 {
                     /* L/R trim persistence (TODO item 3). This branch exists
                      * because quadflashlib drives PORT_SQI_* with synchronous
@@ -1253,6 +1295,47 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                         csd_trim_pw_timeout_set(sec);
                         unsigned ok = (unsigned) csd_trim_journal_now(packed);
                         c[i] <: ok;
+                    }
+                    else if (cmd == AUDIOHW_CMD_ERRLOG_RSEC ||
+                             cmd == AUDIOHW_CMD_ERRLOG_ERASE ||
+                             cmd == AUDIOHW_CMD_ERRLOG_STAT ||
+                             cmd == AUDIOHW_CMD_ERRLOG_P0 ||
+                             cmd == AUDIOHW_CMD_ERRLOG_P1 ||
+                             cmd == AUDIOHW_CMD_ERRLOG_P2 ||
+                             cmd == AUDIOHW_CMD_ERRLOG_P3 ||
+                             cmd == AUDIOHW_CMD_ERRLOG_PGO)
+                    {
+                        /* Boot-flash error log (bench 2026-11-18). Same
+                         * ownership rule as the trim branch above: quadflashlib
+                         * drives the tile[0] SQI ports, so the task core may
+                         * only ask. Scalars in, scalars out; the 4 KiB sector
+                         * stays static inside csd_errlog.c. */
+                        unsafe { csd_errlog_set_clkblk((unsigned) c_trim_qspi); }
+                        if (cmd == AUDIOHW_CMD_ERRLOG_RSEC) {
+                            unsigned sec = 0u; c[i] :> sec;
+                            c[i] <: csd_errlog_read_sector(sec);
+                        } else if (cmd == AUDIOHW_CMD_ERRLOG_ERASE) {
+                            c[i] <: csd_errlog_erase();
+                        } else if (cmd == AUDIOHW_CMD_ERRLOG_P0 ||
+                                   cmd == AUDIOHW_CMD_ERRLOG_P1 ||
+                                   cmd == AUDIOHW_CMD_ERRLOG_P2 ||
+                                   cmd == AUDIOHW_CMD_ERRLOG_P3 ||
+                                   cmd == AUDIOHW_CMD_ERRLOG_PGO) {
+                            /* Post ladder for tile[1] producers: ONE word in
+                             * per command (the proven scalar shape; the FMT
+                             * multi-word command deadlocked this server),
+                             * commit runs post() HERE on tile[0]. */
+                            if (cmd == AUDIOHW_CMD_ERRLOG_PGO) {
+                                csd_errlog_commit_post();
+                            } else {
+                                unsigned v = 0u; c[i] :> v;
+                                csd_errlog_stage(cmd - AUDIOHW_CMD_ERRLOG_P0, v);
+                            }
+                            c[i] <: 1u;
+                        } else {
+                            unsigned idx = 0u; c[i] :> idx;
+                            c[i] <: csd_errlog_status_word(idx);
+                        }
                     }
                     else
                     {
@@ -1740,7 +1823,7 @@ void csd_AudioHwChanInit(chanend c)
  * seqlock statics) and drained by the server's 1 ms tick. The old channel
  * (c_audiohw[1]) carried these words inside one tile at the price of 2
  * tile[0] chanends. */
-void AudioHwRemote_Volume_Update(unsigned channel, unsigned val)
+static void csd_volume_update_body(unsigned channel, unsigned val)
 {
     unsigned AVol, DVol;
     unsigned muted;
@@ -1762,6 +1845,26 @@ void AudioHwRemote_Volume_Update(unsigned channel, unsigned val)
      * tile[0] state machine — rate tier + mute blue. Volume display can be
      * re-added there in the future LED-assignment pass. */
 }
+
+#if MIXER
+void AudioHwRemote_Volume_Update(unsigned channel, unsigned val)
+{
+    csd_volume_update_body(channel, val);
+}
+#else
+/* MIXER=0 (armed-capture bench build, 2026-11-17): lib_xua ep0's non-mixer
+ * volume path (xua_ep0_uacreqs.xc, SC_CLEARSOUND_DAC) calls the
+ * (chanend, reg, val) form. The chanend is a never-initialised cast
+ * (uc_audiohw2) and unused since the same-tile mailbox conversion (chanend
+ * diet 2026-11-04) -- accept and ignore. REVERT with the MIXER=0 bench build. */
+void AudioHwRemote_Volume_Update(chanend c_audiohwremote, unsigned channel, unsigned val)
+{
+    /* c_audiohwremote deliberately untouched: XC refuses (void) on a
+     * resource type ("invalid conversion from resource type"). Unused
+     * scalar-style args need no statement. */
+    csd_volume_update_body(channel, val);
+}
+#endif
 
 void AudioHwRemote_Balance_Update(chanend c_audiohwremote, unsigned val)
 {
