@@ -67,6 +67,10 @@ static volatile unsigned el_ridx;      /* drain cursor (single consumer)     */
 static volatile unsigned el_nonce;
 static volatile unsigned el_drops;     /* posts replaced by tombstone        */
 static volatile unsigned el_ms;        /* uptime clock, 1 ms tick            */
+static unsigned el_sof_cnt;            /* SOF beats (ep_buffer tile[0])      */
+
+void csd_errlog_sof_beat(void) { el_sof_cnt++; }      /* ep_buffer, tile[0]  */
+unsigned csd_errlog_sof_cnt(void) { return el_sof_cnt; } /* board tick       */
 
 static unsigned el_seq;                /* next record seq                    */
 static unsigned el_wsec;               /* write sector 0..NSECT-1            */
@@ -103,6 +107,18 @@ static unsigned char el_scratch[EL_SECTOR] __attribute__((aligned(4)));
 
 /* ---- board hook --------------------------------------------------------- */
 void csd_errlog_tick_1ms(void) { el_ms++; }     /* tile[0], 1 ms vol_mb tick */
+
+/* ---- USB witnesses (user goal: catch the re-enumeration cause) ----------
+ * UserHostActive is lib_xua's WEAK host-state hook (hostactive.c body is
+ * empty — overriding changes no behaviour). EP0 (tile[0]) calls it on
+ * suspend/host-gone (0) and enumeration/config/resume (1): a direct post
+ * runs on tile[0] and is legal (tile-affinity rule). The boot BOOT record
+ * after a death + these events give the last-visible truth per episode. */
+void UserHostActive(int active)
+{
+    csd_errlog_post(active ? EVL_EV_USB_UP : EVL_EV_USB_DOWN,
+                    (unsigned)active, 0u, 0u);
+}
 
 /* ---- checksum/commit relation (producer + verifier, one place) --------- */
 static unsigned el_csum(const volatile unsigned *w)

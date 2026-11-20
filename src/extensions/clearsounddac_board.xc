@@ -37,7 +37,8 @@ extern "C" {
 #include "csd_dsp.h"
 #ifdef CSD_UPSAMPLE_EN
 #include "csd_ups_block.h"     /* the upsampling DSP block engine: option + fabric surface */
-#include "csd_errlog.h"        /* boot-flash error log: death forensics across
+#include "csd_errlog.h"
+extern unsigned csd_errlog_sof_cnt(void); /* csd_errlog: SOF beats (tile[0]) */        /* boot-flash error log: death forensics across
                               * USB re-enumerations (bench 2026-11-18) */
 #ifdef CSD_UPS_ASYNC
 /* lib_xua audiohub's runtime USB->I2S ratio (xua_audiohub.xc). File scope:
@@ -898,6 +899,31 @@ static void pw_execute_cmd(unsigned cmd, client interface i2c_master_if i2c)
                     if ((++hb % 2u) == 1u) debug_printf("PWTRACE server alive t=%u\n", hb);
                 }
 #endif
+                {   /* SOF-loss witness (2026-11-19, death forensics): the
+                     * XUD-side buffer task (tile[0]) counts SOF
+                     * notifications; no movement 3 ticks (~3 ms) while
+                     * notifications were ever flowing = the link stopped
+                     * feeding XUD — the exact pre-re-enumeration shape.
+                     * Genuine host suspend also silences SOF: pair with
+                     * USB_DOWN/USB_UP (EP0) to tell death from suspend.
+                     * One episode per outage; pre-boot (cnt never >0) is
+                     * never reported. */
+                    static unsigned sof_prev = 0u, sof_gen = 0u, sof_lost = 0u;
+                    static unsigned sof_stall_n = 0u;
+                    unsigned c = csd_errlog_sof_cnt();
+                    if (c != sof_prev) {
+                        if (sof_lost) {
+                            csd_errlog_post(EVL_EV_SOF_BACK, c, sof_gen, 0u);
+                            sof_lost = 0u;
+                        }
+                        sof_stall_n = 0u;
+                        sof_prev = c;
+                    } else if (c != 0u && !sof_lost &&
+                               ++sof_stall_n == 3u) {
+                        sof_gen++; sof_lost = 1u;
+                        csd_errlog_post(EVL_EV_SOF_LOST, c, sof_gen, 0u);
+                    }
+                }
                 {   /* errlog stall witness: enabled but the host-pair
                      * counter frozen for 3 x 0.5 s is the exact shape of
                      * the pre-death 'frozen witnesses' state we chase. */

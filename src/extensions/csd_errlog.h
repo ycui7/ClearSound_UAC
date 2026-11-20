@@ -64,6 +64,10 @@ extern "C" {                                /* C body, XC caller (trim rule) */
 #define EVL_EV_STALL      5u   /* enabled but frames frozen >= 1.5 s. a0=fr  */
 #define EVL_EV_RESUME     6u   /* frames advancing again.            a0=fr   */
 #define EVL_EV_TEST      99u   /* injected via DIAG:ERRLOG:TEST. a0=id       */
+#define EVL_EV_USB_DOWN  13u   /* UserHostActive(0): EP0 suspend/host-gone    */
+#define EVL_EV_USB_UP    14u   /* UserHostActive(1): EP0 host-active/config   */
+#define EVL_EV_SOF_LOST  15u   /* 3 ms with no XUD SOF notification. a0=cnt  */
+#define EVL_EV_SOF_BACK  16u   /* SOF notifications resumed.        a0=cnt   */
 #define EVL_EV_ENABLED   11u   /* client enabled 0->1. a0=prev a1=in_hz      */
 #define EVL_EV_DISABLED   12u  /* client enabled 1->0                        */
 
