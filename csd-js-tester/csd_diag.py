@@ -132,8 +132,14 @@ def build_sysex(command: str) -> bytes:
         raise DiagError("SCPI command contains non-7-bit byte")
     if not payload:
         raise DiagError("empty SCPI command")
-    if len(payload) > 512:
-        raise DiagError("SCPI command too long (>512 bytes)")
+    # The old 512-byte guard predates the base64 KERNEL CONTAINER (one
+    # command must carry a whole 1024-tap FIR: ~5.5 KB of base64). The
+    # device-side limit is libscpi's input_buf (INPUT_BUF_LEN-1 bytes,
+    # published live by DIAG:DSP:COEFFicient:FORMat? as recv_cmd_limit);
+    # the parser overflow there is loud (-200), so this guard only needs
+    # to refuse the impossible, not pre-trim the contractual.
+    if len(payload) > 33791:
+        raise DiagError("SCPI command too long (>33791 bytes)")
     return bytes([SYSEX_START, MANUFACTURER_ID]) + payload + bytes([SYSEX_END])
 
 
@@ -217,7 +223,14 @@ class SysexCollector:
                     # Inside SysEx every other byte is payload - including
                     # 0x80-0xEF values such as manufacturer ID byte 0xB1.
                     self._buf.append(b)
-                    if len(self._buf) > 1024:         # runaway guard
+                    # Runaway guard. Must exceed the largest legal reply:
+                    # the kernel-container query (DIAG:DSP:COEFFicient?) is
+                    # sized from the container (FORMat? max_b64_chars, 5480
+                    # at 1024 taps) against the device REPLY_MAX of 32768.
+                    # A 1024-byte cap silently dropped every full-size
+                    # container echo (measured: TIMEOUT with the firmware
+                    # having sent the whole reply).
+                    if len(self._buf) > 40000:        # runaway guard
                         self._buf = None
         return out
 
@@ -844,6 +857,19 @@ class CsdDiag:
         # timeout so a slow device still gets its full budget on the first
         # chunk.
         QUIESCE = 0.05
+        # 2026-11-10, INFO? truncation (found by the task-2 write matrix, which
+        # IndexError'd on a 12-field INFO? right after a kernel write). The
+        # rawmidi path closes a SysEx when the byte stream goes quiet, because
+        # the kernel node drops the terminating F7 -- so a reply that STALLS
+        # mid-message (measured: DIAG:UPSAMPLing:INFO? right after a kernel
+        # write, while that core is blocked in the codec soft-ramp round trip)
+        # used to be synthesised into a complete message and handed back
+        # truncated, with no error anywhere. A short reply that parses as valid
+        # CSV is the worst failure this tool has: every witness delta computed
+        # from it is garbage, and it looks like data. Closing a message is now
+        # gated on a CONFIRM window, and bytes that arrive after the close make
+        # the read FAIL LOUDLY instead of returning the partial reply.
+        QUIESCE_CONFIRM = 0.400
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -858,20 +884,33 @@ class CsdDiag:
                     raise DeviceError(text)
                 return text
             if chunk and self._framing != "usb-midi" and collector.pending():
-                # Keep draining until the stream goes quiet, then close it.
+                # Drain until the stream goes quiet, and STAY quiet for
+                # QUIESCE_CONFIRM before closing. Any traffic resets the clock.
+                drained: List[bytes] = []
+                wait = QUIESCE
                 while True:
-                    r = self._t.recv(want, QUIESCE)
+                    r = self._t.recv(want, wait)
                     if not r:
-                        break
-                    for msg in collector.feed(r):
-                        try:
-                            text = parse_sysex(msg)
-                        except DiagError:
+                        if wait is QUIESCE:
+                            wait = QUIESCE_CONFIRM
                             continue
-                        if raise_error and _is_error_reply(text):
-                            raise DeviceError(text)
-                        return text
-                for msg in collector.flush():
+                        break
+                    wait = QUIESCE
+                    drained.extend(collector.feed(r))
+                drained.extend(collector.flush())
+                # Did anything arrive AFTER we closed the message? Then the
+                # close was premature and the reply is a fragment. Do not
+                # return it; the caller must see a transport fault.
+                late = self._t.recv(want, QUIESCE_CONFIRM)
+                if late:
+                    extra = collector.feed(late)
+                    collector.flush()
+                    raise DiagTimeout(
+                        "reply truncated by transport stall: %d byte(s) "
+                        "arrived after the message was closed (%d complete "
+                        "message(s), %d trailing byte(s))"
+                        % (len(late), len(drained), len(extra) * 0 + len(late)))
+                for msg in drained:
                     try:
                         text = parse_sysex(msg)
                     except DiagError:
