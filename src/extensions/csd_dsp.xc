@@ -373,7 +373,17 @@ void csd_dsp_frame(unsigned *s)
 
     unsigned n = csd_dsp.n;
     unsigned eq_pushed = 0u;   /* 1 = frame handed to the EQ task (it feeds) */
-    if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset != 0u) {
+    /* 2026-11-22 clean-tone campaign: armed PRESet 0 hands off too. Measured:
+     * the audio-core tail feed (engine_off path) repeats 10.7% of pops
+     * (repsL/R 57,416/s vs pops 537k/s, hold-last) — mic FFT: 1k -30 with a
+     * 172 Hz spur at -29 -> margin -1.6 dB = NOISE. The task path at PRESet 2
+     * (kernel shipped as unity) measures CLEAN: margin 42.1 dB at ECHO 0.
+     * At PRESet 0 the task's kernel stage is the same byte-exact bypass, and
+     * take+feed are unconditional (dp200: 79.3k/s with engaged=0) — routing
+     * P0-armed through the handoff gives the identical clean cadence.
+     * engine_off tail feed remains the fallback whenever nothing was pushed. */
+    if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop &&
+        (csd_dsp.preset != 0u || csd_ups_armed())) {
         unsigned h = csd_dsp.head;
         if (csd_dsp.preset == 1u && n != 0u) {
             /* Defense-in-depth (2026-11-22): DELAY arithmetic on n==0
