@@ -2227,7 +2227,16 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
      * Accepted side effect: MCLK feeds the whole I2S fabric, so the mic path is
      * retimed too. The owner has closed the ADC ("forget adc0"). */
     const unsigned host_hz = samFreq;
-    csd_ups_set_want(DAC_TRIM_UPS_GET());
+    /* COLD-BOOT ARM FIX (2026-11-22): this line used to OVERWRITE the live
+     * RAM want with the persistent trim on every config. A STATe 1 issued
+     * mid-stream (persist=0, RAM-only) was therefore erased by the very
+     * next config: the force branch skipped, the fabric stayed at the host
+     * rate with the host codec script — while the OSF-bypass grant (which
+     * lives independently in s_osf_want) opened reg7[3]: modulators starved
+     * + chip FIR off = F-C silence at r8. OR instead of overwrite: intent
+     * from either source forces. Default fabric clear unchanged below;
+     * unarmed cold boot: both sources 0, path byte-identical to before. */
+    csd_ups_set_want(csd_ups_get_want() || DAC_TRIM_UPS_GET());
     /* Default: no fabric override. Cleared on every reconfiguration so a rate
      * change that does NOT want the family rate can never inherit a stale wire
      * rate from the previous stream. */
