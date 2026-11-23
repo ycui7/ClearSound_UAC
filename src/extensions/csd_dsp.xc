@@ -497,7 +497,14 @@ void csd_dsp_frame(unsigned *s)
      * feed pacing vs pops never phase-aligns; same-thread bit5 feed is
      * audible). Single-writer invariant preserved: the moment the task
      * engages (PRESet!=0 paths), engine_off drops and the tail closes. */
-    const unsigned engine_off = !csd_eq_dbg_eng();
+    /* PRESet 0 cannot engage an engine: the handoff gate above requires
+     * preset != 0, so the task can never take/feed here — the audio core
+     * stays the single fd-FIR writer AND shares the wire thread (the
+     * proven same-thread cadence of bit5). csd_dsp.preset is plain local
+     * memory the outer gate already reads every frame — HOT-PATH rule:
+     * no per-frame CALL for this (a csd_eq_dbg_eng() call silenced plain
+     * playback; a global mirror starved armed FD — both 2026-11-22). */
+    const unsigned engine_off = (csd_dsp.preset == 0u);
     if (!eq_pushed &&
         (!csd_feed_owner || (g_csd_probe_mask & 32u) || engine_off) &&
         (!csd_ups_armed() || (g_csd_probe_mask & 32u) || engine_off)) {
