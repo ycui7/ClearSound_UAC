@@ -60,6 +60,7 @@ unsigned csd_eq_cfg_seq_get(void);
 unsigned csd_eq_cfg_on_get(void);
 unsigned csd_eq_cfg_idx_get(void);
 unsigned csd_eq_take_ready(void);
+unsigned csd_eq_dbg_eng(void);   /* engaged mirror; hot-path feed gate (2026-11-22) */
 int  csd_eq_take_l(void);
 int  csd_eq_take_r(void);
 void csd_eq_take_commit(unsigned l, unsigned r); /* publish filtered pair    */

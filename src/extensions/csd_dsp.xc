@@ -375,7 +375,12 @@ void csd_dsp_frame(unsigned *s)
     unsigned eq_pushed = 0u;   /* 1 = frame handed to the EQ task (it feeds) */
     if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset != 0u) {
         unsigned h = csd_dsp.head;
-        if (csd_dsp.preset == 1u) {
+        if (csd_dsp.preset == 1u && n != 0u) {
+            /* Defense-in-depth (2026-11-22): DELAY arithmetic on n==0
+             * underflows (D=(0-1)/2) and reads the ring out of bounds. The
+             * outer gate already requires n!=0; this pins the invariant at
+             * the use site too — a future caller that loosens the outer
+             * gate cannot silently introduce an OOB read here. */
             /* DELAY preset: y[t] = x[t-D], D=(n-1)/2 (same delay the FIR applies).
              * Ring size n: the value at index (t-D) mod n was written at t-D and
              * has not been overwritten since. */
@@ -480,9 +485,22 @@ void csd_dsp_frame(unsigned *s)
      * takes (queue empty) so this is still a SINGLE feed writer — the fd FIR
      * state has one owner (this core) exactly as the disarmed case. */
     g_csd_fb1++;   /* REVERT(bench): frames reaching the fallback gate */
+    /* SHIPPING FEED for the engine-off armed mode (PRESet 0 = resampler
+     * only, no EQ kernel): 2026-11-22. While the task has not adopted an
+     * engine image, engaged==0 means NOTHING can take the ring (handoff is
+     * never called at PRESet 0: the outer gate above), so the task can
+     * never be a feed writer here — the audio core is the ONE owner of the
+     * fd FIR state, and crucially it feeds on the SAME thread that pops:
+     * feed/pair cadence is self-consistent with the wire loop. The task
+     * path cannot provide that (measured r8 legs: enqueue+take+feed all
+     * alive at 79.3k/s through the task, FD still starved — cross-core
+     * feed pacing vs pops never phase-aligns; same-thread bit5 feed is
+     * audible). Single-writer invariant preserved: the moment the task
+     * engages (PRESet!=0 paths), engine_off drops and the tail closes. */
+    const unsigned engine_off = !csd_eq_dbg_eng();
     if (!eq_pushed &&
-        (!csd_feed_owner || (g_csd_probe_mask & 32u)) &&
-        (!csd_ups_armed() || (g_csd_probe_mask & 32u))) {
+        (!csd_feed_owner || (g_csd_probe_mask & 32u) || engine_off) &&
+        (!csd_ups_armed() || (g_csd_probe_mask & 32u) || engine_off)) {
         g_csd_fb2++;   /* REVERT(bench): fallback feed taken */
         s_feedcalls_audio++;
         csd_ups_feed((int)s[0], (int)s[1]);
