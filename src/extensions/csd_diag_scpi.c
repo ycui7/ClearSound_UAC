@@ -3323,7 +3323,17 @@ static SCPI_FPTR_CMD scpi_result_t ups_set(scpi_t *context)
     /* Intent is the operator's, not the codec's: set it from the command so
      * the next stream start can force the rate and the grant can then land. */
     csd_ups_set_want(enable);
-    csd_ups_set_enabled(ap);
+    /* ENABLE demotion fix (2026-11-22): this used to mirror the codec
+     * grant unconditionally. At ratios != 8 the bypass grant is ALWAYS
+     * refused by design (ovr8=0 -> ap=0: double-interpolation guard), so
+     * every operator STATe 1 at 96k/192k actively switched the FD engine
+     * OFF again right after the board's config re-grant ladder had raised
+     * it (csd_ups_set_enabled(ovr8 ? applied : 1u)): 192k host went silent
+     * with en=0. Truth for the chip-FIR-on (refused) regime lives in the
+     * board ladder; this handler may only RAISE enabled (bypass granted)
+     * or CLEAR it on explicit disarm. */
+    if (enable) { if (ap) csd_ups_set_enabled(1u); }
+    else          csd_ups_set_enabled(0u);
     /* This handler is the diag core (tile[1]) and owns the audiohw-diag
      * channel: the ARM/ENABLE journal rides the scalar ladder (tile-affinity
      * rule, csd_errlog.c). */
