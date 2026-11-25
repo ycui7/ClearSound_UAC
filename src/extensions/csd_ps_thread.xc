@@ -62,66 +62,55 @@ extern unsigned csd_ups_get_arm_snap(unsigned idx);
 extern void csd_ups_force_reconfig(void);   /* dp223d (csd_ps_ring.c) */
 void csd_ps_thread(void)
 {
-    /* dp225f: producer BACK on tile[0] (main.xc vendor branch),
-     * channel-free: pops read the engine DS locally (no cross-tile
-     * SDRAM: 32 pops/pass x remote DS = 178 us/pass = 5.6k pass/s
-     * = 178k pair/s ceiling vs 239k needed). */
+    /* dp225o: producer body moved to csd_ps_thread_t1 (tile[1]). This
+     * tile[0] task is PARKED (main.xc spawns it unconditionally). Sleep
+     * on a timer — never busy-spin (it would steal the XUD core). */
+    timer pk_tmr; unsigned pkv = 0u;
+    while (1)
+    {   select { case pk_tmr when timerafter((pkv + 100000000u) & ~1u) :> void: break; }
+        pk_tmr :> pkv;
+    }
+}
+
+void csd_ps_thread_t1(chanend cePop, chanend ceUbR)
+{
+    /* dp225o 2026-11-24: producer MOVED BACK to its own tile[1] core.
+     * Fresh evidence after the publish ring (dp225m) and ring widen
+     * (dp225n): host delivers EXACTLY 192k frames/s (filled delta =
+     * 458,752 B/s, refusals 0), publish ring feeds the engine the full
+     * 192k/s, engine mints 2x = 384k/s is REQUIRED, but consumed froze
+     * at wakes x lead (246 pass/s x 1022 = 251.7k/s). The pass rate is
+     * par-scheduling-starved on tile[0] (XUD + decouple saturate that
+     * core: 32k packets/s + 193.5k token exchanges/s). dp209's rejection
+     * of tile[1] predates both fixes and measured the POP cost, not the
+     * wake rate — the wake starvation is the binding constraint now.
+     * tile[1] hosts wire on one core; this task gets the other. All our
+     * DS (claim ring, engine, publish-ring reader cursor) is tile[1]
+     * local. The pass sleeps timerafter(now+100) so a core-sharing
+     * schedule stays cooperative. Channels unused (legacy plumbing). */
+    /* channels intentionally unused */
     unsigned arm_seen = 0u, arm_stable = 0u;
     csd_ups_force_reconfig();
     unsigned act_div = 0u;
-    /* dp225f: cooperative-par yield. The pass loop is pure compute; on
-     * tile[0] a sync-op-free loop starves the wire task. ONE timer, acquired
-     * ONCE at thread start (owner rule: no timer churn); a single read per
-     * pass is the sync point that lets the wire run. */
     timer pt_yield;
-    unsigned ptv;
-    /* dp225f: feed-rate estimator -> the wire's pacing target. The wire
-     * free-runs on port credit; at ratio 2 it must run at EXACTLY 2x the
-     * host feed rate or the claim ring starve-repeats (27% measured) time-
-     * dilate the engine output -> 91 Hz comb. The producer already reads a
-     * timer per pass; deltas give the clock, g_csd_ft1 the feed count. */
+    unsigned ptv = 0u;
     while (1)
     {
-        pt_yield :> ptv;          /* sync op = yield to the tile's par */
+        pt_yield :> ptv;          /* dp225p: spin, no sleep (own core) */
         csd_ps_note_clock(ptv);   /* dp225f: feed-rate estimator (C side) */
         g_csd_psw_alive++;   /* dp225b: liveness heartbeat */
-        /* dp224 boot zero-storm guard (PRESERVED): wipe the engine epoch
-         * once the armed truth STABLY rises (8 consecutive visits) so the
-         * ring never carries pre-stream zero pairs. */
         unsigned ar = csd_ups_armed();
         if (ar != arm_seen)
         {   arm_seen = ar; arm_stable = 0u; }
         else if (ar != 0u && arm_stable < 8u)
         {   if (++arm_stable == 8u) { csd_ups_force_reconfig(); } }
 
-        /* dp225e: probe-64 freeze DROPPED — it held a hardware
-         * timer; task start blocked acquiring it (timer pool), which is
-         * precisely why psw_alive was 0 (owner rule: our diagnostics must
-         * not grab scarce hardware timing resources). */
+        if ((act_div++ & 7u) == 0u) { csd_ps_active_refresh(); }
 
-        /* dp225b: refresh the wire's claim-enable EVERY pass (not inside
-         * produce_pair only): once the queue hit depth 63 the produce gate
-         * closed, g_csd_ps_active froze at its boot-0, the wire claim never
-         * started, and the queue could never drain (permanent consumed=0). */
-        if ((act_div++ & 7u) == 0u) { csd_ps_active_refresh(); }   /* dp225e: refresh at pass0 */
-
-        /* dp225f: the WHOLE pass — drain burst (host IN) + produce burst
-         * (engine OUT -> claim ring). Lost during the dp225d mailbox
-         * rewrite: the loop drained but never produced, so the claim ring
-         * stayed empty (ps_seq 0, every claim starved). */
         csd_ps_pass();
 
         g_csd_psw_pass++;
     }
-
-}
-
-void csd_ps_thread_t1(chanend cePop, chanend ceUbR)
-{
-    /* dp225f: shell — producer runs on tile[0] in csd_ps_thread().
-     * Kept so the channel plumbing compiles; MUST NOT produce (a second
-     * producer would double-pop the engine queue). */
-    while (1) { }
 }
 
 

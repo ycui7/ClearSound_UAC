@@ -34,7 +34,19 @@
 #define XS1_TIMER_HZ 100000000u           /* 10 ns XS1 timer ticks        */
 #endif
 
-#define CSD_PS_RING 128u                   /* REVERT(dp210): 8 -> 64. The
+#define CSD_PS_RING 1024u                  /* dp225n 2026-11-24: 128 -> 1024.
+                                           * Supply math (measured, feed ring
+                                           * dp225m in place): producer wakes
+                                           * only ~1966/s (par scheduling —
+                                           * the wire task barely blocks) so
+                                           * supply = wakes x lead. Lead 126
+                                           * capped supply at 249.7k pair/s =
+                                           * consumed EXACTLY (wire demands
+                                           * 384k). Ring 1024 + lead 1022
+                                           * gives 1966x1022 = 2.0M/s of
+                                           * headroom; latency cost 2.6 ms,
+                                           * irrelevant for the FD chain.
+                                           * power of two. Original note:
                                            * producer pays ~100 t of wake
                                            * latency per timer wait; at the
                                            * r2 pass rate (one pass per wire
@@ -156,6 +168,7 @@ unsigned g_csd_hb = 0;       /* dp224: host-frame flag (set by vendor c_aud comp
 unsigned g_csd_ub_race = 0;   /* dp224: seqlock re-reads */
 unsigned g_csd_psw_pass = 0;   /* dp223d producer pass counter */
 unsigned g_csd_wl_claim = 0;   /* g_csd_ps_active claim entries */
+unsigned g_csd_fb_freeze = 0;  /* dp225h: read by ep_buffer.xc (feedback freeze while armed) */
 unsigned g_csd_wl_emit = 0;    /* DAC emit reached */
 unsigned g_csd_wl_drain = 0;   /* inline drain: seq seen != cursor */
 unsigned g_csd_wl_acc = 0;     /* inline drain: pairs accepted+fed */
@@ -201,6 +214,22 @@ unsigned g_csd_p_tdl = 0, g_csd_p_pndl = 0;   /* REVERT(dp198): wait-effect */
  * the wire-side UBM call (stock path, passT leg untouched). */
 unsigned g_csd_ub_seq = 0;   /* dp223c: plain (XC linker bans cross-TU volatile mismatch); wire loop has blocking port ops = reload barrier */
 int g_csd_ub_pair[2] = {0, 0};
+/* dp225m 2026-11-24: PUBLISH RING (128 pairs). Measured with the burst fix
+ * (dp225l): XUD commits EXACTLY 458,752 B/s = 192k frames/s (filled delta,
+ * refusals 0) yet the drain consumed only 140.2k/s. Mechanism: last-wins
+ * single slot + drain wakes at the pass cadence (4387/s = 228 us); ~44
+ * publishes elapse between passes and the slot keeps only the LAST —
+ * ~28% of host frames were overwritten unread. The dp210 note below
+ * ("the fix is a cadence match, not a new queue") assumed a feeder at
+ * 192k/s that never survived (feeder thread retired dp225 era). With the
+ * drain pinned to the pass grid by cooperative par, a ring is REQUIRED.
+ * Wire-side cost: 5 plain stores per exchange (193.5k/s), same sanctioned
+ * handoff region. Wrap-safe: writer never lapses the reader (lead gate on
+ * the drain side bounds at RING). REVERT: delete ring, restore slot reads. */
+#define CSD_UB_RING 128u
+int g_csd_ub_ring[CSD_UB_RING * 2u];
+unsigned g_csd_ub_rseq = 0;   /* even counter; pair index = (rseq>>1)&127 */
+unsigned g_csd_ub_lapdrop = 0; /* REVERT(dp225m): ring-lap drops (should stay 0) */
 /* dp210 2026-11-23: NO host-pair queue here. The single-slot seqlock is
  * lib_xua's own handoff (xua_audiohub_st.h csd_ub_defer_handoff) and the
  * lib_xua buffers (decouple outAudioBuff / the eq in-ring) are the FIFOs.
@@ -240,12 +269,17 @@ int csd_ub_consume_if_new(void)   /* REVERT(dp210): 1 = consumed one pair this
      * (measured: ub_seq 3.38M in one copy, drain frozen at boot prefill
      * in the other). C references take the linked canonical address;
      * cross-tile traffic is remote memory, which xcommon handles. */
-    unsigned sq = g_csd_ub_seq;
-    if ((sq & 1u) != 0u || sq == s_ub_last) { return 0; }
-    unsigned l0 = (unsigned)g_csd_ub_pair[0];
-    unsigned l1 = (unsigned)g_csd_ub_pair[1];
-    if (g_csd_ub_seq != sq) { return 0; }  /* wire re-opened: retry next */
-    s_ub_last = sq;
+    unsigned sq = g_csd_ub_rseq;
+    if (sq == s_ub_last) { return 0; }
+    /* dp225m: ring read (see the ring decl). Never lapped in practice
+     * (pass gap ~44 pairs << 128); the clamp keeps a wedge from a long
+     * stall honest (drop old frames, keep the stream live). */
+    unsigned r = s_ub_last;
+    if ((sq - r) > (CSD_UB_RING * 2u - 2u)) { r = (sq - (CSD_UB_RING * 2u - 2u)) & ~1u; g_csd_ub_lapdrop++; }
+    unsigned ri = ((r >> 1) & (CSD_UB_RING - 1u)) * 2u;
+    unsigned l0 = (unsigned)g_csd_ub_ring[ri];
+    unsigned l1 = (unsigned)g_csd_ub_ring[ri + 1u];
+    s_ub_last = r + 2u;
     unsigned pair[2] = { l0, l1 };
     unsigned t_u = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;  /* REVERT(dp201) */
     /* dp223: call the FUNCTIONAL core directly (stream witness + FIR feed),
@@ -408,18 +442,18 @@ int csd_ps_claim(unsigned ch, int w)
 void csd_ps_pass(void)
 {
     unsigned k;
-    for (k = 0u; k < 64u; k++)
+    for (k = 0u; k < 512u; k++)
     {   int c = csd_ub_consume_if_new();
         if (c == 0) { break; }
         if (c < 0)  { (void)csd_ub_consume_if_new(); }   /* one race retry */
     }
-    /* dp225f: burst 32 -> 63 (the lead cap). The tile's scheduling rate
-     * caps passes at ~5.6k/s (measured, both tiles); pairs/s = passes x
-     * burst, and 5.6k x 32 = 181k < the 239k pair/s the wire claims.
-     * 63 x 5.6k = 353k > 239k with the ring lead 63 still the safety
-     * bound. */
-    for (k = 0u; k < 63u; k++)
-    {   if ((s_produced_local - ps_ldw_consumed()) >= 63u) { break; }
+    /* dp225l: burst/lead 63 -> 127. Measured pass ceiling 4387/s (par
+     * scheduling): 63 x 4387 = 276k pair/s = the observed consumed rate
+     * EXACTLY — the producer was burst-capped, not supply-capped. The wire
+     * at true 384k it/s claims 384k/s; 127 x 4387 = 557k covers it with
+     * ring-128 wrap-safety intact (lead never reaches 128). */
+    for (k = 0u; k < CSD_PS_LEAD; k++)
+    {   if ((s_produced_local - ps_ldw_consumed()) >= CSD_PS_LEAD) { break; }
         csd_ps_produce_pair();
     }
 }
@@ -427,7 +461,16 @@ void csd_ps_pass(void)
 /* dp225b: .c accessor for the active refresh (XC parallel checker ignores C
  * bodies; direct write from the producer .xc trips the checker). */
 /* csd_ups_active declared at file top */
-void csd_ps_active_refresh(void) { g_csd_ps_active = csd_ups_active(); }
+void csd_ps_active_refresh(void)
+{   g_csd_ps_active = csd_ups_active();
+    /* dp225h: freeze the USB feedback at its nominal stream-start value
+     * while armed. MEASURED: host delivers 176413 frames/s = 192000 x
+     * 44100/48000 (5 digits) -> the SOF-measured fb behaves 44.1/48
+     * family-misclassified; supply is 8.1% short of nominal, feeding the
+     * starve-repeat comb. Freeze -> host keeps nominal 192k while armed;
+     * releases on disarm so native legs keep true async tracking. */
+    g_csd_fb_freeze = g_csd_ps_active ? 1u : 0u;
+}
 
 /* dp225f: producer-clock feed-rate estimator. Called from the producer's
  * .xc loop with its timer read; all shared reads/writes live here (plain
