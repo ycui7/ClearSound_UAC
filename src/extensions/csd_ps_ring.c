@@ -455,11 +455,10 @@ void csd_ps_note_clock(unsigned tv)
              * it follow slow host drift. */
             if (hz < 96000u) { hz = 0u; }
             if (hz > 400000u) { hz = 400000u; }
-            {   unsigned cur = g_csd_wire_target_hz;
-                unsigned dec = cur - cur/100u;
-                if ((unsigned)hz > cur) { g_csd_wire_target_hz = (unsigned)hz; }
-                else if (cur != 0u && (unsigned)hz < dec && hz > 96000u)
-                {   g_csd_wire_target_hz = dec; }
+            {   /* dp225g: estimator is OBSERVER ONLY — its tracking
+                 * spiralled (wire slows -> feed slows -> floor lowers).
+                 * The floor is set deterministically in the vendor loop. */
+                g_csd_wl_pass2 = (unsigned)hz;   /* FD witness: measured 2x feed Hz */
             }
         }
         est_pass = 0u;
