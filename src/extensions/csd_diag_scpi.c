@@ -3415,6 +3415,72 @@ static SCPI_FPTR_CMD scpi_result_t dbg_seg_clear(scpi_t *context)
 
 /* REVERT(dp177): dedicated pacer probe — unambiguous named readout of the
  * live claim/floor pacing state (positional INFO tail proved error-prone). */
+/* dp211 2026-11-23: FD block-engine truth query. The engine cursors
+ * (pushn/fidx/bp/filled/rd) live BEYOND the INFO emit's specifier budget
+ * (237 args vs 185 %u) and were silently dropped — every "pushn frozen"
+ * reading to date was reading a neighbouring field. This query emits
+ * exactly the engine's own counters. */
+static SCPI_FPTR_CMD scpi_result_t ups_fd_q(scpi_t *context)
+{
+    /* dp213 2026-11-23 (owner directive): vendor libs are PRISTINE — the
+     * lib_xua/lib_xud witnesses added earlier read tile[0] DS from this
+     * tile[1] task and were artifacts; all such code is reverted. This
+     * query emits ONLY app-owned (tile[1] DS) engine witnesses. */
+    extern unsigned csd_ups_dbg_pushn(void);
+    extern unsigned csd_ups_dbg_fidx(void);
+    extern unsigned csd_ups_dbg_filled(void);
+    extern unsigned csd_ups_dbg_popn0(void);
+    extern unsigned csd_ups_dbg_gate(void);
+    extern unsigned csd_ups_dbg_refusals(void);
+    extern unsigned csd_ups_dbg_ratecalls(void);
+    extern unsigned csd_ups_dbg_lastrq(void);
+    extern unsigned csd_ups_dbg_raterej(void);
+    extern unsigned csd_ups_dbg_inhz(void);
+    extern unsigned s_feedcalls_audio, s_feedcalls_task;
+    extern unsigned g_csd_bp, g_csd_ft1, g_csd_ft3, g_csd_ft4, g_csd_ft5;
+    extern unsigned g_csd_ahc_n, g_csd_ahc_hz;
+    extern unsigned csd_ub_feed_owner;   /* dp214 */
+    extern unsigned g_csd_ub_seq, g_csd_p_ubmn;   /* dp215: UBM slot liveness */
+    extern unsigned g_csd_wire_n, g_csd_ps_fresh, g_csd_ps_starve;
+    extern unsigned g_csd_ps_seq, g_csd_ps_consumed, g_csd_psw_alive; /* dp215 */
+    extern unsigned g_csd_wl_pass, g_csd_wl_claim, g_csd_wl_emit; /* dp216 */
+    extern unsigned g_csd_wl_drain, g_csd_wl_acc; /* dp216 */
+    extern unsigned g_csd_wl_pass2, g_csd_wl_r2, g_csd_wl_claim2; /* dp216b */
+    extern unsigned g_csd_psw_pass, g_csd_psw_post, g_csd_psw_seed, g_csd_psw_pre;   /* dp223d/e */
+    extern unsigned g_csd_ub_race;   /* dp224 */
+    extern unsigned g_csd_wire_iter;   /* dp225b: vendor main-loop heartbeat (file scope in xua_audiohub.xc) */
+    extern unsigned g_csd_reconfig_n;   /* dp224b */
+    extern unsigned g_csd_pt_drain, g_csd_pt_prod;   /* dp224c */
+    extern unsigned csd_ups_get_arm_snap(unsigned idx);   /* dp223d */
+extern unsigned g_csd_ups_conds;   /* dp225e */
+    unsigned arm_w = 0u, arm_hz = 0u, arm_bp = 0u;   /* dp223d */
+    arm_w = csd_ups_get_arm_snap(0u);
+    arm_hz = csd_ups_get_arm_snap(1u);
+    arm_bp = g_csd_ups_conds;   /* dp225e: condition bits (csd_ups_block.c) */
+    char buf[768];
+    int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
+                     csd_ups_dbg_pushn(), csd_ups_dbg_fidx(),
+                     csd_ups_dbg_filled(), csd_ups_dbg_popn0(),
+                     g_csd_bp,
+                     s_feedcalls_audio, s_feedcalls_task,
+                     g_csd_ft1, g_csd_ft4, g_csd_ft5,
+                     csd_ups_dbg_gate(), csd_ups_dbg_refusals(), g_csd_ft3,
+                     g_csd_ahc_n, g_csd_ahc_hz,
+                     csd_ups_dbg_ratecalls(), csd_ups_dbg_lastrq(),
+                     csd_ups_dbg_inhz(), csd_ub_feed_owner,
+                     g_csd_ub_seq, g_csd_p_ubmn,
+                     g_csd_wire_n, g_csd_ps_fresh, g_csd_ps_starve,
+                     g_csd_ps_seq, g_csd_ps_consumed, g_csd_psw_alive,
+                     g_csd_wl_pass, g_csd_wl_claim, g_csd_wl_emit,
+                     g_csd_wl_drain, g_csd_wl_acc,
+                     g_csd_wl_pass2, g_csd_wl_r2, g_csd_wl_claim2,
+                     arm_w, arm_hz, arm_bp, g_csd_psw_pass, g_csd_psw_post, g_csd_psw_seed, g_csd_psw_pre, g_csd_ub_race, g_csd_reconfig_n, g_csd_pt_drain, g_csd_pt_prod, g_csd_wire_iter);
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    SCPI_ResultCharacters(context, buf, n);
+    return SCPI_RES_OK;
+}
+
 static SCPI_FPTR_CMD scpi_result_t ups_pace_q(scpi_t *context)
 
 {
@@ -3577,6 +3643,7 @@ static const scpi_command_t csd_commands[] = {
 
 
     { .pattern = "DIAG:UPSAMPLing:PACE?",   .callback = ups_pace_q        },
+    { .pattern = "DIAG:UPSAMPLing:FD?",     .callback = ups_fd_q         },
     /* REVERT(dp183): attribution probe (see handlers above). */
     { .pattern = "DEBUG:CSD:PROBE?",        .callback = dbg_probe_q       },
     { .pattern = "DEBUG:CSD:PROBE",         .callback = dbg_probe_set     },

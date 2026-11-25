@@ -56,6 +56,7 @@ void     csd_ups_set_want(unsigned w);
 unsigned csd_ups_get_want(void);
 void     csd_ups_set_enabled(unsigned enable);   /* 'on' is a reserved word in XC */
 unsigned csd_ups_is_enabled(void);
+unsigned csd_ups_want_raw(void);   /* dp217: raw s_want (bench board pacer; see csd_ups_block.c) */
 
 /* ---- data plane --------------------------------------------------------- */
 

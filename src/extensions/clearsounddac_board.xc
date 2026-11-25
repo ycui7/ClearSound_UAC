@@ -2195,9 +2195,11 @@ unsigned csd_ups_now(void)
 
 void xua_csd_record_forced(unsigned samFreq, unsigned mClk);
 extern void xua_csd_set_fabric_force(unsigned hz);
+unsigned g_csd_ahc_n, g_csd_ahc_hz;   /* dp212 witnesses */
 void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
                         unsigned sampRes_DAC, unsigned sampRes_ADC)
-{    
+{
+    g_csd_ahc_n++; g_csd_ahc_hz = samFreq;   /* dp212: does the host rate-change path ever fire? */    
     assert(samFreq >= 22050);
 #ifdef CSD_GEN_EN
     /* Proof-of-execution for the rig: a leg that claims to have forced a
@@ -2412,7 +2414,14 @@ void csd_AudioHwConfig( unsigned samFreq, unsigned mClk, unsigned dsdMode,
          * alone while a family stream is armed. */
         if (ups_fam != 0u || !csd_ups_armed())
 #ifdef CSD_UPS_ASYNC
-            xua_csd_set_usb_ratio(csd_ups_is_enabled() && ups_wire != 0u
+            /* dp217 2026-11-23: armed truth = the STATe ladder (s_want),
+             * not the codec OSF grant. On this bench the grant path never
+             * fires (bench ES9219, cf. csd_ups_feed's same-root gate fix),
+             * so is_enabled() pinned ratio 1: the claim/drain/producer
+             * machine never started (measured wl_pass2 0 at an armed 192k
+             * stream — wire native, host 2x slow, silent). csd_ups_get_want()
+             * is RELEASE-pinned 0; csd_ups_want_raw() reads the ladder. */
+            xua_csd_set_usb_ratio(csd_ups_want_raw() && ups_wire != 0u
                                   ? ups_wire / host_hz : 1u);
 #else
             (void)ups_fam;

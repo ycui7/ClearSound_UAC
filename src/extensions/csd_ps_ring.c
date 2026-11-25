@@ -34,19 +34,44 @@
 #define XS1_TIMER_HZ 100000000u           /* 10 ns XS1 timer ticks        */
 #endif
 
-#define CSD_PS_RING 8u                    /* power of two                  */
+#define CSD_PS_RING 128u                   /* REVERT(dp210): 8 -> 64. The
+                                           * producer pays ~100 t of wake
+                                           * latency per timer wait; at the
+                                           * r2 pass rate (one pass per wire
+                                           * frame) that puts the shared
+                                           * core ~32 % over budget and the
+                                           * truth pass (PROBE 48, true
+                                           * window) measured the result:
+                                           * passes 291,270/s vs 383,986
+                                           * wire claims = 95,541/s honest
+                                           * holds (24.9 % duplicate
+                                           * frames) = the 122.88 Hz comb.
+                                           * The queue ring lets ONE wake
+                                           * top up a burst of pairs and
+                                           * then sleep LEAD/2 strides,
+                                           * amortising the wake x30 (12.8k
+                                           * wakes/s instead of 384k).
+                                           * power of two                */
 #define CSD_PS_LEAD (CSD_PS_RING - 2u)    /* bounded producer lead         */
 
-/* ring words: producer writes; consumer reads after the seq cursor moves. */
-static int      s_w0[CSD_PS_RING];
-static int      s_w1[CSD_PS_RING];
+/* ring words: producer writes; consumer reads after the seq cursor moves.
+ * REVERT(dp209): de-stated for the inline wire-side claim (dp189's mailbox
+ * experiment is over: last-wins has NO repeat counter and its phase beat
+ * against the producer publish grid is the periodic duplicate-frame source
+ * = the 122.88 Hz r2 comb. Queue semantics with a consumed cursor make the
+ * duplicate visible (g_csd_ps_starve) and rate-free. Both threads are
+ * tile[0] (main.xc dp161 branch + audiohub) -> local DS access either way.
+ * REVERT: re-static when the mailbox is restored. */
+int      g_csd_ps_w0[CSD_PS_RING];
+int      g_csd_ps_w1[CSD_PS_RING];
 /* Cursors are NON-static: the inline-asm ldw references them by symbol
  * (dp-relative), which needs file-global linkage — same idiom as the
  * g_digData reads in xua_audiohub. Opacity to the parallel-usage checker
  * comes from living in a C module, not from storage class. */
-unsigned g_csd_ps_seq      = 0u;   /* pairs published (producer writes)    */
+unsigned g_csd_wire_target_hz = 0u;  /* dp225f: producer-estimated 2x host feed rate (wire floor pacing) */
+unsigned g_csd_ps_seq = 0u;   /* pairs published (producer writes)    */
 unsigned g_csd_ps_consumed = 0u;   /* pairs claimed   (consumer writes)    */
-static unsigned s_produced_local = 0u; /* producer-private copy            */
+unsigned s_produced_local = 0u; /* producer-private copy            */
 /* REVERT(dp207): producer-private publish sequence (see csd_ps_produce_pair).
  * Single writer = the producer; the two stores below keep the odd/even
  * window the reader validates, without paying the shared-memory LOADs the
@@ -61,13 +86,15 @@ unsigned g_csd_ps_overwrite = 0;   /* producer exceeded lead, published    */
 
 /* application side (csd_ups_block.c) */
 extern int      csd_ups_slot(unsigned ch, int w);
-extern int      csd_ups_pop_active(unsigned ch, int w); /* REVERT(dp198) */
+extern int      csd_ups_pop_active(unsigned ch, int w);
+void csd_ups_pop_pair(unsigned *w0, unsigned *w1);
+unsigned csd_ups_out_empty(void);   /* dp225f (csd_ups_block.c): 1 = no fresh out word */   /* REVERT(dp210) */ /* REVERT(dp198) */
 extern unsigned csd_ups_active(void);
 
 static inline unsigned ps_ldw_seq(void)
-{ unsigned v; asm volatile("ldw %0, dp[g_csd_ps_seq]" : "=r"(v)); return v; }
+{ return g_csd_ps_seq; }   /* dp223c: C canonical */
 static inline unsigned ps_ldw_consumed(void)
-{ unsigned v; asm volatile("ldw %0, dp[g_csd_ps_consumed]" : "=r"(v)); return v; }
+{ return g_csd_ps_consumed; }   /* dp223c */
 
 /* Cadence-owner helpers (called from csd_ps_thread.xc) */
 unsigned csd_ps_lead(void)          { return s_produced_local - ps_ldw_consumed(); }
@@ -111,6 +138,30 @@ int      g_csd_ps_mbox_w1  = 0;
  * cross-core seq-cursor forms (.63/.64/.65) all mis-counted consumption
  * through seqlock races — a plain counter has no such states. */
 unsigned g_csd_ps_fresh = 0u;
+/* dp216 witnesses — DEFINED HERE (this TU's tile[1] copy is the one the
+ * diag task reads: g_csd_wire_n/g_csd_ps_fresh proven live). audiohub
+ * (xua_audiohub.xc) increments via externs. A definition in the .xc file
+ * lands in the tile[0] DS copy and reads 0 — re-proven 2026-11-23. */
+unsigned g_csd_wl_pass = 0;    /* wire-claim guard iterations (L loop) */
+unsigned g_csd_psw_pre = 0;    /* dp223e producer pre-wait */
+unsigned g_csd_psw_post = 0;   /* dp223d producer post-wait */
+unsigned g_csd_psw_seed = 0;   /* dp223d producer re-seeds */
+unsigned g_csd_pt_drain = 0, g_csd_pt_prod = 0, g_csd_pt_rest = 0;  /* dp224c pass-phase cycles */
+int csd_ps_lead_c(void)   /* dp224d: lead via .c (XC par-checker ignores C bodies) */
+{
+    return (int)(s_produced_local - g_csd_ps_consumed);
+}
+
+unsigned g_csd_hb = 0;       /* dp224: host-frame flag (set by vendor c_aud complete) */
+unsigned g_csd_ub_race = 0;   /* dp224: seqlock re-reads */
+unsigned g_csd_psw_pass = 0;   /* dp223d producer pass counter */
+unsigned g_csd_wl_claim = 0;   /* g_csd_ps_active claim entries */
+unsigned g_csd_wl_emit = 0;    /* DAC emit reached */
+unsigned g_csd_wl_drain = 0;   /* inline drain: seq seen != cursor */
+unsigned g_csd_wl_acc = 0;     /* inline drain: pairs accepted+fed */
+unsigned g_csd_wl_pass2 = 0;   /* dp216b: R (post-exchange) claim guard entries */
+unsigned g_csd_wl_r2 = 0;      /* dp216b: g_csd_usb_ratio via asm dp-relative */
+unsigned g_csd_wl_claim2 = 0;  /* dp216b: R-site ps_active claim entries */
 /* REVERT(dp196): wire-side attribution witnesses (written in
  * xua_audiohub.xc L-site accept path; read via PACE?). */
 unsigned g_csd_wire_l0, g_csd_wire_seen, g_csd_wire_s1, g_csd_wire_s2,
@@ -148,8 +199,18 @@ unsigned g_csd_p_tdl = 0, g_csd_p_pndl = 0;   /* REVERT(dp198): wait-effect */
  * ldw/stw per the dp199 no-hoist rule). The host pair is a COPY: the
  * wire re-uses samplesOut for the mailbox pop. ECHO 0/1 and ratio-1 keep
  * the wire-side UBM call (stock path, passT leg untouched). */
-unsigned g_csd_ub_seq = 0;
-int      g_csd_ub_pair[2] = {0, 0};
+unsigned g_csd_ub_seq = 0;   /* dp223c: plain (XC linker bans cross-TU volatile mismatch); wire loop has blocking port ops = reload barrier */
+int g_csd_ub_pair[2] = {0, 0};
+/* dp210 2026-11-23: NO host-pair queue here. The single-slot seqlock is
+ * lib_xua's own handoff (xua_audiohub_st.h csd_ub_defer_handoff) and the
+ * lib_xua buffers (decouple outAudioBuff / the eq in-ring) are the FIFOs.
+ * A last-wins slot drops frames ONLY when the consumer wakes slower than
+ * the publisher (the batch producer at 12.8k wakes/s against a 192k/s
+ * publish — p_ubmn 20k/s truth). The fix is a cadence match, not a new
+ * queue: csd_ub_feeder_thread() (csd_ps_thread.xc) consumes on the host
+ * grid (one publish, one consume, ~192k/s) and nothing is lost. If a
+ * future change ever makes the feeder slower than the publish rate it
+ * MUST consume lib_xua's own buffers, never a hand-rolled ring. */
 void UserBufferManagement(unsigned sampsFromUsbToAudio[],
                           unsigned sampsFromAudioToUsb[]);
 static unsigned s_ub_last = 0u;
@@ -166,22 +227,38 @@ extern unsigned csd_ups_now(void);
 extern unsigned g_csd_probe_mask;
 extern volatile unsigned s_pass_pm;   /* csd_ups_block.c: per-pass mask
                                        * snapshot (s16 close-out lean-gate) */
-void csd_ub_consume_if_new(void)
+extern void csd_ups_feed(int l, int r);
+extern void csd_pw_note_host_pair(int l, int r);
+extern unsigned csd_ub_feed_owner;   /* csd_ups_block.c (dp215: def moved to tile[1] DS) */
+int csd_ub_consume_if_new(void)   /* REVERT(dp210): 1 = consumed one pair this
+                                     * call — batch producer drains to 0 */
 {
-    unsigned sq;
-    asm volatile("ldw %0, dp[g_csd_ub_seq]" : "=r"(sq));
-    if ((sq & 1u) != 0u || sq == s_ub_last) { return; }
-    unsigned l0, l1, chk;
-    asm volatile("ldw %0, dp[g_csd_ub_pair]"   : "=r"(l0));
-    asm volatile("ldw %0, dp[g_csd_ub_pair+4]" : "=r"(l1));
-    asm volatile("ldw %0, dp[g_csd_ub_seq]"    : "=r"(chk));
-    if (chk != sq) { return; }             /* wire re-opened: retry next */
+    /* dp223c: PLAIN C on volatile canonical objects — no dp[] asm anywhere.
+     * dp is a THREAD register: dp-relative asm inside a function reached
+     * from another tile's task resolves against the CALLER task's data
+     * segment, so publisher and consumer each hit their own tile's copy
+     * (measured: ub_seq 3.38M in one copy, drain frozen at boot prefill
+     * in the other). C references take the linked canonical address;
+     * cross-tile traffic is remote memory, which xcommon handles. */
+    unsigned sq = g_csd_ub_seq;
+    if ((sq & 1u) != 0u || sq == s_ub_last) { return 0; }
+    unsigned l0 = (unsigned)g_csd_ub_pair[0];
+    unsigned l1 = (unsigned)g_csd_ub_pair[1];
+    if (g_csd_ub_seq != sq) { return 0; }  /* wire re-opened: retry next */
     s_ub_last = sq;
     unsigned pair[2] = { l0, l1 };
     unsigned t_u = (g_csd_probe_mask & 16u) ? csd_ups_now() : 0u;  /* REVERT(dp201) */
-    UserBufferManagement(pair, s_ub_mic);
+    /* dp223: call the FUNCTIONAL core directly (stream witness + FIR feed),
+     * not the full UserBufferManagement body — that body's armed fast path
+     * now republishes the slot (wire-side publisher role), which from here
+     * would self-spin. Mic-mirror / preset-adopt belong to the pop-side
+     * publish (csd_dsp.xc armed block) and the native path. */
+    csd_pw_note_host_pair((int)pair[0], (int)pair[1]);
+    csd_ups_feed((int)pair[0], (int)pair[1]);
+    (void)s_ub_mic;
     if (g_csd_probe_mask & 16u) { g_csd_p_ubm += csd_ups_now() - t_u;  /* REVERT(dp201) */
                                   g_csd_p_ubmn++; }
+    return 1;
 }
 
 void csd_ps_produce_pair(void)
@@ -202,30 +279,68 @@ void csd_ps_produce_pair(void)
     /* Session 16 close-out: ONE mask read per pass (dp204 lean-gate rule)
      * published for the pop path's gated sites (s_pass_pm). */
     s_pass_pm = g_csd_probe_mask;
+    /* REVERT(dp209): DEMAND-DRIVEN PRODUCTION (queue semantics restored).
+     * The pass is now: [lead < LEAD_MAX] ? pop+publish : skip. The lead is
+     * measured against the WIRE's consumed cursor, so the producer can
+     * never over-drain ups_q (the free-running publish of dp189-dp208 let
+     * the demand chain pop faster than the wire consumed: surplus pairs
+     * were silently overwritten in the last-wins mailbox and the FD feed
+     * chain re-consumed non-advanced host input). The publish cursor
+     * g_csd_ps_seq is the claim source compared by the wire (exact store,
+     * NOT /16 — the /16 witness diet stays only for ps_seq diagnostics).
+     * The mbox_* publish is deleted: the wire no longer reads it; PACE
+     * reports the last frozen values (ps_fresh now counts CLAIMS). */
+    {   unsigned lead = s_produced_local - ps_ldw_consumed();
+        if (lead >= CSD_PS_LEAD)
+        {   /* Ring full: the wire is the pacer. No pop, no publish —
+             * ups_q waits with us. Witness keeps the pass ladder alive. */
+            if ((s_act_n++ & 15u) == 0u) { g_csd_ps_active = csd_ups_active(); }
+            return;
+        }
+    }
+    /* dp225f: DON'T PUBLISH REPEATS. When the engine's out-queue is empty
+     * pop_core returns the held word — publishing it spends a ring slot, a
+     * wire claim, and the pair's SDRAM traffic to deliver a sample the wire
+     * would honestly repeat anyway. ~27% of pass throughput was spent
+     * minting repeats (measured: 181k pairs/s of which ~55k repeats). */
+    if (csd_ups_out_empty() != 0u)
+    {   if ((s_act_n++ & 15u) == 0u) { g_csd_ps_active = csd_ups_active(); }
+        return;
+    }
     unsigned t_p = (s_pass_pm & 16u) ? csd_ups_now() : 0u;   /* REVERT(dp201) */
-    unsigned w0 = (unsigned)csd_ups_pop_active(0u, 0);   /* REVERT(dp198) */
-    unsigned w1 = (unsigned)csd_ups_pop_active(1u, 0);
+    unsigned w0, w1;
+    csd_ups_pop_pair(&w0, &w1);   /* REVERT(dp210): was two csd_ups_pop_active */
     if (s_pass_pm & 16u) { g_csd_p_pop2 += csd_ups_now() - t_p;  /* REVERT(dp201) */
                                   g_csd_p_passn++; }
-    /* REVERT(dp207): publish without the two cross-tile LOADS the
-     * `seq += 1` RMWs implied. WHY: armed 192k needs one producer pass per
-     * wire frame (384,000/s = 260 t at 100 MHz) and, once dp206 made the
-     * occupancy exact, the ring no longer hid a slow pass: measured passes
-     * 379,776/s (263 t) with UBM on every second pass -> 1.1% chronic
-     * shortfall, ps_fresh 343.8k vs wire_n 383.9k (10% honest holds).
-     * The producer is the ONLY writer of the mailbox sequence, so it can
-     * carry the counter in a register and issue two plain STORES: the
-     * odd/even window the reader validates is preserved exactly. Saves the
-     * two shared-memory reads (~15-20 t each) off the zero-margin pass. */
-    s_pub_seq += 1u;
-    g_csd_ps_mbox_seq = s_pub_seq;            /* odd = window open  */
-    g_csd_ps_mbox_w0 = (int)w0;
-    g_csd_ps_mbox_w1 = (int)w1;
-    s_pub_seq += 1u;
-    g_csd_ps_mbox_seq = s_pub_seq;            /* even = pair complete */
+    {   unsigned i = s_produced_local & (CSD_PS_RING - 1u);
+        g_csd_ps_w0[i] = (int)w0;
+        g_csd_ps_w1[i] = (int)w1;
+    }
     s_produced_local++;
-    g_csd_ps_seq = s_produced_local;          /* pass rate (PACE?) */
+    g_csd_ps_seq = s_produced_local;   /* claim cursor (wire compares this) */
+    if ((s_produced_local & 15u) == 0u) { g_csd_ps_produced = s_produced_local; }
     if ((s_act_n++ & 15u) == 0u) { g_csd_ps_active = csd_ups_active(); }
+    /* dp210 2026-11-23: consume-once FOLDED INTO THE PASS (gold semantics:
+     * the deferred-UBM slot was drained once per pass). A burst wake
+     * interleaves its consumes across ~20-40 us while the wire publishes
+     * LIVE publishes; publishes that landed during the sleep window were
+     * already collapsed by last-wins before the wake (the measured
+     * p_ubmn 20k/s deficit) — the burst period was halved (30 -> 15
+     * strides) so half of every window is covered. NEVER a hand-rolled
+     * queue: cadence and the lib_xua buffers own this. */
+    csd_ub_consume_if_new();
+}
+
+/* REVERT(dp209): re-arm cursor reset. Called by csd_ps_thread's unarmed idle
+ * branch (the wire is pass-through while unarmed — g_csd_ps_active 0 — so
+ * single-threaded here). Without this, a re-arm inherits stale cursors and
+ * the first frames claim yesterday's words. */
+void csd_ps_rearm_reset(void)
+{
+    s_produced_local = 0u;
+    g_csd_ps_seq     = 0u;
+    g_csd_ps_consumed = 0u;
+    s_ub_last        = 0u;   /* stale host pair must not re-feed */
 }
 
 /* Consumer — audiohub wire loop, ratio>1 only. ch 0 = L half-frame claims
@@ -240,8 +355,17 @@ static int s_latch0 = 0;               /* consumer-private */
  * thread, same iteration: the L claim below writes both before the R site
  * reads them. */
 int      g_csd_ps_latch1  = 0;
-unsigned g_csd_ps_active  = 0;
+unsigned g_csd_ps_active = 0;
 static unsigned s_claim_n = 0;         /* REVERT(dp187): active refresh div */
+
+int csd_ps_claim_r(void)
+{
+    /* dp225f: R half-frame view. The L claim this iteration latched the
+     * pair; R returns the second word WITHOUT touching the cursor. Inactive
+     * = stock pass-through handled at the site by csd_ups_slot. */
+    if (!g_csd_ps_active) { return 0; }
+    return g_csd_ps_latch1;
+}
 
 int csd_ps_claim(unsigned ch, int w)
 {
@@ -258,8 +382,8 @@ int csd_ps_claim(unsigned ch, int w)
         if (seq != want)
         {
             unsigned i = want & (CSD_PS_RING - 1u);
-            s_latch0 = s_w0[i];
-            g_csd_ps_latch1 = s_w1[i];
+            s_latch0 = g_csd_ps_w0[i];
+            g_csd_ps_latch1 = g_csd_ps_w1[i];
             g_csd_ps_consumed = want + 1u;
             if (seq - want > CSD_PS_RING) { g_csd_ps_repeat++; }
         }
@@ -273,4 +397,71 @@ int csd_ps_claim(unsigned ch, int w)
      * g_csd_ps_latch1 directly; kept so a revert is one line at the site. */
     if (!g_csd_ps_active) { return csd_ups_slot(1u, w); }
     return g_csd_ps_latch1;
+}
+
+/* dp225b 2026-11-24: whole producer pass folded into ONE call. Measured
+ * psw_pass free-run ~117k/s: each pass paid a dozen cross-TU/C calls plus
+ * SDRAM-arbitrated accesses against the wire's core traffic; the feed then
+ * capped below the 192k host rate (engine under-fed -> honest repeats ->
+ * the comb). Inside THIS TU the cursors are local objects: drain bursts
+ * and produce bursts cost one call per pass, not per pair. */
+void csd_ps_pass(void)
+{
+    unsigned k;
+    for (k = 0u; k < 64u; k++)
+    {   int c = csd_ub_consume_if_new();
+        if (c == 0) { break; }
+        if (c < 0)  { (void)csd_ub_consume_if_new(); }   /* one race retry */
+    }
+    /* dp225f: burst 32 -> 63 (the lead cap). The tile's scheduling rate
+     * caps passes at ~5.6k/s (measured, both tiles); pairs/s = passes x
+     * burst, and 5.6k x 32 = 181k < the 239k pair/s the wire claims.
+     * 63 x 5.6k = 353k > 239k with the ring lead 63 still the safety
+     * bound. */
+    for (k = 0u; k < 63u; k++)
+    {   if ((s_produced_local - ps_ldw_consumed()) >= 63u) { break; }
+        csd_ps_produce_pair();
+    }
+}
+
+/* dp225b: .c accessor for the active refresh (XC parallel checker ignores C
+ * bodies; direct write from the producer .xc trips the checker). */
+/* csd_ups_active declared at file top */
+void csd_ps_active_refresh(void) { g_csd_ps_active = csd_ups_active(); }
+
+/* dp225f: producer-clock feed-rate estimator. Called from the producer's
+ * .xc loop with its timer read; all shared reads/writes live here (plain
+ * C) so the XC parallel checker never sees cross-task globals. */
+void csd_ps_note_clock(unsigned tv)
+{
+    extern unsigned g_csd_ft1;         /* csd_ups_block.c: feed-past-gate */
+    static unsigned est_pass, est_t0, est_f0;
+    if (est_pass == 0u) { est_t0 = tv; est_f0 = g_csd_ft1; }
+    if (++est_pass >= 2048u)
+    {   unsigned dt = tv - est_t0;
+        unsigned df = g_csd_ft1 - est_f0;
+        if (dt > 0u && df > 0u)
+        {   /* dp225f: EXACTLY 2 x feed-pair rate (r2: 2 wire frames per
+             * host pair). The mic FFT runs on the HOST clock, so the wire
+             * must run at 2 x host-pair-rate for the upsampled tone to land
+             * at f0; any other stride pitch-shifts the DAC output. */
+            unsigned long long hz = 2ull * ((unsigned long long)df * 100000000ull) / dt;
+            /* dp225f: MAX-HOLD with 1%/window decay. A plain tracking
+             * estimator self-collapses: the floor slows the wire, the
+             * exchange (and therefore the feed) slows with it, the
+             * estimator sees a lower feed rate and lowers the floor
+             * further — measured death spiral to 28k feed / silence.
+             * The TRUE host rate is the MAX attainable feed; decay lets
+             * it follow slow host drift. */
+            if (hz < 96000u) { hz = 0u; }
+            if (hz > 400000u) { hz = 400000u; }
+            {   unsigned cur = g_csd_wire_target_hz;
+                unsigned dec = cur - cur/100u;
+                if ((unsigned)hz > cur) { g_csd_wire_target_hz = (unsigned)hz; }
+                else if (cur != 0u && (unsigned)hz < dec && hz > 96000u)
+                {   g_csd_wire_target_hz = dec; }
+            }
+        }
+        est_pass = 0u;
+    }
 }

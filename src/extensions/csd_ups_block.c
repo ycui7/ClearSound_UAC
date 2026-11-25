@@ -452,6 +452,21 @@ unsigned g_csd_bp = 0u;                                       /* REVERT(bench): 
 unsigned csd_ups_dbg_want1(void){ return g_csd_want1; }
 unsigned csd_ups_dbg_armgen(void){ return s_arm_gen; }
 unsigned csd_ups_dbg_pushn(void){ return (unsigned)ups_pushn; }
+/* dp211 2026-11-23: the INFO emit silently drops its tail args (237 args vs
+ * 185 specifiers in the first snprintf — the documented silent-field-drop
+ * failure mode, now at scale: pushn/fidx/bp NEVER reached the wire). Add a
+ * dedicated FD-engine query instead of renumbering INFO positions. */
+unsigned csd_ups_dbg_filled(void){ return (unsigned)ups_filled; }
+unsigned csd_ups_dbg_popn0(void) { return (unsigned)ups_rd[0]; }
+unsigned csd_ups_dbg_ratecalls(void){ return s_rate_calls; }
+unsigned csd_ups_dbg_lastrq(void){ return s_last_req_hz; }
+unsigned csd_ups_dbg_raterej(void){ return s_rate_rejects; }
+unsigned csd_ups_dbg_inhz(void){ return s_in_hz; }
+unsigned csd_ups_dbg_gate(void)
+{   return (s_enabled ? 1u : 0u) | (s_want ? 2u : 0u) | (s_bypass ? 4u : 0u) |
+           ((s_out_hz == 0u) ? 8u : 0u) | ((ups_phases == 0u) ? 16u : 0u) |
+           (s_rec_on ? 32u : 0u) | (s_probe_on ? 64u : 0u); }
+
 unsigned csd_ups_dbg_fidx(void){ return (unsigned)ups_fidx; }
 unsigned csd_ups_dbg_refusals(void){ return s_refusals; }
 unsigned g_csd_ft4 = 0u, g_csd_ft5 = 0u;                    /* REVERT(bench) */
@@ -577,6 +592,7 @@ unsigned s_probe_datac = 0u;           /* blob[0][0][0] at compute entry    */
 unsigned s_probe_feedoff;              /* payload rows already in the seed  */unsigned s_probe_wchk;                   /* window checksum, task-maintained */
 unsigned s_probe_wchk_snap;              /* window checksum, pop core at snap  */
 unsigned s_probe_wchk_run;               /* running checksum at same instant */
+unsigned csd_ub_feed_owner = 0u;   /* dp214/215: set by the audiohub inline drain (tile[1] DS — read by csd_dsp.xc fallback + FD? witness); REVERT with dp214 */
 unsigned s_feedcalls_task;               /* csd_ups_feed calls from EQ task   */
 unsigned s_feedcalls_audio;              /* csd_ups_feed calls from audio path */
 #define CSD_PROBE_EV 1024u            /* dp157: feed events outgrew 4096 with FRING 4608 */
@@ -833,6 +849,14 @@ void csd_ups_set_enabled(unsigned enable)   /* not 'on': reserved in XC */
 }
 unsigned csd_ups_is_enabled(void) { return s_enabled; }
 
+/* dp217 2026-11-23: raw armed truth for the board pacer. csd_ups_get_want()
+ * is RELEASE-pinned to 0 (the shipping relay guarantee — the board must not
+ * force the fabric rate on a shipping image); this accessor is for the ONE
+ * bench-build consumer: the wire ratio follows the STATe ladder even when
+ * the codec OSF grant is dead (bench ES9219 grant path never sets
+ * s_enabled — same root the feed gate had to work around, csd_ups_feed). */
+unsigned csd_ups_want_raw(void) { return s_want; }
+
 /* ---- data plane ---------------------------------------------------------
  */
 
@@ -842,6 +866,7 @@ unsigned csd_ups_is_enabled(void) { return s_enabled; }
  * client is NOT gated on this (owner directive 2026-11-10, one block engine
  * / two independent clients): csd_dsp_frame runs the shelf on every host
  * rate and feeds the pair here; csd_ups_slot pops only when this is 1. */
+unsigned g_csd_ups_conds = 0;   /* dp225e: csd_ups_active() condition bits */
 unsigned csd_ups_active(void)
 {
 #if CSD_REL
@@ -850,9 +875,17 @@ unsigned csd_ups_active(void)
      * words verbatim at every rate. */
     return 0u;
 #else
-    return (ups_heap_ok != 0u && s_want && s_enabled && s_out_hz != 0u
-            && !s_bypass && ups_phases != 0u)
-           ? 1u : 0u;
+    /* dp222 2026-11-23 (owner: our threads, our truth; the OSF grant path
+     * is dead on this bench — third gate bitten by it: ratio (dp217), feed
+     * (dp212), wire-owner (here)). Armed truth = the STATe ladder (s_want)
+     * + a real family wire rate + a loaded bank. s_enabled (grant) stays in
+     * the RELEASE branch untouched (relay guarantee unchanged). */
+    {   unsigned c = (ups_heap_ok != 0u) | ((s_want != 0u) << 1) |
+                   ((s_out_hz != 0u) << 2) | ((!s_bypass) << 3) |
+                   ((ups_phases != 0u) << 4);
+        g_csd_ups_conds = c;   /* dp225e: per-condition witness (transient) */
+        return (c == 0x1Fu) ? 1u : 0u;
+    }
 #endif
 }
 
@@ -898,6 +931,38 @@ unsigned csd_ups_armed(void)      /* armed regardless of the codec grant */
 #endif
 }
 
+/* dp223d: snapshot of the exact armed inputs, sampled in THIS TU (no
+ * cross-file witness can be trusted for these — see the dp-register
+ * reference). Read via the getter below from the diag handler. */
+unsigned g_csd_reconfig_n = 0;   /* dp224b: arm-edge reconfig count */
+unsigned g_csd_arm_snap[3];
+void csd_ups_force_reconfig(void)   /* dp224: producer calls at the arm
+    * edge. ROOT CAUSE of the armed 'comb tone' (measured 11-24): at boot
+    * with want=1 but NO stream, consume->feed ran on the never-published
+    * (zero) slot pair; every 128 zero pairs committed a block of zeros and
+    * nothing popped (engine pop-gate waits for commits 'since reset' that
+    * the free-running boot feed had already burned). The delivery ring
+    * filled to 2,096,896 words (pushn 8191, filled == pushn*256 EXACT),
+    * the writer capacity-guard spun forever, the producer task froze, and
+    * the wire spent the armed leg emitting STALE delivery-ring memory via
+    * the honest-repeat branch — the -41 dBFS 'tone' + 172 Hz sideband
+    * family was ring garbage, not the FIR. The epoch-clear exists
+    * (ups_reconfigure_inner) but only the board rate-change path calls it;
+    * the boot storm happens before any rate change. */
+{
+    g_csd_reconfig_n++;
+    ups_reconfigure_inner();
+}
+
+unsigned csd_ups_get_arm_snap(unsigned idx)   /* all-by-value: XC linker
+    rejects pointer-parameter prototypes shared between .xc and .c */
+{
+    g_csd_arm_snap[0] = (unsigned)s_want;
+    g_csd_arm_snap[1] = (unsigned)s_out_hz;
+    g_csd_arm_snap[2] = (unsigned)s_bypass;
+    return (idx < 3u) ? g_csd_arm_snap[idx] : 0u;
+}
+
 /* One host pair in, at host-pair cadence. The frame is left untouched --
  * the wire words come out of csd_ups_slot at LRCLK cadence, which is the
  * only way to span the host-rate/wire-rate gap without writing ratio words
@@ -919,7 +984,16 @@ void csd_ups_feed(int l, int r)
     if (s_probe_on && !s_rec_on) { s_abs_calls++; }
     const unsigned R = ups_phases;
 
-    if (!s_enabled || !s_want) return;           /* client off: nothing to do */
+    /* dp212 2026-11-23 ROOT CAUSE (definitive, FD? witnesses): on this bench
+     * build the codec OSF grant is RELEASE-pinned to NOT-granted, so
+     * csd_ups_set_enabled never sets s_enabled. Armed truth is s_want (set by
+     * the STATe ladder); with the grant dead, the old gate killed EVERY feed
+     * (pushn/fidx/filled all 0 while feedcalls ran 895k/s), the ring stayed
+     * empty, and the wire zero-order-held — the true source of the "silent /
+     * comb / rattle" family at 192k r2. The wire-owner decision (does the
+     * engine own the wire words) still honours s_enabled elsewhere; here the
+     * armed state must always flow data into the FIR. */
+    if (!s_want) return;                          /* client off: nothing to do */
     if (s_bypass || s_out_hz == 0u || R == 0u) {
         s_refusals++;                          /* on but refused: count, no queue */
         return;
@@ -1378,7 +1452,7 @@ int csd_ups_slot(unsigned ch, int w)
  * transiently off, this body pops an unprepared ring: occ==0 gives the
  * honest last-repeat pair, which the wire ignores (it reads the mailbox
  * only while g_csd_ps_active). */
-int csd_ups_pop_active(unsigned ch, int w)
+static int pop_core(unsigned ch, int w)
 {
     /* Session 14: seed pop-side LEAD at arm/reconfigure.
      * The wire pops from the instant the client arms, but the engine
@@ -1474,7 +1548,7 @@ int csd_ups_pop_active(unsigned ch, int w)
      * rd legitimately stalls (honest repeat) -- the witnesses tell. */
     s_pop_in_commit = 1u;              /* dp118: capture mutual exclusion */
     const unsigned phase = ups_rd[ch] & (ups_phases - 1u);
-    if (ch == 1u) g_csd_pop_phase_live = phase;
+    if (ch == 1u && (s_pass_pm & 64u)) g_csd_pop_phase_live = phase; /* dp209: PROBE-gated (was per-pass remote stw) */
     /* REVERT(dp206): emptiness from the monotone pair (exact across cores). */
     if (ups_occ_of(ch) == 0u) {
         s_repeats[ch]++;               /* starvation, visible on the host */
@@ -1494,7 +1568,10 @@ int csd_ups_pop_active(unsigned ch, int w)
          * with ups_occ_of(c)+fill on the next line; snap/diag readers use
          * ups_occ_of(). One cross-tile store per pop (2/pass) off the
          * 260 t pass for a value no decision and no witness consumes. */
-        s_pops[ch]++;
+        /* REVERT(dp209): PROBE-gated. INFO popsL/R is a bench witness;
+         * the per-pass cross-DS RMW (~2x18 t/pass pair) was hot-path
+         * payload. repsL/R + fresh/wire deltas carry the verdict. */
+        if (s_pass_pm & 64u) { s_pops[ch]++; }
         /* Session 16: hold-last is the last POPPED live word, not the last
          * pushed word. The commit-time assignment made a starvation repeat
          * emit a FUTURE-block sample (a content lie); repeating the last
@@ -1817,6 +1894,25 @@ int csd_ups_pop_active(unsigned ch, int w)
     if ((s_pops[0] + s_repeats[0]) >= s_probe_pop_n)
         s_pop_in_commit = 0u;
     return (int)v;
+}
+
+/* dp210 2026-11-23: wrappers. pop_active keeps the exact public contract;
+ * pop_pair is the producer's single-callsite form (produce_pair holds the
+ * armed gate and refreshed g_csd_ps_active /16, so the two calls pay no
+ * cross-TU hop and pop_core — file-static — inlines into both). Saves one
+ * call frame + argument marshalling per pair on the zero-margin pass
+ * (measured pass cycle 343 t, pop witness 173 t/pair). */
+int csd_ups_pop_active(unsigned ch, int w) { return pop_core(ch, w); }
+
+unsigned csd_ups_out_empty(void)   /* dp225f: producer's pre-pop gate */
+{
+    return (ups_occ_of(0u) == 0u || ups_occ_of(1u) == 0u) ? 1u : 0u;
+}
+
+void csd_ups_pop_pair(unsigned *w0, unsigned *w1)
+{
+    *w0 = (unsigned)pop_core(0u, 0);
+    *w1 = (unsigned)pop_core(1u, 0);
 }
 
 /* ---- diagnostics (read-only views for the SCPI/MIDI surface) ----------- */

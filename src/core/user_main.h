@@ -78,7 +78,8 @@ extern unsafe chanend uc_audiohw_diag;
  * re-pointed to the shifted slot below or it silently binds the wrong end.
  * Acceptance: xobjdump --resources tile[0] chanend bound drops by 4 (one
  * dead pair + the volume pair) and SCPI REG?/VOLume:TRIM? still answer. */
-#define USER_MAIN_DECLARATIONS              chan c_audiohw[3]; \
+#define USER_MAIN_DECLARATIONS              chan cCsdPop, cCsdUbR;   /* dp225e: 2 chans (UbL retired — chres scarcity) */ /* dp225: channel data-plane. Passed as CHAN (not subscripts) into the two threads that need them: usb_audio_io (wire, A side) and csd_ps_thread_t1 (producer, B side) — each conversion allocates that thread's peer end (vendor spdif_tx idiom; multi-tile main forbids any other resource use). */ \
+                                            chan c_audiohw[3]; \
                                             chan xscope_data_in;
 
 // xscope_host_data(xscope_data_in); must be place before the first par statement. otherwise all sorts of build error. 
@@ -135,6 +136,8 @@ extern unsafe chanend uc_audiohw_diag;
  * The endpoint is converted in the tile[1] par scope, inside unsafe{}, exactly
  * like the proven `uc_audiohw1 = (chanend) c_audiohw[0];`. No global, no bind
  * statement, so there is no way to reach the task with an unbound chanend. */
+void csd_ps_thread(void);      /* dp223: tile[0] no-op shell (dp225: takes NO end — a bound peer would steal messages) */
+void csd_ps_thread_t1(chanend, chanend);   /* dp223: the producer, tile[1] core; dp225: called WITH chan => peer end auto-binds */
 #define CSD_PW_TILE1_ENTRY                  unsafe { csd_PowerAssistantTask((chanend) c_audiohw[2]); }
 #else
 #define CSD_PW_TILE1_ENTRY
@@ -162,6 +165,25 @@ extern unsafe chanend uc_audiohw_diag;
 #undef CSD_EQ_TILE1_ENTRY
 #define CSD_EQ_TILE1_ENTRY
 #endif
+/* dp209 2026-11-23: wire-word producer relocated to tile[1]. The dp161
+ * branch in main.xc put csd_ps_thread on tile[0], the bit-timed wire core:
+ * cooperative scheduling means the producer's ~241 t of work (2 remote pops
+ * of tile[1] state + UBM + publish) lands INSIDE the wire's 274 t frame
+ * budget, so the measured pass cycle was wake+work-bound at 339 t regardless
+ * of the servo stride (window witness tdl/256 = 339 t, stride pinned 290,
+ * p_err clamped -64): a structural 19 % under-feed at 192k -> periodic
+ * hold-last repeats = the 122.88 Hz comb. On tile[1] the pop state is LOCAL
+ * (the feed/EQ tasks own it) and the pass no longer contends with LRCLK
+ * generation. dp161's enumeration stall was from AudioHub-INTERNAL par;
+ * a top-level tile[1] par entry is the proven EQ-task pattern. REVERT:
+ * restore the main.xc branch and delete this macro + its use. */
+/* dp209: unconditional (the board ships CSD_UPS_ASYNC-only; a guard here
+ * would silently delete the only producer — dp167: EXTRA_BUILD_FLAGS never
+ * reach compilation, and CSD_UPS_ASYNC is a per-.xc-file define).
+ * dp209b: REMOVED again — tile[1] measured NO pass-cycle change (the pop's
+ * cross-DS traffic is remote either way) and the core hosts EQ/feed bursts;
+ * the thread lives in main.xc's own tile[0] branch. NEVER spawn both. */
+#define CSD_PS_TILE1_ENTRY  { csd_ps_thread_t1(cCsdPop, cCsdUbR); }  /* dp225: ends allocated at main.xc par entry (same scope) */   /* dp223: producer on its OWN tile[1] core — all-LOCAL DS (queue, slot, engine), block compute never touches the wire core (owner: our code, our threads) */
 
 #define USER_MAIN_CORES     xscope_host_data(xscope_data_in); \
                             on tile[1]: {\
@@ -173,6 +195,7 @@ extern unsafe chanend uc_audiohw_diag;
                                                 }\
                                                 CSD_PW_TILE1_ENTRY\
                                                 CSD_EQ_TILE1_ENTRY\
+                                                CSD_PS_TILE1_ENTRY\
                                             }\
                                         }\
     \

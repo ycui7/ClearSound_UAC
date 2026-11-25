@@ -120,6 +120,7 @@ unsigned g_csd_ubm_calls;
  * call boundary.
  * REVERT: delete these and the UBM feed block + the .c/.h producers. */
 unsigned csd_feed_owner = 0u;
+extern unsigned csd_ub_feed_owner;   /* dp214 csd_ps_ring.c: producer owns FIR feed when armed preset0 */
 int      csd_feed_w0    = 0;
 int      csd_feed_w1    = 0;
 /* EXPERIMENT 11.11.34 dual echo (REVERT with the tap): the pop-word pair
@@ -515,7 +516,11 @@ void csd_dsp_frame(unsigned *s)
      * no per-frame CALL for this (a csd_eq_dbg_eng() call silenced plain
      * playback; a global mirror starved armed FD — both 2026-11-22). */
     const unsigned engine_off = (csd_dsp.preset == 0u);
-    if (!eq_pushed &&
+    /* dp214 2026-11-23: when the producer owns the FIR feed (armed preset
+     * 0 — it feeds the REAL UBM-consumed host pair from csd_ps_ring.c),
+     * this caller's words are stale: feeding them zero-order-held the
+     * engine input (measured ft4==ft1, all zero pairs). Stand down. */
+    if (!eq_pushed && !csd_ub_feed_owner &&
         (!csd_feed_owner || (g_csd_probe_mask & 32u) || engine_off) &&
         (!csd_ups_armed() || (g_csd_probe_mask & 32u) || engine_off)) {
         g_csd_fb2++;   /* REVERT(bench): fallback feed taken */
@@ -818,6 +823,35 @@ unsigned csd_dsp_diag_count(void) { return csd_diag_frames; }
 void UserBufferManagement(unsigned sampsFromUsbToAudio[],
                           unsigned sampsFromAudioToUsb[])
 {
+    /* dp220 2026-11-23 (owner directive: 'all the code we added are
+     * diagnostic, non-critical. don't let non-critical code ruin critical
+     * timed code from xmos'). The vendor calls this weak hook inline at
+     * EVERY exchange (fabric rate) on the bit-timed audio core. The full
+     * body below (preset adopt / idle-power / EQ-diag witnesses / mic
+     * mirror) is control- and diagnostic-plane work — on the armed family
+     * path it must not run there. Fast path: hand the pair to the FD FIR
+     * (the one critical thing), stand the stale fallback feed down, and
+     * return. ~15 t, no channel ops, no remote reads. */
+    if (csd_ups_want_raw()) {
+        /* dp223 (owner architecture: 'our code stacked on our own 1-2
+         * threads, no precision timing, must not burden the vendor wire'):
+         * publish the raw host pair into the single seqlock slot — four
+         * plain stores, zero compute. The producer thread drains the slot
+         * and runs UserBufferManagement + the FD feed + the block compute
+         * THERE. (dp222 fed inline HERE and starved the fabric loop:
+         * exchange collapsed 384k->154k, LRCLK under-ran, codec unlocked,
+         * silence with the whole witness chain moving.) */
+        csd_ub_feed_owner = 1u;
+        /* NO slot publish here: this file's data-space copy is NOT the one
+         * the wire and the producer share (dp-relative asm from a TU whose
+         * DS lives on the other tile writes a dead mirror — measured:
+         * ubmn froze at the boot prefill while the st.h publisher ran).
+         * The cadence publisher in xua_audiohub_st.h (bound to the audiohub
+         * task DS, same as the queue and the claim) already publishes this
+         * exact pair every host frame. Here: mark owner, do nothing else,
+         * return — zero compute on the wire. */
+        return;
+    }
 #ifdef CSD_EQ_DIAG_WITNESS
     /* REVERT(dp204): bit5-gated (was unconditional under the build flag).
      * UBM runs on the audiohub core once per frame: at ratio 1 this RMW
