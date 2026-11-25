@@ -3457,7 +3457,7 @@ extern unsigned g_csd_ups_conds;   /* dp225e */
     arm_w = csd_ups_get_arm_snap(0u);
     arm_hz = csd_ups_get_arm_snap(1u);
     arm_bp = g_csd_ups_conds;   /* dp225e: condition bits (csd_ups_block.c) */
-    char buf[768];
+    char buf[1024];   /* dp225g: 768 truncated the 47-field tail (fields ~40+ lost/reordered in dumps) */
     int n = snprintf(buf, sizeof(buf), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u",
                      csd_ups_dbg_pushn(), csd_ups_dbg_fidx(),
                      csd_ups_dbg_filled(), csd_ups_dbg_popn0(),
