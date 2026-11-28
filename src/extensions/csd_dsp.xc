@@ -371,6 +371,30 @@ void csd_dsp_frame(unsigned *s)
 
     unsigned n = csd_dsp.n;
     unsigned eq_pushed = 0u;   /* 1 = frame handed to the EQ task (it feeds) */
+    /* REVERT(csd-armed-passthrough 2026-11-28): DSP band OFF + resampler
+     * ARMED must still reach the feed.
+     * WHY (measured on diag twin 12be939c, armed 192k, DIAG:DSP:PRESet 0 —
+     * the bench's standard stimulus config): this gate is the ONLY route into
+     * the EQ task, and the EQ task is the ONLY legal writer of csd_ups_feed
+     * while armed (csd_dsp.xc feed guard below). With preset 0 the block is
+     * skipped, eq_pushed stays 0, the audio-core feed is refused by
+     * `!csd_ups_armed()`, so csd_ups_feed was NEVER called: INFO? read
+     * feed_enter=0, blocks=0, pops=0 and the wire carried the producer's
+     * lead-gate hold word (zeros) for the whole stream. Every "the armed
+     * engine emits nothing" verdict was taken in exactly this configuration.
+     * WITH preset 2 the same image streams: blocks 14127, pops 3.4M,
+     * tap_fires 1.94M, captured wire tap non-zero at full scale.
+     * CHANGE: when the band is OFF (preset 0) and the feed owner mirror says
+     * the resampler owns the frame, pass the pair through csd_eq_handoff so
+     * it is enqueued to the task unmodified (handoff's !engaged branch
+     * returns l untouched), and the task feeds it.
+     * COST: one load (csd_feed_owner) per frame when the band is OFF; the
+     * handoff call happens only while the resampler is armed.
+     * REVERT: delete this if block (restores the old skip). */
+    if (!csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset == 0u && csd_feed_owner) {
+        (void)csd_eq_handoff(s[0], s[1]);   /* armed + band off: enqueue only */
+        eq_pushed = csd_eq_pushed;
+    }
     if (n != 0u && !csd_dsp.dsd && !csd_dsp.dop && csd_dsp.preset != 0u) {
         unsigned h = csd_dsp.head;
         if (csd_dsp.preset == 1u) {
@@ -1206,7 +1230,14 @@ void csd_dsp_eq_task(void)
         unsigned s[2];
         s[0] = (unsigned)csd_eq_take_l();
         s[1] = (unsigned)csd_eq_take_r();
-        CSD_ENGINE_FRAME(s);
+        if (CSD_ENGINE_READY()) { CSD_ENGINE_FRAME(s); }
+        /* REVERT(csd-armed-passthrough 2026-11-28): guard added. WHY: the
+         * armed band-off path enqueues frames for the FEED while the engine
+         * is CLEARED (preset 0 runs CSD_ENGINE_CLEAR, which sets fd_rate=-1),
+         * and csd_dsp_fd_frame indexes csd_dsp_fd_rates[fd_rate] -- an
+         * out-of-range read that would emit garbage. READY==0 now means
+         * pass-through: the pair reaches csd_ups_feed unchanged, which is
+         * exactly what a band-OFF stream must do. REVERT: drop the if. */
         csd_eq_take_commit(s[0], s[1]);
 #ifdef CSD_EQ_DIAG_WITNESS
         eqt :> e1;

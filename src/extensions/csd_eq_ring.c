@@ -55,7 +55,24 @@ unsigned csd_eq_handoff(unsigned l, unsigned r)
          * flow-controls. Measured 11.12.8: leaving this path inline gave
          * feed_enter-blocks==1 and a frozen feed_in_pc — dual-writer
          * corruption of the fd FIR state within one adoption window. */
-        if (csd_ups_armed()) goto enqueue;
+        if (csd_ups_armed()) {
+            /* REVERT(csd-armed-passthrough 2026-11-28): flow-control the
+             * ARMED band-off enqueue WITHOUT SPINNING. WHY: armed + preset 0
+             * is now a steady state (csd_dsp.xc passes the pair here so the
+             * EQ task -- the only legal feed writer -- drains it), and an
+             * unconditional enqueue into a full ring wraps wr_loc over unread
+             * slots, silently reordering the feed.
+             * MEASURED: the first form of this guard SPUN on the ring cap
+             * (bounded 20 000 iterations) -- that runs on the BIT-TIMED AUDIO
+             * CORE, and image bf25d279 (which carried the spin) smeared a
+             * 1 kHz tone into a 46.9 Hz comb (peak 952 Hz, margin 18 dB)
+             * while the identical build without it was gate-clean (1000.5 Hz,
+             * margin 125 dB). A spin here is forbidden by this file's own
+             * cross-core wait-cycle note. The guard is therefore a single
+             * non-blocking fullness test: full -> DROP this frame (the
+             * resampler honest-repeats), never overwrite, never wait. */
+            if ((wr_loc - rd) < CSD_EQ_RING_LEN) goto enqueue;
+        }
         return l;
     }
     /* New engine epoch (the task bumped gen at adoption): rebase the
